@@ -14,6 +14,9 @@ repair-env.bat
 # PyInstaller side; this is Inno Setup's own default output folder).
 installer/Output/
 
+# Local archive of superseded installer builds -- never published or tracked.
+outputs/
+
 # Local project handoff file - never commit or release
 CLAUDE.md
 

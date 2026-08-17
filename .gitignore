@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.log
+uv.lock
+build/
+dist/
+
+# MSIX-sandboxed dev-tool workaround, not needed by a normal uv install.
+# Kept on disk for local use, just never published.
+repair-env.bat
+
+# Installer build output (PyInstaller's dist/ above already covers the
+# PyInstaller side; this is Inno Setup's own default output folder).
+installer/Output/

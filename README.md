@@ -4,27 +4,12 @@ Hold a key anywhere in Windows, speak, release. The text appears in whatever
 you were typing in. Transcription runs on this machine — no account and no
 cloud transcription. Speech-model files may download the first time they are used.
 
-## What's new in v0.2.3-beta.1
+## What's new in v0.2.4-beta.1
 
-Updates no longer download in the background the moment a check finds one —
-Dictate now shows "Update available," and downloads, verifies, and installs
-only once you click it, with real progress and no separate "now click again
-to install" step afterward. A timing bug that could make "Check for
-updates" silently do nothing when clicked is fixed. Dictate now tells you
-when it's open and ready, and again if you try to open a second copy while
-it's already running; a new "Also show Windows notifications" toggle in
-Settings mirrors any of these as a normal Windows notification too, and
-longer notification text no longer gets cut off mid-sentence.
-
-The installer is about 90% smaller — 93 MB instead of ~1.07 GB — since GPU
-acceleration files are no longer bundled into every install regardless of
-whether the machine has a card. Setup now detects an NVIDIA card and offers
-to enable GPU acceleration, downloading the files on demand the first time
-Dictate actually needs them, exactly as switching to GPU from Settings
-already did. Uninstalling now also removes your settings, so a later
-reinstall starts completely fresh, first-run screen included. Privacy is
-now a page inside Settings instead of a separate window, and there's a
-GitHub link next to it.
+Notifications are now short and consistent across Dictate's floating bar and
+Windows notifications when that option is enabled. Speech models now live in
+Dictate's own app-data folder, with an **Open model folder** button in
+Settings.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete version history.
 Read [PRIVACY.md](PRIVACY.md) for exactly what Dictate processes and what its
@@ -104,7 +89,7 @@ app-data folder rather than beside the source code.
 | Setting | What it does |
 | --- | --- |
 | Processing | CPU, GPU, or automatic. If installed without GPU support, switching to GPU downloads the acceleration files first (about 1.3 GB from PyPI). |
-| Speech model | `tiny.en` through `large-v3-turbo`; `small.en` is the default |
+| Speech model | `tiny.en` through `large-v3-turbo`; `small.en` is the default. **Open model folder** shows Dictate's private model cache. |
 | Open settings | Click and press a keyboard or mouse combination, default `ctrl+alt+d` |
 | Always show activity bar / Bar position | Control when and where the bar appears |
 
@@ -240,7 +225,7 @@ in the dependency list — it would be about 2.5 GB of install for one
 ## Setup from scratch
 
 Needs [uv](https://docs.astral.sh/uv/). Models download themselves on first use
-and cache in `%USERPROFILE%\.cache\huggingface`.
+and cache in `%APPDATA%\dictate\models`, separate from other apps.
 
 ```
 uv venv --python 3.12 .venv

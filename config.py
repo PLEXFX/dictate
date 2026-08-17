@@ -18,6 +18,15 @@ from pathlib import Path
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "dictate"
 CONFIG_PATH = CONFIG_DIR / "settings.json"
 
+
+def model_dir() -> Path:
+    """Return Dictate's private speech-model cache.
+
+    Keeping downloads beneath the app's own data folder makes them easy to
+    find and keeps them separate from another app's Hugging Face cache.
+    """
+    return CONFIG_DIR / "models"
+
 # Model choices, smallest first. The second value is the rough resident cost
 # once loaded -- shown in the settings window so the tradeoff is visible at the
 # point of choosing rather than buried in a readme.

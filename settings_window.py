@@ -12,6 +12,7 @@ Changes save automatically; model-affecting changes visibly reload the engine.
 from __future__ import annotations
 
 import ctypes
+import os
 from dataclasses import asdict, replace
 
 from PySide6.QtCore import Property, Qt, QPropertyAnimation, QTimer, QUrl, Signal
@@ -1396,7 +1397,17 @@ class SettingsWindow(QWidget):
         self.model_card = _card("Speech model", "Model details", self.model_box)
         self.model_desc_label = self.model_card.findChild(QLabel, "desc")
 
-        advanced_col.addWidget(_settings_group(device_row, self.model_card))
+        self.open_models_btn = QPushButton("Open model folder")
+        self.open_models_btn.clicked.connect(self._open_model_folder)
+        model_storage_row = _card(
+            "Speech-model files",
+            "Stored only for Dictate, separate from other apps and downloads.",
+            self.open_models_btn,
+        )
+
+        advanced_col.addWidget(
+            _settings_group(device_row, self.model_card, model_storage_row)
+        )
 
         behavior_header = QLabel("APP BEHAVIOR")
         behavior_header.setProperty("role", "section")
@@ -1791,6 +1802,15 @@ class SettingsWindow(QWidget):
             f"Tap {key} instead of holding it and Dictate keeps recording. "
             f"Tap again to finish, or press Esc to discard it."
         )
+
+    def _open_model_folder(self) -> None:
+        """Open Dictate's private model cache, creating it if needed."""
+        folder = config.model_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            os.startfile(folder)
+        except OSError:
+            self.save_status.setText("Could not open the model folder")
 
     def _refresh_tap_lock_desc(self, *_args) -> None:
         if self.tap_lock_desc_label is not None:

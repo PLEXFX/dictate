@@ -25,6 +25,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+import config
 import gpu_runtime
 
 # Model downloads go through huggingface_hub (pulled in by faster_whisper).
@@ -254,7 +255,10 @@ def _predownload_with_progress(
 
     try:
         huggingface_hub.snapshot_download(
-            repo_id, allow_patterns=_MODEL_ALLOW_PATTERNS, local_files_only=True
+            repo_id,
+            allow_patterns=_MODEL_ALLOW_PATTERNS,
+            cache_dir=config.model_dir(),
+            local_files_only=True,
         )
         return  # already cached -- nothing to download, nothing to report
     except Exception:
@@ -264,6 +268,7 @@ def _predownload_with_progress(
         huggingface_hub.snapshot_download(
             repo_id,
             allow_patterns=_MODEL_ALLOW_PATTERNS,
+            cache_dir=config.model_dir(),
             tqdm_class=_make_progress_reporter(on_bytes),
         )
     except Exception:
@@ -391,13 +396,23 @@ class Engine:
             from faster_whisper import WhisperModel
 
             try:
-                self._model = WhisperModel(size, device=device, compute_type=compute_type)
+                self._model = WhisperModel(
+                    size,
+                    device=device,
+                    compute_type=compute_type,
+                    download_root=config.model_dir(),
+                )
             except Exception:
                 # A GPU load can fail after detection succeeded (VRAM already
                 # spoken for, driver mismatch). Falling back beats failing.
                 if device != "cpu":
                     self._set_state(LOADING, f"{size} on CPU (GPU load failed)")
-                    self._model = WhisperModel(size, device="cpu", compute_type="int8")
+                    self._model = WhisperModel(
+                        size,
+                        device="cpu",
+                        compute_type="int8",
+                        download_root=config.model_dir(),
+                    )
                     wanted = (size, "cpu")
                 else:
                     raise
@@ -596,7 +611,10 @@ class PreviewEngine:
             from faster_whisper import WhisperModel
 
             self._model = WhisperModel(
-                PREVIEW_MODEL_SIZE, device="cpu", compute_type="int8"
+                PREVIEW_MODEL_SIZE,
+                device="cpu",
+                compute_type="int8",
+                download_root=config.model_dir(),
             )
             return self._model
 

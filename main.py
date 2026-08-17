@@ -767,20 +767,11 @@ class App:
         if enhanced and self._enhanced_benchmark_pending:
             self._enhanced_benchmark_pending = False
             if measured < 0:
-                message = (
-                    "Hardware limit: Enhanced preview could not start. "
-                    "Turn it off to keep using normal preview."
-                )
+                self._notify("Enhanced preview couldn't start.")
             elif measured > ENHANCED_PREVIEW_SLOW_SECONDS:
-                message = (
-                    f"Hardware limit detected: Enhanced preview took {measured:.1f}s. "
-                    "Normal preview may feel smoother on this PC."
-                )
+                self._notify("Enhanced preview may be slow.")
             else:
-                message = f"Enhanced preview ready — measured {measured:.2f}s per update."
-            self.tray.showMessage(
-                APP_NAME, message, QSystemTrayIcon.Information, 6000
-            )
+                self._notify("Enhanced preview is ready.", tone="success")
         if generation != self._preview_generation or not self._dictation_active:
             return
         if text:
@@ -844,7 +835,9 @@ class App:
 
     # --- open/already-running notices ---
 
-    def _notify(self, text: str, tone: str = "info", on_click=None) -> None:
+    def _notify(
+        self, text: str, tone: str = "info", on_click=None, duration_ms: int = 5000
+    ) -> None:
         """Show Dictate's own bar toast, and mirror it to a system tray
         balloon too when the user has opted into that in Settings.
 
@@ -853,13 +846,14 @@ class App:
         notification (an update available) still has exactly one place to
         click it regardless of whether system notifications are also on.
         """
-        self.bar.notify(text, tone=tone, on_click=on_click)
+        self.bar.notify(text, tone=tone, on_click=on_click, duration_ms=duration_ms)
         if self.settings.system_notifications_enabled:
-            self.tray.showMessage(APP_NAME, text, QSystemTrayIcon.Information, 5000)
+            icon = QSystemTrayIcon.Warning if tone == "error" else QSystemTrayIcon.Information
+            self.tray.showMessage(APP_NAME, text, icon, duration_ms)
 
     def _show_ready_notice(self) -> None:
         key = hotkeys_mod.format_combo(self.settings.ptt_key)
-        self._notify(f"Dictate's ready to go — hold {key} to talk", tone="success")
+        self._notify(f"Ready. Hold {key} to talk.", tone="success")
 
     def _check_running_notice(self) -> None:
         """Poll the named event a second launch attempt sets.
@@ -875,8 +869,7 @@ class App:
         if ctypes.windll.kernel32.WaitForSingleObject(handle, 0) != 0:
             return
         ctypes.windll.kernel32.ResetEvent(handle)
-        key = hotkeys_mod.format_combo(self.settings.ptt_key)
-        self._notify(f"Dictate's already running — hold {key} to talk", tone="info")
+        self._notify("Dictate is already open.", tone="info")
 
     def _apply_settings(self, settings: config.Settings) -> None:
         old = self.settings
@@ -897,22 +890,9 @@ class App:
         )
         if enhanced_turned_on:
             self._enhanced_benchmark_pending = True
-            threads, ram_gib, limited = preview_hardware()
-            hardware = f"{threads} CPU threads"
-            if ram_gib:
-                hardware += f", {ram_gib:.0f} GB RAM"
-            if limited:
-                message = (
-                    f"Hardware limit warning — {hardware}. Enhanced preview may lag; "
-                    "Dictate will measure it while you speak."
-                )
-            else:
-                message = (
-                    f"Enhanced preview is on — {hardware}. The Base speech model "
-                    "downloads on first use, then Dictate measures its speed."
-                )
-            self.tray.showMessage(
-                APP_NAME, message, QSystemTrayIcon.Information, 6500
+            _threads, _ram_gib, limited = preview_hardware()
+            self._notify(
+                "Enhanced preview may be slow." if limited else "Enhanced preview is on."
             )
         elif old.enhanced_preview_enabled and not settings.enhanced_preview_enabled:
             self._enhanced_benchmark_pending = False
@@ -959,20 +939,20 @@ class App:
         work Dictate did not create.
         """
         if self._undo_target is None:
-            return "there is nothing to undo"
+            return "Nothing to undo"
         if time.monotonic() - self._undo_at > UNDO_WINDOW_SECONDS:
-            return "too long ago to be sure it is still the last change"
+            return "Undo window expired"
         if self.hotkeys.watched_hits():
-            return "you have typed or clicked in that window since"
+            return "You changed that app"
         if not inject.window_is_alive(self._undo_target):
-            return "that window is gone"
+            return "That app is closed"
         return ""
 
     def _undo_last_paste(self) -> None:
         refusal = self._undo_refusal()
         if refusal:
             print(f"[dictate] not undoing — {refusal}")
-            self.bar.notify(f"Cannot undo: {refusal}", tone="info")
+            self._notify(f"Can't undo: {refusal}.", tone="info")
             self._withdraw_undo()
             return
 
@@ -993,7 +973,7 @@ class App:
             print("[dictate] undid the last dictation")
         else:
             print("[dictate] not undoing — could not focus that window again")
-            self.bar.notify("Cannot undo: that window would not come forward")
+            self._notify("Can't undo: the app didn't respond.")
 
     def _remember_last_dictation(self, text: str) -> None:
         """Keep one result in RAM for recovery without creating a transcript log."""
@@ -1015,8 +995,8 @@ class App:
             return
         self._clipboard_restore = restore
         self._clipboard_restore_timer.start(inject.TEMPORARY_COPY_SECONDS * 1000)
-        self.bar.notify(
-            "Last dictation copied",
+        self._notify(
+            "Last dictation copied.",
             tone="info",
             duration_ms=inject.TEMPORARY_COPY_SECONDS * 1000,
         )
@@ -1035,14 +1015,14 @@ class App:
         # once the download verifies -- see _start_update() and
         # updater.Updater.start_update()'s own docstring.
         self._notify(
-            f"Update {version} available — click to download & install",
+            f"Update {version} ready. Click to install.",
             tone="info",
             on_click=self._start_update,
         )
 
     def _start_update(self) -> None:
         if self.updater.start_update():
-            self.bar.notify("Downloading the update…", tone="info")
+            self._notify("Downloading update…", tone="info")
 
     def _on_update_installing(self, version: str) -> None:
         # The installer is already launched and waiting for this process to
@@ -1051,13 +1031,10 @@ class App:
 
     def _on_update_error(self, message: str) -> None:
         self.bar.set_state("error", message[:60])
-        if self.settings.system_notifications_enabled:
-            self.tray.showMessage(
-                APP_NAME, f"Update failed: {message}"[:120], QSystemTrayIcon.Warning, 6000
-            )
+        self._notify("Update download failed.", tone="error")
 
     def _on_update_current(self) -> None:
-        self._notify("You're on the latest version", tone="success")
+        self._notify("You're up to date.", tone="success")
 
     def _on_update_status_changed(self) -> None:
         if self.settings_window:

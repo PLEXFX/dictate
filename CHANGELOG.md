@@ -7,6 +7,23 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.4-beta.1] - 2026-08-17
+
+### Added
+
+- Speech models now download into Dictate's own app-data folder, separate
+  from other apps' caches. Settings includes an **Open model folder** button
+  so you can inspect or clear only Dictate's downloaded models.
+- The existing Enhanced Preview and update-failure notices now also appear on
+  Dictate's floating bar. When **Also show Windows notifications** is on, the
+  same short message is mirrored to Windows.
+
+### Changed
+
+- Rewrote Dictate's existing notifications as short, readable messages that
+  fit comfortably in the floating toast: startup, already-open, updates,
+  copied dictation, undo refusals, and Enhanced Preview feedback.
+
 ## [0.2.3-beta.1] - 2026-08-17
 
 ### Changed

@@ -8,8 +8,9 @@ Dictate is designed for local speech-to-text.
 - Dictate does not keep a transcript or save voice recordings.
 - To insert a result, Dictate temporarily places it on the Windows clipboard,
   sends the paste shortcut, then restores the prior text clipboard contents.
-- Speech-model files may download from Hugging Face and optional NVIDIA GPU
-  runtime files may download from PyPI when those features are selected. Those
+- Speech-model files may download from Hugging Face into Dictate's own
+  `%APPDATA%\dictate\models` folder, and optional NVIDIA GPU runtime files may
+  download from PyPI when those features are selected. Those
   providers receive the normal network information required to deliver files;
   they do not receive dictated audio or text from Dictate.
 - Update checks contact only the official `PLEXFX/dictate` GitHub repository.

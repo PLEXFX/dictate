@@ -407,6 +407,22 @@ class EngineGpuDownloadTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class ModelStorageTests(unittest.TestCase):
+    def test_models_live_under_dictates_own_data_folder(self):
+        self.assertEqual(config.model_dir(), config.CONFIG_DIR / "models")
+
+    def test_progress_download_uses_dictates_private_model_cache(self):
+        import engine
+
+        hub = Mock()
+        hub.snapshot_download.side_effect = [RuntimeError("not cached"), None]
+        with patch.dict(sys.modules, {"huggingface_hub": hub}):
+            engine._predownload_with_progress("small.en", lambda *_args: None)
+
+        self.assertEqual(hub.snapshot_download.call_count, 2)
+        for call in hub.snapshot_download.call_args_list:
+            self.assertEqual(call.kwargs["cache_dir"], config.model_dir())
+
 def _fake_wheel_zip(path: Path, subdir: str, dll_names: list[str]) -> None:
     with zipfile.ZipFile(path, "w") as zf:
         for name in dll_names:
@@ -949,10 +965,30 @@ class PttWarmStartTests(unittest.TestCase):
         with patch.object(main, "preview_hardware", return_value=(4, 8.0, True)):
             app._apply_settings(enabled)
 
-        message = app.tray.showMessage.call_args.args[1]
-        self.assertIn("Hardware limit warning", message)
-        self.assertIn("4 CPU threads", message)
+        app.bar.notify.assert_called_once_with(
+            "Enhanced preview may be slow.",
+            tone="info",
+            on_click=None,
+            duration_ms=5000,
+        )
+        app.tray.showMessage.assert_not_called()
         self.assertTrue(app._enhanced_benchmark_pending)
+
+    def test_windows_notifications_use_the_same_notice_text(self):
+        app, main = self._app()
+        app.settings.system_notifications_enabled = True
+
+        app._notify("Update download failed.", tone="error")
+
+        app.bar.notify.assert_called_once_with(
+            "Update download failed.", tone="error", on_click=None, duration_ms=5000
+        )
+        app.tray.showMessage.assert_called_once_with(
+            main.APP_NAME,
+            "Update download failed.",
+            main.QSystemTrayIcon.Warning,
+            5000,
+        )
 
     def test_warmup_does_not_replace_the_listening_bar(self):
         app, main = self._app()
@@ -1007,6 +1043,8 @@ class UndoLastPasteTests(unittest.TestCase):
         app.hotkeys = Mock()
         app.hotkeys.watched_hits.return_value = 0
         app.bar = Mock()
+        app.settings = config.Settings()
+        app.tray = Mock()
         app.act_undo = Mock()
         app.undo_expiry_timer = Mock()
         return app, main
@@ -1077,7 +1115,7 @@ class UndoLastPasteTests(unittest.TestCase):
             app._undo_last_paste()
 
         app.bar.notify.assert_called_once()
-        self.assertIn("typed or clicked", app.bar.notify.call_args[0][0])
+        self.assertIn("You changed that app", app.bar.notify.call_args[0][0])
         self.assertIsNone(app._undo_target)
 
     def test_arming_undo_watches_the_pasted_window(self):
@@ -1464,9 +1502,13 @@ class LivePreviewTests(unittest.TestCase):
 
         app._on_live_preview(4, "words", 1.2, True)
 
-        message = app.tray.showMessage.call_args.args[1]
-        self.assertIn("Hardware limit detected", message)
-        self.assertIn("1.2s", message)
+        app.bar.notify.assert_called_once_with(
+            "Enhanced preview may be slow.",
+            tone="info",
+            on_click=None,
+            duration_ms=5000,
+        )
+        app.tray.showMessage.assert_not_called()
 
     def test_disabled_preview_never_reads_the_live_microphone_buffer(self):
         app, _main = self._app()
@@ -1487,6 +1529,8 @@ class LastDictationTests(unittest.TestCase):
         app._last_dictation = ""
         app.act_copy_last = Mock()
         app.bar = Mock()
+        app.settings = config.Settings()
+        app.tray = Mock()
         app._clipboard_restore = None
         app._clipboard_restore_timer = Mock()
         app._clipboard_restore_timer.isActive.return_value = False
@@ -1512,8 +1556,9 @@ class LastDictationTests(unittest.TestCase):
             main.inject.TEMPORARY_COPY_SECONDS * 1000
         )
         app.bar.notify.assert_called_once_with(
-            "Last dictation copied",
+            "Last dictation copied.",
             tone="info",
+            on_click=None,
             duration_ms=main.inject.TEMPORARY_COPY_SECONDS * 1000,
         )
 
@@ -2316,9 +2361,9 @@ class ToastWidthTests(unittest.TestCase):
 
         toast = bar_mod.Toast()
         messages = [
-            "You're on the latest version",
-            "Update 0.2.10-beta.12 available — click to download & install",
-            "Dictate's already running — hold Ctrl+Alt+F9 to talk",
+            "You're up to date.",
+            "Update 0.2.10-beta.12 ready. Click to install.",
+            "Ready. Hold Ctrl+Alt+F9 to talk.",
         ]
         metrics = QFontMetrics(toast._font)
         for text in messages:

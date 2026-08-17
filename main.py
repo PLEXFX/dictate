@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -216,7 +217,7 @@ class Bridge(QObject):
     finished = Signal(str, str)  # state, detail
     command = Signal(str)  # a line typed into the console, already normalized
     update_available = Signal(str, str)  # version, release notes -- nothing downloaded yet
-    update_installing = Signal(str)  # version -- installer launched, app should quit now
+    update_installing = Signal(str, int)  # version, installer pid -- app should quit now
     update_error = Signal(str)  # a start_update() download/verify/launch failure
     update_current = Signal()  # a manual check found nothing newer
     update_status_changed = Signal()  # live status/progress text changed
@@ -1024,10 +1025,34 @@ class App:
         if self.updater.start_update():
             self._notify("Downloading update…", tone="info")
 
-    def _on_update_installing(self, version: str) -> None:
+    def _on_update_installing(self, version: str, installer_pid: int) -> None:
         # The installer is already launched and waiting for this process to
         # exit before it can overwrite these files -- nothing left to ask.
+        # Hide every Dictate-owned window *before* the splash goes up, so
+        # the two are never visible at the same time -- one closes before
+        # the other opens, not both at once.
+        self.bar.hide()
+        if self.settings_window is not None:
+            self.settings_window.hide()
+        self._launch_update_splash(installer_pid)
         self._quit()
+
+    def _launch_update_splash(self, installer_pid: int) -> None:
+        """Best-effort: a native progress window bridging the silent-install
+        gap (see update_splash.py). Only meaningful for a frozen build --
+        dev mode has no dictate-updater.exe to launch -- and a failure here
+        must never block the actual update, which is already verified and
+        already launched by this point.
+        """
+        if not getattr(sys, "frozen", False):
+            return
+        splash_exe = Path(sys.executable).resolve().parent / "updater" / "dictate-updater.exe"
+        if not splash_exe.exists():
+            return
+        try:
+            subprocess.Popen([str(splash_exe), "--installer-pid", str(installer_pid)])
+        except OSError as exc:
+            print(f"[dictate] could not launch update splash: {exc}")
 
     def _on_update_error(self, message: str) -> None:
         self.bar.set_state("error", message[:60])

@@ -18,13 +18,14 @@
 ;   ISCC.exe dictate.iss /DMyAppVersion=0.1.0-beta.3
 
 #ifndef MyAppVersion
-#define MyAppVersion "0.2.4-beta.1"
+#define MyAppVersion "1.0.0-beta.1"
 #endif
 #define MyAppName "Dictate"
 #define MyAppPublisher "PLEXFX"
 #define MyAppURL "https://github.com/PLEXFX/dictate"
 #define MyAppExeName "dictate.exe"
 #define SourceDir "..\dist\dictate"
+#define UpdaterSourceDir "..\dist\dictate-updater"
 
 [Setup]
 AppId={{65B8AB9F-FF1B-4148-8ED5-76F30681FD64}
@@ -61,6 +62,12 @@ Name: "gpuaccel"; Description: "Enable GPU acceleration (NVIDIA card detected) -
 [Files]
 Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The update-progress splash (update_splash.py) -- its own small, separately
+; built onedir tree, kept in its own subfolder rather than mixed into
+; dictate.exe's _internal above so two independently built PyInstaller
+; trees never risk colliding on a same-named file.
+Source: "{#UpdaterSourceDir}\dictate-updater.exe"; DestDir: "{app}\updater"; Flags: ignoreversion
+Source: "{#UpdaterSourceDir}\_internal\*"; DestDir: "{app}\updater\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Dictate"; Filename: "{app}\{#MyAppExeName}"
@@ -79,6 +86,7 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--updated"; Flags: nowait skipif
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\updater"
 ; settings.json, update-notice.json -- everything config.py/updater.py ever
 ; write under %APPDATA%\dictate. Removing it on uninstall means a later
 ; reinstall starts genuinely fresh: onboarding_complete is gone, so the

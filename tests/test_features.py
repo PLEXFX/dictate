@@ -2381,6 +2381,32 @@ class ToastWidthTests(unittest.TestCase):
             )
 
 
+class ModelDownloadBarTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication(
+            ["dictate-tests", "-platform", "offscreen"]
+        )
+
+    def test_first_model_download_labels_the_bar_above_its_progress_fill(self):
+        import bar as bar_mod
+
+        bar = bar_mod.Bar(config.Settings())
+        bar._state_since = 0.0  # bypass the transition dwell in this focused test
+        bar.set_state("loading", "small.en on CPU — downloading 25%", 0.25)
+
+        self.assertEqual(bar._state, "loading")
+        self.assertEqual(bar._progress, 0.25)
+        self.assertTrue(bar._loading_notice_active)
+        self.assertEqual(bar._toast._text, "Downloading model…")
+
+        bar.set_state("loaded", "small.en on CPU")
+
+        self.assertFalse(bar._loading_notice_active)
+
+
 class BarClickWiringTests(unittest.TestCase):
     """main.py's side of the gesture: arming/disarming the bar and routing
     a click to the same finish path a second key-press already used."""
@@ -2683,30 +2709,30 @@ def _release(tag: str, assets: list, *, draft: bool = False) -> dict:
     return entry
 
 
-def _installer_assets(tag: str) -> tuple[list, str]:
+def _installer_assets(
+    tag: str, *, digest: str | None = None
+) -> tuple[list, str, str]:
     version = tag.lstrip("vV")
     installer_url = (
         f"https://github.com/PLEXFX/dictate/releases/download/{tag}/"
         f"Dictate-Setup-{version}.exe"
     )
+    if digest is None:
+        digest = hashlib.sha256(version.encode("utf-8")).hexdigest()
     assets = [
         {
             "name": f"Dictate-Setup-{version}.exe",
             "browser_download_url": installer_url,
             "size": 12345,
-        },
-        {
-            "name": f"Dictate-Setup-{version}.exe.sha256",
-            "browser_download_url": f"{installer_url}.sha256",
-            "size": 90,
+            "digest": f"sha256:{digest}",
         },
     ]
-    return assets, installer_url
+    return assets, installer_url, digest
 
 
 class UpdaterReleaseFetchTests(unittest.TestCase):
     def test_parses_the_installer_asset(self):
-        assets, installer_url = _installer_assets("v0.1.0-beta.3")
+        assets, installer_url, digest = _installer_assets("v0.1.0-beta.3")
         payload = json.dumps([_release("v0.1.0-beta.3", assets)]).encode("utf-8")
         with patch.object(
             updater.urllib.request, "urlopen", return_value=_fake_response(payload)
@@ -2715,13 +2741,13 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
         self.assertEqual(info["version"], "0.1.0-beta.3")
         self.assertEqual(info["installer_url"], installer_url)
         self.assertEqual(info["installer_size"], 12345)
-        self.assertEqual(info["checksum_url"], f"{installer_url}.sha256")
+        self.assertEqual(info["installer_sha256"], digest)
 
     def test_picks_the_highest_version_regardless_of_list_order(self):
         # The real endpoint used, /releases, does not promise any particular
         # order -- this must not just trust entry [0].
-        old_assets, _ = _installer_assets("v0.1.0-beta.2")
-        new_assets, new_url = _installer_assets("v0.2.0-beta.2")
+        old_assets, _, _ = _installer_assets("v0.1.0-beta.2")
+        new_assets, new_url, _ = _installer_assets("v0.2.0-beta.2")
         payload = json.dumps(
             [_release("v0.1.0-beta.2", old_assets), _release("v0.2.0-beta.2", new_assets)]
         ).encode("utf-8")
@@ -2736,7 +2762,7 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
         # This is the actual bug: GitHub's /releases/latest endpoint hides
         # anything flagged prerelease, and every Dictate release is one.
         # /releases (this fetch) must not apply that same filtering itself.
-        assets, installer_url = _installer_assets("v0.2.0-beta.2")
+        assets, installer_url, _ = _installer_assets("v0.2.0-beta.2")
         entry = _release("v0.2.0-beta.2", assets)
         entry["prerelease"] = True
         payload = json.dumps([entry]).encode("utf-8")
@@ -2747,8 +2773,8 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
         self.assertEqual(info["installer_url"], installer_url)
 
     def test_skips_draft_releases(self):
-        draft_assets, _ = _installer_assets("v9.9.9-beta.1")
-        real_assets, real_url = _installer_assets("v0.2.0-beta.2")
+        draft_assets, _, _ = _installer_assets("v9.9.9-beta.1")
+        real_assets, real_url, _ = _installer_assets("v0.2.0-beta.2")
         payload = json.dumps(
             [
                 _release("v9.9.9-beta.1", draft_assets, draft=True),
@@ -2771,11 +2797,7 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
                             "name": "Dictate-Setup-0.1.0-beta.3.exe",
                             "browser_download_url": "https://github.com/other/repo/releases/download/v0/x.exe",
                             "size": 12345,
-                        },
-                        {
-                            "name": "Dictate-Setup-0.1.0-beta.3.exe.sha256",
-                            "browser_download_url": "https://github.com/other/repo/releases/download/v0/x.exe.sha256",
-                            "size": 90,
+                            "digest": f"sha256:{'a' * 64}",
                         },
                     ],
                 )
@@ -2788,6 +2810,25 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
 
     def test_returns_none_without_an_installer_asset(self):
         payload = json.dumps([_release("v0.1.0-beta.3", [])]).encode("utf-8")
+        with patch.object(
+            updater.urllib.request, "urlopen", return_value=_fake_response(payload)
+        ):
+            self.assertIsNone(updater._fetch_latest_release())
+
+    def test_returns_none_when_the_installer_asset_has_no_digest(self):
+        # GitHub computes this itself; a missing/malformed digest must fail
+        # closed rather than skip the integrity check.
+        assets, _, _ = _installer_assets("v0.1.0-beta.3")
+        del assets[0]["digest"]
+        payload = json.dumps([_release("v0.1.0-beta.3", assets)]).encode("utf-8")
+        with patch.object(
+            updater.urllib.request, "urlopen", return_value=_fake_response(payload)
+        ):
+            self.assertIsNone(updater._fetch_latest_release())
+
+    def test_returns_none_when_the_digest_is_malformed(self):
+        assets, _, _ = _installer_assets("v0.1.0-beta.3", digest="not-hex")
+        payload = json.dumps([_release("v0.1.0-beta.3", assets)]).encode("utf-8")
         with patch.object(
             updater.urllib.request, "urlopen", return_value=_fake_response(payload)
         ):
@@ -2876,7 +2917,7 @@ class UpdaterFlowTests(unittest.TestCase):
             "installer_url": "https://x/installer.exe",
             "installer_name": "installer-flow-test.exe",
             "installer_size": 5,
-            "checksum_url": "https://x/installer.exe.sha256",
+            "installer_sha256": hashlib.sha256(b"12345").hexdigest(),
             "release_notes": "A safer updater.",
         }
         info.update(overrides)
@@ -2912,13 +2953,12 @@ class UpdaterFlowTests(unittest.TestCase):
         installing = threading.Event()
         installing_args = []
 
-        def on_installing(version):
-            installing_args.append(version)
+        def on_installing(version, installer_pid):
+            installing_args.append((version, installer_pid))
             installing.set()
 
         with (
             patch.object(updater, "_fetch_latest_release", return_value=self._info()),
-            patch.object(updater, "_fetch_expected_sha256", return_value=hashlib.sha256(b"12345").hexdigest()),
             patch.object(updater, "_verify_authenticode", return_value=True),
             patch.object(
                 updater,
@@ -2942,7 +2982,7 @@ class UpdaterFlowTests(unittest.TestCase):
             finally:
                 u.shutdown()
 
-        self.assertEqual(installing_args, ["9.9.9"])
+        self.assertEqual(installing_args, [("9.9.9", popen.return_value.pid)])
         popen.assert_called_once()
         args = popen.call_args[0][0]
         self.assertTrue(args[0].endswith("installer-flow-test.exe"))
@@ -2976,14 +3016,13 @@ class UpdaterFlowTests(unittest.TestCase):
 
         with (
             patch.object(updater, "_fetch_latest_release", return_value=self._info()),
-            patch.object(updater, "_fetch_expected_sha256", return_value=hashlib.sha256(b"12345").hexdigest()),
             patch.object(updater, "_verify_authenticode", return_value=True),
             patch.object(updater, "_download", side_effect=slow_download),
             patch.object(updater.subprocess, "Popen"),
         ):
             u = updater.Updater(
                 on_available=lambda version, notes: available.set(),
-                on_installing=lambda version: installing.set(),
+                on_installing=lambda version, installer_pid: installing.set(),
                 current_version="0.1.0-beta.2",
                 check_interval=9999,
                 trusted_signer_thumbprint=self.SIGNER,
@@ -3008,7 +3047,6 @@ class UpdaterFlowTests(unittest.TestCase):
 
         with (
             patch.object(updater, "_fetch_latest_release", return_value=self._info()),
-            patch.object(updater, "_fetch_expected_sha256", return_value=hashlib.sha256(b"12345").hexdigest()),
             patch.object(updater, "_verify_authenticode") as verify_authenticode,
             patch.object(
                 updater,
@@ -3019,7 +3057,7 @@ class UpdaterFlowTests(unittest.TestCase):
         ):
             u = updater.Updater(
                 on_available=lambda version, notes: available.set(),
-                on_installing=lambda version: installing.set(),
+                on_installing=lambda version, installer_pid: installing.set(),
                 current_version="0.1.0-beta.2",
                 check_interval=9999,
                 trusted_signer_thumbprint="",
@@ -3041,8 +3079,11 @@ class UpdaterFlowTests(unittest.TestCase):
         errors = []
 
         with (
-            patch.object(updater, "_fetch_latest_release", return_value=self._info()),
-            patch.object(updater, "_fetch_expected_sha256", return_value="0" * 64),
+            patch.object(
+                updater,
+                "_fetch_latest_release",
+                return_value=self._info(installer_sha256="0" * 64),
+            ),
             patch.object(
                 updater,
                 "_download",
@@ -3128,6 +3169,115 @@ class UpdaterFlowTests(unittest.TestCase):
                 self.assertTrue(fetch_calls.wait(timeout=5))
             finally:
                 u.shutdown()
+
+
+class UpdateSplashTests(unittest.TestCase):
+    """update_splash.py's own state machine and path logic -- pure, no
+    ctypes/Qt/COM involved, so these run the same as any other unit test
+    rather than needing a real installer process or window."""
+
+    def test_still_running_keeps_waiting(self):
+        import update_splash as splash
+
+        self.assertEqual(
+            splash.decide_next_action(
+                exit_code=None,
+                elapsed_seconds=1.0,
+                grace_elapsed_seconds=0.0,
+                dictate_seen_running=False,
+            ),
+            splash.WAITING,
+        )
+
+    def test_nonzero_exit_relaunches_immediately(self):
+        import update_splash as splash
+
+        self.assertEqual(
+            splash.decide_next_action(
+                exit_code=1,
+                elapsed_seconds=1.0,
+                grace_elapsed_seconds=0.0,
+                dictate_seen_running=False,
+            ),
+            splash.RELAUNCH_AND_CLOSE,
+        )
+
+    def test_success_waits_in_grace_period_for_dictate_to_reappear(self):
+        import update_splash as splash
+
+        self.assertEqual(
+            splash.decide_next_action(
+                exit_code=0,
+                elapsed_seconds=2.0,
+                grace_elapsed_seconds=1.0,
+                dictate_seen_running=False,
+            ),
+            splash.SUCCESS_GRACE,
+        )
+
+    def test_success_closes_once_dictate_is_seen_running(self):
+        import update_splash as splash
+
+        self.assertEqual(
+            splash.decide_next_action(
+                exit_code=0,
+                elapsed_seconds=2.0,
+                grace_elapsed_seconds=0.5,
+                dictate_seen_running=True,
+            ),
+            splash.CLOSE,
+        )
+
+    def test_success_closes_after_grace_period_even_if_never_seen(self):
+        """Dictate's relaunch is a real signal when present, but this can
+        never wait on it forever -- if it somehow never appears, the splash
+        still has to close rather than sit there indefinitely."""
+        import update_splash as splash
+
+        self.assertEqual(
+            splash.decide_next_action(
+                exit_code=0,
+                elapsed_seconds=10.0,
+                grace_elapsed_seconds=splash.GRACE_POLL_SECONDS,
+                dictate_seen_running=False,
+            ),
+            splash.CLOSE,
+        )
+
+    def test_safety_timeout_wins_over_everything(self):
+        import update_splash as splash
+
+        self.assertEqual(
+            splash.decide_next_action(
+                exit_code=None,
+                elapsed_seconds=splash.SAFETY_TIMEOUT_SECONDS,
+                grace_elapsed_seconds=0.0,
+                dictate_seen_running=False,
+            ),
+            splash.CLOSE,
+        )
+        # Even a fresh, healthy DOWNLOADING-equivalent state can't survive
+        # past the ceiling -- it isn't only a "gave up waiting" fallback.
+        self.assertEqual(
+            splash.decide_next_action(
+                exit_code=0,
+                elapsed_seconds=splash.SAFETY_TIMEOUT_SECONDS,
+                grace_elapsed_seconds=0.0,
+                dictate_seen_running=True,
+            ),
+            splash.CLOSE,
+        )
+
+    def test_relaunch_target_is_one_level_up_from_the_updater_subfolder(self):
+        """Matches installer/dictate.iss's layout: {app}\\dictate.exe next to
+        {app}\\updater\\dictate-updater.exe."""
+        import update_splash as splash
+
+        splash_exe = Path(r"C:\Program Files\Dictate\updater\dictate-updater.exe")
+        self.assertEqual(
+            splash.relaunch_target_path(splash_exe),
+            Path(r"C:\Program Files\Dictate\dictate.exe"),
+        )
 
 
 if __name__ == "__main__":

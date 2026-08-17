@@ -432,6 +432,7 @@ class Bar(QWidget):
         self._notice_tone = "info"       # "info" or "success" -- picks the toast's dot colour
         self._notice_duration_ms: int | None = None
         self._toast_on_click = None      # optional callback for an actionable notice
+        self._loading_notice_active = False
         self._linger_ms = settings.bar_linger_ms
         self._preview_margin: int | None = None  # live override while dragging the Settings slider
 
@@ -647,6 +648,19 @@ class Bar(QWidget):
         from the indeterminate sweep to a fill. Left ``None`` for an ordinary
         cached load, which stays on the sweep.
         """
+        # A first-time speech-model download has two honest pieces of feedback:
+        # the bar becomes a real progress fill, while the attached label says
+        # why it is on screen. Cached loads keep the quieter sweep alone.
+        if state == "loading" and progress is not None:
+            if not self._loading_notice_active:
+                self._loading_notice_active = True
+                self._toast.show_message(
+                    "Downloading model…", self.pill_geometry(), dot_color=self._accent
+                )
+        elif self._loading_notice_active:
+            self._loading_notice_active = False
+            self._toast.dismiss()
+
         if state == self._state:
             self._pending = None            # latest request wins; it says "stay"
             self._dwell_timer.stop()

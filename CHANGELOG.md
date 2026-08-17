@@ -7,6 +7,29 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0-beta.1] - 2026-08-17
+
+### Added
+
+- A small progress window now bridges the gap after clicking "Restart now" —
+  Dictate used to close and leave the screen empty for up to a minute while
+  the installer ran silently. It shows install progress, relaunches Dictate
+  automatically if the install fails, and closes on its own once done.
+- The floating bar now shows a compact **Downloading model…** label with a
+  determinate progress fill when a selected speech model needs to download.
+  Swapping to an already-cached model keeps the quieter loading sweep.
+
+### Changed
+
+- Update verification now checks the SHA-256 GitHub itself computes for the
+  installer asset instead of a separate `.exe.sha256` file, so releases only
+  have one file to download. Installs on 0.2.4-beta.1 and earlier won't see
+  this release as an available update — their built-in updater still expects
+  the old sidecar file, which no longer gets published; a manual reinstall
+  is needed to move onto this update path.
+- Installer size grew from 93MB to about 130MB to include the new update
+  progress window's own bundled runtime.
+
 ## [0.2.4-beta.1] - 2026-08-17
 
 ### Added

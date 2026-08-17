@@ -4,12 +4,13 @@ Hold a key anywhere in Windows, speak, release. The text appears in whatever
 you were typing in. Transcription runs on this machine — no account and no
 cloud transcription. Speech-model files may download the first time they are used.
 
-## What's new in v0.2.4-beta.1
+## What's new in v1.0.0-beta.1
 
-Notifications are now short and consistent across Dictate's floating bar and
-Windows notifications when that option is enabled. Speech models now live in
-Dictate's own app-data folder, with an **Open model folder** button in
-Settings.
+Clicking "Restart now" for an update no longer leaves the screen empty —
+a small progress window now shows while it installs. The floating bar also
+shows a **Downloading model…** progress label when a speech model needs to
+download. Releases are now a single file to download — no separate
+checksum file alongside the installer.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete version history.
 Read [PRIVACY.md](PRIVACY.md) for exactly what Dictate processes and what its

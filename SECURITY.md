@@ -19,7 +19,8 @@ public discussion.
 Dictate accepts an in-app update only when all of the following are true:
 
 1. It is the exact installer asset for a release from `PLEXFX/dictate`.
-2. Its release checksum asset matches the downloaded bytes.
+2. Its SHA-256 hash matches the digest GitHub itself computed for that
+   release asset (fetched from the GitHub API, not a file you can edit).
 
 Dictate does not yet have a code-signing certificate, so there is no
 Authenticode signature check on top of the two above — if a future release

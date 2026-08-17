@@ -40,10 +40,12 @@ CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 # certificate thumbprint once a signed release exists, and every update from
 # then on is also checked against this specific signer. Empty means Dictate
 # has no code-signing certificate yet: updates still require the exact
-# PLEXFX/dictate release URL and a matching SHA-256 checksum (both always
-# enforced below, never skipped), just not a signature -- a deliberate,
-# requested trade-off so updates work today rather than the stronger
-# guarantee a signed release would give. Revisit once signing is set up.
+# PLEXFX/dictate release URL and a matching SHA-256 checksum -- read from
+# GitHub's own per-asset digest, not a hand-published sidecar file (both
+# always enforced below, never skipped) -- just not a signature -- a
+# deliberate, requested trade-off so updates work today rather than the
+# stronger guarantee a signed release would give. Revisit once signing is
+# set up.
 TRUSTED_SIGNER_THUMBPRINT = ""
 
 # Status states, reported through last_status for a UI that polls reactively
@@ -70,10 +72,9 @@ _RELEASE_PREFIX = f"/{REPO}/releases/download/"
 _USER_AGENT = "dictate-updater"
 _REQUEST_TIMEOUT = 10
 _DOWNLOAD_CHUNK = 1 << 16  # 64 KiB
-_MAX_CHECKSUM_BYTES = 4096
 _MAX_RELEASE_NOTES_CHARS = 5000
 _VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-[a-zA-Z]+\.(\d+))?$")
-_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_DIGEST_RE = re.compile(r"^sha256:([0-9a-fA-F]{64})$")
 
 
 def parse_version(v: str) -> tuple[int, int, int, int, int]:
@@ -118,6 +119,24 @@ def _release_asset_url(asset: object) -> Optional[str]:
     ):
         return None
     return url
+
+
+def _asset_sha256(asset: object) -> Optional[str]:
+    """The SHA-256 GitHub itself computed for an uploaded release asset.
+
+    GitHub's Releases API returns a ``digest`` field (``sha256:<hex>``) for
+    every asset automatically -- reading it here means only the installer
+    itself needs to be uploaded, no hand-published ``.sha256`` sidecar file.
+    """
+    if not isinstance(asset, dict):
+        return None
+    digest = asset.get("digest")
+    if not isinstance(digest, str):
+        return None
+    m = _DIGEST_RE.fullmatch(digest.strip())
+    if not m:
+        return None
+    return m.group(1).casefold()
 
 
 def _pick_latest(releases: object) -> Optional[dict]:
@@ -165,16 +184,14 @@ def _fetch_latest_release() -> Optional[dict]:
     if not _VERSION_RE.fullmatch(version):
         return None
     installer_name = f"Dictate-Setup-{version}.exe"
-    checksum_name = f"{installer_name}.sha256"
     assets = data.get("assets") or []
     by_name = {
         str(asset.get("name", "")): asset for asset in assets if isinstance(asset, dict)
     }
     installer = by_name.get(installer_name)
-    checksum = by_name.get(checksum_name)
     installer_url = _release_asset_url(installer)
-    checksum_url = _release_asset_url(checksum)
-    if installer_url is None or checksum_url is None:
+    installer_sha256 = _asset_sha256(installer)
+    if installer_url is None or installer_sha256 is None:
         return None
     size = installer.get("size") if isinstance(installer, dict) else None
     if not isinstance(size, int) or size <= 0:
@@ -184,7 +201,7 @@ def _fetch_latest_release() -> Optional[dict]:
         "installer_url": installer_url,
         "installer_name": installer_name,
         "installer_size": size,
-        "checksum_url": checksum_url,
+        "installer_sha256": installer_sha256,
         "release_notes": str(data.get("body") or "").strip()[:_MAX_RELEASE_NOTES_CHARS],
     }
 
@@ -205,27 +222,6 @@ def _download(
                 downloaded += len(chunk)
                 if on_progress is not None:
                     on_progress(downloaded, total)
-
-
-def _fetch_expected_sha256(url: str, installer_name: str) -> Optional[str]:
-    """Read a conventional ``<hex> [*]filename`` checksum sidecar safely."""
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as response:
-            raw = response.read(_MAX_CHECKSUM_BYTES + 1)
-    except Exception:
-        return None
-    if len(raw) > _MAX_CHECKSUM_BYTES:
-        return None
-    try:
-        fields = raw.decode("utf-8").strip().split()
-    except UnicodeDecodeError:
-        return None
-    if not fields or not _SHA256_RE.fullmatch(fields[0]):
-        return None
-    if len(fields) > 1 and fields[1].lstrip("*") != installer_name:
-        return None
-    return fields[0].casefold()
 
 
 def _sha256(path: Path) -> str:
@@ -338,7 +334,7 @@ class Updater:
     def __init__(
         self,
         on_available: Optional[Callable[[str, str], None]] = None,
-        on_installing: Optional[Callable[[str], None]] = None,
+        on_installing: Optional[Callable[[str, int], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
         on_up_to_date: Optional[Callable[[], None]] = None,
         on_status_change: Optional[Callable[[], None]] = None,
@@ -348,7 +344,7 @@ class Updater:
         enabled: bool = True,
     ):
         self._on_available = on_available or (lambda version, notes: None)
-        self._on_installing = on_installing or (lambda version: None)
+        self._on_installing = on_installing or (lambda version, installer_pid: None)
         self._on_error = on_error or (lambda message: None)
         self._on_up_to_date = on_up_to_date or (lambda: None)
         self._on_status_change = on_status_change or (lambda: None)
@@ -509,9 +505,7 @@ class Updater:
 
     def _download_and_install(self, info: dict) -> None:
         try:
-            expected_hash = _fetch_expected_sha256(
-                info["checksum_url"], info["installer_name"]
-            )
+            expected_hash = info.get("installer_sha256")
             if expected_hash is None:
                 self._fail("Update integrity information is missing")
                 return
@@ -563,17 +557,21 @@ class Updater:
 
             _write_update_notice(info["version"], info["release_notes"])
             try:
-                subprocess.Popen([str(dest), "/SP-", "/VERYSILENT", "/NORESTART"])
+                installer_process = subprocess.Popen(
+                    [str(dest), "/SP-", "/VERYSILENT", "/NORESTART"]
+                )
             except OSError as exc:
                 self._fail("The update downloaded but could not be started")
                 print(f"[dictate] could not start verified installer: {exc}")
                 return
 
-            print(f"[dictate] update {info['version']} installing")
+            print(f"[dictate] update {info['version']} installing (pid {installer_process.pid})")
             # Does not auto-revert: main.py's on_installing quits the app
             # right after this, so there is no later moment to revert from.
             self._set_status(INSTALLING, "Restarting Dictate to install the update…")
-            self._on_installing(info["version"])
+            # The pid lets main.py's update-progress splash watch this exact
+            # installer process (see update_splash.py) instead of guessing.
+            self._on_installing(info["version"], installer_process.pid)
         finally:
             self._busy.release()
 

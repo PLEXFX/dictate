@@ -95,6 +95,15 @@ wheels = [
 ]
 
 [[package]]
+name = "comtypes"
+version = "1.4.16"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c6/2a/65274c13327f637ec13af8d39f2cf579d9ebe7a0e683696b5f05236d2805/comtypes-1.4.16.tar.gz", hash = "sha256:cd66d1add01265cface4df51ba1e31cd1657e04463c281c802e737e79e1ba93c", size = 260252, upload-time = "2026-03-02T23:11:42.413Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5f/7c/0eb685107290b6221c03c46d39214a4e42a124189691cb83ae3228257f46/comtypes-1.4.16-py3-none-any.whl", hash = "sha256:e18d85179ff12955524c5a8c3bc09cb3c0d890f1da4d7123d14244c7b78f84c8", size = 296230, upload-time = "2026-03-02T23:11:41.049Z" },
+]
+
+[[package]]
 name = "ctranslate2"
 version = "4.8.1"
 source = { registry = "https://pypi.org/simple" }
@@ -113,9 +122,10 @@ wheels = [
 
 [[package]]
 name = "dictate"
-version = "0.2.4b1"
+version = "1.0.0b1"
 source = { virtual = "." }
 dependencies = [
+    { name = "comtypes" },
     { name = "faster-whisper" },
     { name = "huggingface-hub" },
     { name = "numpy" },
@@ -134,6 +144,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "comtypes", specifier = ">=1.4.16" },
     { name = "faster-whisper", specifier = ">=1.1.0" },
     { name = "huggingface-hub", specifier = ">=0.24" },
     { name = "numpy", specifier = ">=1.26" },

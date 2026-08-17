@@ -28,6 +28,7 @@ _controller = keyboard.Controller()
 CLIPBOARD_SETTLE = 0.06
 PASTE_SETTLE = 0.18
 TEMPORARY_COPY_SECONDS = 5
+FOCUS_SETTLE = 0.12  # Windows switches the foreground window asynchronously
 
 
 def _read_clipboard() -> tuple[bool, str]:
@@ -87,6 +88,51 @@ def copy_temporarily(text: str) -> Callable[[], bool] | None:
             return False
 
     return restore
+
+
+def foreground_window() -> int | None:
+    """Handle of the window with focus right now, or None if it cannot be read.
+
+    Undo is built on this: text lands in whatever window is focused, so that
+    handle is the only reliable identity for "the app Dictate just typed into".
+    """
+    try:
+        return int(ctypes.windll.user32.GetForegroundWindow()) or None
+    except Exception:
+        return None
+
+
+def window_is_alive(handle: int) -> bool:
+    try:
+        return bool(ctypes.windll.user32.IsWindow(ctypes.c_void_p(handle)))
+    except Exception:
+        return False
+
+
+def undo_in(handle: int) -> bool:
+    """Send one Ctrl+Z to ``handle``, refocusing it first.
+
+    Returns False without sending anything when the window cannot be brought
+    back to the front. Refusing is always correct here: a Ctrl+Z delivered to
+    the wrong window undoes a stranger's work, and there is no way to take
+    that back.
+    """
+    if not window_is_alive(handle):
+        return False
+    try:
+        if not ctypes.windll.user32.SetForegroundWindow(ctypes.c_void_p(handle)):
+            return False
+    except Exception:
+        return False
+    # Windows hands focus over asynchronously; typing into the old window is
+    # exactly the failure this whole function exists to avoid.
+    time.sleep(FOCUS_SETTLE)
+    if foreground_window() != handle:
+        return False
+    with _controller.pressed(keyboard.Key.ctrl):
+        _controller.press("z")
+        _controller.release("z")
+    return True
 
 
 def send(text: str, mode: str = "paste") -> None:

@@ -189,6 +189,42 @@ class VocabularyTests(unittest.TestCase):
         subject.transcribe(np.ones(20, dtype=np.float32))
         self.assertNotIn("initial_prompt", model.transcribe.call_args.kwargs)
 
+    def test_live_preview_uses_the_model_without_entering_transcribing_state(self):
+        import engine
+
+        model = Mock()
+        model.transcribe.return_value = ([Mock(text=" words appearing live ")], Mock())
+        subject = engine.Engine.__new__(engine.Engine)
+        subject._lock = threading.RLock()
+        subject._settings = config.Settings()
+        subject._model = model
+        subject._loaded_key = ("small.en", "cpu")
+        subject._last_used = 0.0
+        subject.ensure_loaded = Mock(return_value=model)
+        subject._set_state = Mock()
+
+        result = subject.transcribe_preview(np.ones(20, dtype=np.float32))
+
+        self.assertEqual(result, "words appearing live")
+        self.assertTrue(model.transcribe.call_args.kwargs["without_timestamps"])
+        subject._set_state.assert_not_called()
+
+    def test_enhanced_preview_uses_a_dedicated_cpu_model_and_reports_inference_time(self):
+        import engine
+
+        model = Mock()
+        model.transcribe.return_value = ([Mock(text=" quick preview ")], Mock())
+        subject = engine.PreviewEngine(config.Settings(vocabulary=["Northwind"]))
+        subject.ensure_loaded = Mock(return_value=model)
+
+        with patch.object(engine.time, "perf_counter", side_effect=[10.0, 10.35]):
+            text, seconds = subject.transcribe(np.ones(20, dtype=np.float32))
+
+        self.assertEqual(text, "quick preview")
+        self.assertAlmostEqual(seconds, 0.35)
+        self.assertTrue(model.transcribe.call_args.kwargs["without_timestamps"])
+        self.assertIn("Northwind", model.transcribe.call_args.kwargs["initial_prompt"])
+
 
 class MicrophoneTests(unittest.TestCase):
     def test_device_key_survives_numeric_index_changes(self):
@@ -223,6 +259,19 @@ class MicrophoneTests(unittest.TestCase):
 
     def test_rms_level_of_empty_clip_is_zero(self):
         self.assertEqual(audio.rms_level(np.zeros(0, dtype=np.float32)), 0.0)
+
+    def test_snapshot_reads_recording_without_stopping_and_can_bound_the_window(self):
+        capture = audio.MicCapture()
+        capture._frames = [
+            np.full(audio.SAMPLE_RATE, 1.0, dtype=np.float32),
+            np.full(audio.SAMPLE_RATE, 2.0, dtype=np.float32),
+        ]
+
+        preview = capture.snapshot(max_seconds=0.5)
+
+        self.assertEqual(preview.size, audio.SAMPLE_RATE // 2)
+        self.assertTrue((preview == 2.0).all())
+        self.assertEqual(len(capture._frames), 2)
 
 
 class EngineProgressTests(unittest.TestCase):
@@ -563,6 +612,8 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertEqual(migrated.input_device, "")
         self.assertFalse(migrated.onboarding_complete)
         self.assertFalse(migrated.start_with_windows)
+        self.assertTrue(migrated.live_preview_enabled)
+        self.assertFalse(migrated.enhanced_preview_enabled)
         self.assertNotIn("output_mode", config.Settings.__dataclass_fields__)
         self.assertNotIn("trailing_space", config.Settings.__dataclass_fields__)
 
@@ -627,15 +678,38 @@ class ThemeTests(unittest.TestCase):
 
 
 class HotkeyTests(unittest.TestCase):
-    def _hotkeys(self, *, ptt_key: str = "f9", settings_hotkey: str = "ctrl+alt+d"):
+    def _hotkeys(
+        self,
+        *,
+        ptt_key: str = "f9",
+        settings_hotkey: str = "ctrl+alt+d",
+        tap_to_lock: bool = False,
+    ):
+        """A listener plus the callbacks it fired, in order.
+
+        ``tap_to_lock`` defaults off so a test that only cares about combo
+        mechanics can press and release in the same breath without that
+        counting as the tap-to-lock gesture.
+        """
         events: list[tuple[str, float | None]] = []
         listener = hotkeys.Hotkeys(
-            config.Settings(ptt_key=ptt_key, settings_hotkey=settings_hotkey),
+            config.Settings(
+                ptt_key=ptt_key,
+                settings_hotkey=settings_hotkey,
+                tap_to_lock=tap_to_lock,
+            ),
             on_talk_start=lambda: events.append(("start", None)),
             on_talk_end=lambda duration: events.append(("end", duration)),
             on_settings=lambda: events.append(("settings", None)),
+            on_talk_lock=lambda: events.append(("lock", None)),
+            on_talk_cancel=lambda: events.append(("cancel", None)),
         )
         return listener, events
+
+    @staticmethod
+    def _make_it_a_hold(listener) -> None:
+        """Backdate the press so the next release reads as a hold, not a tap."""
+        listener._press_time -= hotkeys.MIN_HOLD_SECONDS + 0.1
 
     def test_mouse_and_keyboard_hold_combination(self):
         listener, events = self._hotkeys(ptt_key="ctrl+mouse4")
@@ -653,6 +727,120 @@ class HotkeyTests(unittest.TestCase):
         listener._release("ctrl")
 
         self.assertEqual([event[0] for event in events], ["start", "end"])
+
+    # --- tap to lock ---
+
+    def test_tap_locks_recording_instead_of_ending_it(self):
+        listener, events = self._hotkeys(tap_to_lock=True)
+        listener._press("f9")
+        listener._release("f9")
+
+        self.assertEqual([event[0] for event in events], ["start", "lock"])
+        self.assertTrue(listener.is_locked())
+
+    def test_second_tap_ends_a_locked_recording(self):
+        listener, events = self._hotkeys(tap_to_lock=True)
+        listener._press("f9")
+        listener._release("f9")
+        listener._press("f9")
+        listener._release("f9")
+
+        self.assertEqual([event[0] for event in events], ["start", "lock", "end"])
+        self.assertFalse(listener.is_locked())
+
+    def test_locked_duration_covers_the_whole_capture(self):
+        listener, events = self._hotkeys(tap_to_lock=True)
+        listener._press("f9")
+        listener._release("f9")
+        # Stand in for the user talking for a while before tapping to finish.
+        listener._press_time -= 4.0
+        listener._press("f9")
+
+        end = [event for event in events if event[0] == "end"][0]
+        self.assertGreaterEqual(end[1], 4.0)
+
+    def test_holding_still_ends_on_release_when_lock_is_enabled(self):
+        listener, events = self._hotkeys(tap_to_lock=True)
+        listener._press("f9")
+        self._make_it_a_hold(listener)
+        listener._release("f9")
+
+        self.assertEqual([event[0] for event in events], ["start", "end"])
+        self.assertFalse(listener.is_locked())
+
+    def test_tap_does_not_lock_when_the_setting_is_off(self):
+        listener, events = self._hotkeys(tap_to_lock=False)
+        listener._press("f9")
+        listener._release("f9")
+
+        self.assertEqual([event[0] for event in events], ["start", "end"])
+        self.assertFalse(listener.is_locked())
+
+    def test_escape_cancels_a_locked_recording(self):
+        listener, events = self._hotkeys(tap_to_lock=True)
+        listener._press("f9")
+        listener._release("f9")
+        listener._press("esc")
+
+        self.assertEqual([event[0] for event in events], ["start", "lock", "cancel"])
+        self.assertFalse(listener.is_locked())
+
+    def test_escape_is_ignored_when_nothing_is_locked(self):
+        listener, events = self._hotkeys(tap_to_lock=True)
+        listener._press("esc")
+        listener._release("esc")
+
+        self.assertEqual(events, [])
+
+    def test_escape_bound_as_the_talk_key_still_records(self):
+        listener, events = self._hotkeys(ptt_key="esc", tap_to_lock=True)
+        listener._press("esc")
+        listener._release("esc")
+        listener._press("esc")
+
+        # Ending it, not cancelling it: Esc is the talk key here.
+        self.assertEqual([event[0] for event in events], ["start", "lock", "end"])
+
+    def test_cancel_lock_stops_the_current_press_from_locking(self):
+        """The app calls this when it could not actually open the microphone."""
+        listener, events = self._hotkeys(tap_to_lock=True)
+        listener._press("f9")
+        listener.cancel_lock()
+        listener._release("f9")
+
+        self.assertEqual([event[0] for event in events], ["start", "end"])
+        self.assertFalse(listener.is_locked())
+
+    def test_release_lock_ends_the_capture_for_the_time_limit(self):
+        listener, events = self._hotkeys(tap_to_lock=True)
+        listener._press("f9")
+        listener._release("f9")
+        listener.release_lock()
+
+        self.assertEqual([event[0] for event in events], ["start", "lock", "end"])
+        self.assertFalse(listener.is_locked())
+
+    def test_a_later_tap_can_lock_again_after_one_was_cancelled(self):
+        listener, events = self._hotkeys(tap_to_lock=True)
+        listener._press("f9")
+        listener._release("f9")
+        listener._press("esc")          # cancel the first one
+        listener._press("f9")
+        listener._release("f9")
+
+        self.assertEqual(
+            [event[0] for event in events], ["start", "lock", "cancel", "start", "lock"]
+        )
+        self.assertTrue(listener.is_locked())
+
+    def test_rebinding_the_talk_key_drops_a_locked_recording(self):
+        listener, events = self._hotkeys(tap_to_lock=True)
+        listener._press("f9")
+        listener._release("f9")
+        listener.set_capture_active(True)
+
+        self.assertEqual([event[0] for event in events], ["start", "lock", "cancel"])
+        self.assertFalse(listener.is_locked())
 
     def test_settings_combo_with_mouse_fires_once_per_hold(self):
         listener, events = self._hotkeys(settings_hotkey="ctrl+mouse5")
@@ -692,12 +880,19 @@ class PttWarmStartTests(unittest.TestCase):
         app._dictation_active = False
         app._ptt_preload_pending = False
         app._reload_pending = False
+        app.settings = config.Settings()
         app.meter = Mock()
         app.mic = Mock()
         app.cues = Mock()
         app.bar = Mock()
         app.meter_timer = Mock()
+        app.live_preview_timer = Mock()
+        app._preview_generation = 0
+        app._preview_running = False
+        app.lock_limit_timer = Mock()
+        app.hotkeys = Mock()
         app.engine = Mock()
+        app.tray = Mock()
         app.settings_window = None
         return app, main
 
@@ -723,6 +918,42 @@ class PttWarmStartTests(unittest.TestCase):
         self.assertTrue(app._dictation_active)
         self.assertFalse(app._ptt_preload_pending)
 
+    def test_disabled_live_preview_does_not_start_the_preview_timer(self):
+        app, main = self._app()
+        app.engine.state = main.engine_mod.READY
+        app.settings.live_preview_enabled = False
+
+        app._start_listening()
+
+        app.live_preview_timer.start.assert_not_called()
+
+    def test_turning_live_preview_off_during_recording_stops_and_hides_it(self):
+        from dataclasses import replace
+
+        app, _main = self._app()
+        app._dictation_active = True
+        disabled = replace(app.settings, live_preview_enabled=False)
+
+        app._apply_settings(disabled)
+
+        app.live_preview_timer.stop.assert_called_once()
+        self.assertEqual(app._preview_generation, 1)
+        app.bar.update_settings.assert_called_once_with(disabled)
+
+    def test_enabling_enhanced_preview_reports_hardware_limits(self):
+        from dataclasses import replace
+
+        app, main = self._app()
+        enabled = replace(app.settings, enhanced_preview_enabled=True)
+
+        with patch.object(main, "preview_hardware", return_value=(4, 8.0, True)):
+            app._apply_settings(enabled)
+
+        message = app.tray.showMessage.call_args.args[1]
+        self.assertIn("Hardware limit warning", message)
+        self.assertIn("4 CPU threads", message)
+        self.assertTrue(app._enhanced_benchmark_pending)
+
     def test_warmup_does_not_replace_the_listening_bar(self):
         app, main = self._app()
         app.engine.state = main.engine_mod.UNLOADED
@@ -744,6 +975,219 @@ class PttWarmStartTests(unittest.TestCase):
 
         app.engine.preload.assert_not_called()
         self.assertFalse(app._dictation_active)
+        # A tap that opened no microphone must not leave a lock behind.
+        app.hotkeys.cancel_lock.assert_called_once()
+
+    def test_a_press_while_busy_cannot_lock_a_recording(self):
+        app, main = self._app()
+        app._busy = True
+
+        app._start_listening()
+
+        app.mic.start.assert_not_called()
+        app.hotkeys.cancel_lock.assert_called_once()
+
+
+class UndoLastPasteTests(unittest.TestCase):
+    """Undo must refuse on any evidence the paste is no longer the last change.
+
+    Dictate cannot read another application's undo history, so these gates are
+    the entire safety story: a refused undo costs the user one re-selection, a
+    wrong one silently destroys work Dictate never created.
+    """
+
+    TARGET = 4242
+
+    def _app(self):
+        import main
+
+        app = main.App.__new__(main.App)
+        app._undo_target = self.TARGET
+        app._undo_at = main.time.monotonic()
+        app.hotkeys = Mock()
+        app.hotkeys.watched_hits.return_value = 0
+        app.bar = Mock()
+        app.act_undo = Mock()
+        app.undo_expiry_timer = Mock()
+        return app, main
+
+    def test_a_clean_undo_goes_to_the_recorded_window(self):
+        app, main = self._app()
+        with patch.object(main.inject, "window_is_alive", return_value=True), patch.object(
+            main.inject, "undo_in", return_value=True
+        ) as undo_in:
+            app._undo_last_paste()
+
+        undo_in.assert_called_once_with(self.TARGET)
+
+    def test_typing_in_that_window_since_blocks_the_undo(self):
+        app, main = self._app()
+        app.hotkeys.watched_hits.return_value = 3
+        with patch.object(main.inject, "window_is_alive", return_value=True), patch.object(
+            main.inject, "undo_in"
+        ) as undo_in:
+            app._undo_last_paste()
+
+        undo_in.assert_not_called()
+
+    def test_an_expired_offer_blocks_the_undo(self):
+        app, main = self._app()
+        app._undo_at = main.time.monotonic() - main.UNDO_WINDOW_SECONDS - 1
+        with patch.object(main.inject, "window_is_alive", return_value=True), patch.object(
+            main.inject, "undo_in"
+        ) as undo_in:
+            app._undo_last_paste()
+
+        undo_in.assert_not_called()
+
+    def test_a_closed_window_blocks_the_undo(self):
+        app, main = self._app()
+        with patch.object(main.inject, "window_is_alive", return_value=False), patch.object(
+            main.inject, "undo_in"
+        ) as undo_in:
+            app._undo_last_paste()
+
+        undo_in.assert_not_called()
+
+    def test_nothing_pasted_yet_blocks_the_undo(self):
+        app, main = self._app()
+        app._undo_target = None
+        with patch.object(main.inject, "undo_in") as undo_in:
+            app._undo_last_paste()
+
+        undo_in.assert_not_called()
+
+    def test_undo_is_offered_only_once(self):
+        app, main = self._app()
+        with patch.object(main.inject, "window_is_alive", return_value=True), patch.object(
+            main.inject, "undo_in", return_value=True
+        ) as undo_in:
+            app._undo_last_paste()
+            app._undo_last_paste()
+
+        self.assertEqual(undo_in.call_count, 1)
+        self.assertIsNone(app._undo_target)
+
+    def test_a_refusal_explains_itself_and_withdraws_the_offer(self):
+        app, main = self._app()
+        app.hotkeys.watched_hits.return_value = 1
+        with patch.object(main.inject, "window_is_alive", return_value=True), patch.object(
+            main.inject, "undo_in"
+        ):
+            app._undo_last_paste()
+
+        app.bar.notify.assert_called_once()
+        self.assertIn("typed or clicked", app.bar.notify.call_args[0][0])
+        self.assertIsNone(app._undo_target)
+
+    def test_arming_undo_watches_the_pasted_window(self):
+        app, main = self._app()
+        app._undo_target = None
+
+        app._offer_undo(99)
+
+        self.assertEqual(app._undo_target, 99)
+        app.hotkeys.watch_window.assert_called_once()
+        self.assertEqual(app.hotkeys.watch_window.call_args[0][0], 99)
+        app.act_undo.setEnabled.assert_called_with(True)
+
+    def test_the_synthetic_undo_keystroke_is_hidden_from_our_own_listener(self):
+        app, main = self._app()
+        with patch.object(main.inject, "window_is_alive", return_value=True), patch.object(
+            main.inject, "undo_in", return_value=True
+        ):
+            app._undo_last_paste()
+
+        self.assertEqual(
+            [call.args[0] for call in app.hotkeys.suppress.call_args_list], [True, False]
+        )
+
+
+class WindowActivityWatchTests(unittest.TestCase):
+    """Only input that reached the watched window counts against it."""
+
+    def _listener(self, focused):
+        events = []
+        listener = hotkeys.Hotkeys(
+            config.Settings(),
+            on_talk_start=lambda: events.append("start"),
+            on_talk_end=lambda held: events.append("end"),
+            on_settings=lambda: None,
+        )
+        listener.watch_window(7, lambda: focused["hwnd"])
+        return listener
+
+    def test_typing_into_the_watched_window_counts(self):
+        focused = {"hwnd": 7}
+        listener = self._listener(focused)
+        listener._press("a")
+        listener._press("b")
+
+        self.assertEqual(listener.watched_hits(), 2)
+
+    def test_typing_into_a_different_window_does_not_count(self):
+        """Keystrokes in another app cannot disturb this one's undo history."""
+        focused = {"hwnd": 999}
+        listener = self._listener(focused)
+        listener._press("a")
+        listener._press("b")
+
+        self.assertEqual(listener.watched_hits(), 0)
+
+    def test_opening_dictates_own_menu_does_not_count(self):
+        """The click that reaches the tray menu never lands in the target."""
+        focused = {"hwnd": 7}
+        listener = self._listener(focused)
+        focused["hwnd"] = 555  # focus moves to Dictate's menu
+        listener._press("mouse1")
+
+        self.assertEqual(listener.watched_hits(), 0)
+
+    def test_our_own_synthetic_keystrokes_do_not_count(self):
+        focused = {"hwnd": 7}
+        listener = self._listener(focused)
+        listener.suppress(True)
+        listener._press("ctrl")
+        listener._press("v")
+        listener.suppress(False)
+
+        self.assertEqual(listener.watched_hits(), 0)
+
+    def test_an_unreadable_foreground_window_counts_as_activity(self):
+        """Failing closed: an unknown state must refuse the undo, not allow it."""
+        def broken():
+            raise OSError("no window")
+
+        listener = hotkeys.Hotkeys(
+            config.Settings(),
+            on_talk_start=lambda: None,
+            on_talk_end=lambda held: None,
+            on_settings=lambda: None,
+        )
+        listener.watch_window(7, broken)
+        listener._press("a")
+
+        self.assertEqual(listener.watched_hits(), 1)
+
+    def test_nothing_is_counted_before_a_window_is_watched(self):
+        listener = hotkeys.Hotkeys(
+            config.Settings(),
+            on_talk_start=lambda: None,
+            on_talk_end=lambda held: None,
+            on_settings=lambda: None,
+        )
+        listener._press("a")
+
+        self.assertEqual(listener.watched_hits(), 0)
+
+    def test_stopping_the_watch_clears_the_count(self):
+        focused = {"hwnd": 7}
+        listener = self._listener(focused)
+        listener._press("a")
+        listener.stop_watching()
+        listener._press("b")
+
+        self.assertEqual(listener.watched_hits(), 0)
 
 
 class ConsoleCommandTests(unittest.TestCase):
@@ -825,15 +1269,56 @@ class StopListeningTests(unittest.TestCase):
         app = main.App.__new__(main.App)
         app._busy = False
         app._dictation_active = True
+        app._start_cue_at = 0.0
         app.bridge = Mock()
         app.meter = Mock()
         app.mic = Mock()
         app.cues = Mock()
         app.bar = Mock()
         app.meter_timer = Mock()
+        app.live_preview_timer = Mock()
+        app._preview_generation = 0
+        app._preview_running = False
+        app.lock_limit_timer = Mock()
+        app.hotkeys = Mock()
         app.engine = Mock()
         app.settings_window = None
         return app, main
+
+    def test_cancelling_a_locked_recording_discards_the_audio(self):
+        app, main = self._app()
+
+        app._cancel_listening()
+
+        app.mic.stop.assert_called_once()
+        app.engine.transcribe.assert_not_called()
+        app.bar.set_state.assert_called_once_with("idle")
+        self.assertFalse(app._dictation_active)
+
+    def test_the_time_limit_finishes_a_locked_recording(self):
+        app, main = self._app()
+
+        app._on_lock_limit()
+
+        # Ends it rather than throwing it away -- the words already spoken
+        # should still land.
+        app.hotkeys.release_lock.assert_called_once()
+
+    def test_a_lock_with_no_open_microphone_is_dropped(self):
+        app, main = self._app()
+        app._dictation_active = False
+
+        app._on_talk_locked()
+
+        app.hotkeys.cancel_lock.assert_called_once()
+        app.lock_limit_timer.start.assert_not_called()
+
+    def test_locking_starts_the_time_limit(self):
+        app, main = self._app()
+
+        app._on_talk_locked()
+
+        app.lock_limit_timer.start.assert_called_once()
 
     def test_silent_hold_reports_no_audio_error(self):
         app, main = self._app()
@@ -870,6 +1355,127 @@ class StopListeningTests(unittest.TestCase):
 
         app.bar.set_state.assert_called_once_with("transcribing")
         self.assertTrue(app._busy)
+
+
+class LivePreviewTests(unittest.TestCase):
+    @staticmethod
+    def _app():
+        import main
+
+        app = main.App.__new__(main.App)
+        app._dictation_active = True
+        app._preview_generation = 4
+        app._preview_running = False
+        app._preview_last_request_at = 0.0
+        app._preview_last_voice_at = 0.0
+        app._preview_was_speaking = False
+        app._enhanced_benchmark_pending = False
+        app.settings = config.Settings()
+        app.mic = Mock()
+        app.mic.latest_window.return_value = np.ones(512, dtype=np.float32) * 0.2
+        app.engine = Mock()
+        app.preview_engine = Mock()
+        app.bar = Mock()
+        app.bridge = Mock()
+        app.tray = Mock()
+        return app, main
+
+    def test_current_preview_reaches_the_integrated_bar_card(self):
+        app, _main = self._app()
+        app._preview_running = True
+
+        app._on_live_preview(4, "smooth words")
+
+        self.assertFalse(app._preview_running)
+        app.bar.set_live_text.assert_called_once_with("smooth words")
+
+    def test_preview_from_a_finished_recording_is_ignored(self):
+        app, _main = self._app()
+        app._preview_running = True
+        app._preview_generation = 5
+
+        app._on_live_preview(4, "stale words")
+
+        app.bar.set_live_text.assert_not_called()
+
+    def test_only_one_preview_inference_can_be_in_flight(self):
+        app, _main = self._app()
+        app._preview_running = True
+
+        app._request_live_preview()
+
+        app.mic.snapshot.assert_not_called()
+        app.engine.transcribe_preview.assert_not_called()
+
+    def test_pause_edge_requests_a_preview_before_the_regular_interval(self):
+        app, main = self._app()
+        now = time.perf_counter()
+        app._preview_last_request_at = now - 0.30
+        app._preview_last_voice_at = now - 0.20
+        app._preview_was_speaking = True
+        app.mic.latest_window.return_value = np.zeros(512, dtype=np.float32)
+        app.mic.snapshot.return_value = np.ones(
+            int(audio.SAMPLE_RATE * 0.8), dtype=np.float32
+        ) * 0.2
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=True):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        app.engine.transcribe_preview.return_value = "pause words"
+        with patch.object(main.threading, "Thread", ImmediateThread):
+            app._request_live_preview()
+
+        app.engine.transcribe_preview.assert_called_once()
+        app.bridge.live_preview.emit.assert_called_once()
+
+    def test_enhanced_preview_uses_the_dedicated_engine(self):
+        app, main = self._app()
+        app.settings.enhanced_preview_enabled = True
+        app._preview_last_request_at = time.perf_counter() - 1.0
+        app.mic.snapshot.return_value = np.ones(
+            int(audio.SAMPLE_RATE * 0.8), dtype=np.float32
+        ) * 0.2
+        app.preview_engine.transcribe.return_value = ("enhanced words", 0.3)
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=True):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with patch.object(main.threading, "Thread", ImmediateThread):
+            app._request_live_preview()
+
+        app.preview_engine.transcribe.assert_called_once()
+        app.engine.transcribe_preview.assert_not_called()
+        app.bridge.live_preview.emit.assert_called_once_with(
+            4, "enhanced words", 0.3, True
+        )
+
+    def test_slow_enhanced_benchmark_shows_a_hardware_limit_notification(self):
+        app, _main = self._app()
+        app._preview_running = True
+        app._enhanced_benchmark_pending = True
+
+        app._on_live_preview(4, "words", 1.2, True)
+
+        message = app.tray.showMessage.call_args.args[1]
+        self.assertIn("Hardware limit detected", message)
+        self.assertIn("1.2s", message)
+
+    def test_disabled_preview_never_reads_the_live_microphone_buffer(self):
+        app, _main = self._app()
+        app.settings.live_preview_enabled = False
+
+        app._request_live_preview()
+
+        app.mic.snapshot.assert_not_called()
+        app.engine.transcribe_preview.assert_not_called()
 
 
 class LastDictationTests(unittest.TestCase):
@@ -988,6 +1594,7 @@ class UiTests(unittest.TestCase):
         self.assertFalse(hasattr(window, "space_check"))
         self.assertEqual(window.ptt_edit.text(), "F9")
         self.assertEqual(window.hotkey_edit.text(), "Ctrl + Alt + D")
+        self.assertTrue(window.live_preview_check.isChecked())
         self.assertEqual(first_run.input_device, microphone.key)
         privacy_text = " ".join(label.text() for label in privacy.findChildren(QLabel))
         self.assertIn("Your voice stays on this PC", privacy_text)
@@ -1083,6 +1690,60 @@ class UiTests(unittest.TestCase):
         self.assertEqual(window._settings.model_size, "small.en")
         self.assertEqual(window._settings.device, "cuda")
         self.assertEqual(dummy.preload_calls, 1)
+        window.close()
+
+    def test_live_preview_toggle_saves_and_collects_off(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+            patch.object(settings_window.config, "save") as save,
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+            window.live_preview_check.setChecked(False)
+            window._save_timer.stop()
+            window._save_now()
+
+            self.assertFalse(window._settings.live_preview_enabled)
+            self.assertFalse(window._collect_settings().live_preview_enabled)
+            save.assert_called_once()
+        window.close()
+
+    def test_enhanced_preview_is_nested_under_and_disabled_with_live_preview(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+
+        self.assertTrue(window.enhanced_preview_check.isEnabled())
+        self.assertIn(
+            "Enhanced preview (Alpha)",
+            [label.text() for label in window.findChildren(settings_window.QLabel)],
+        )
+        window.enhanced_preview_check.setChecked(True)
+        self.assertTrue(window._collect_settings().enhanced_preview_enabled)
+        window.live_preview_check.setChecked(False)
+        self.assertFalse(window.enhanced_preview_check.isEnabled())
         window.close()
 
     def test_device_row_explains_the_gpu_download_when_files_are_missing(self):
@@ -1304,7 +1965,8 @@ class TalkKeyTests(unittest.TestCase):
 
         events = []
         listener = hotkeys.Hotkeys(
-            config.Settings(),
+            # Held, not tapped: tap-to-lock has its own tests below.
+            config.Settings(tap_to_lock=False),
             on_talk_start=lambda: events.append("start"),
             on_talk_end=lambda held: events.append("end"),
             on_settings=lambda: events.append("settings"),
@@ -1313,13 +1975,34 @@ class TalkKeyTests(unittest.TestCase):
         listener._on_release(keyboard.Key.f9)
         self.assertEqual(events, ["start", "end"])
 
+    def test_tapping_a_real_f9_key_event_locks_recording(self):
+        """The lock gesture from real key events, not just internal names."""
+        import hotkeys
+        from pynput import keyboard
+
+        events = []
+        listener = hotkeys.Hotkeys(
+            config.Settings(tap_to_lock=True),
+            on_talk_start=lambda: events.append("start"),
+            on_talk_end=lambda held: events.append("end"),
+            on_settings=lambda: None,
+            on_talk_lock=lambda: events.append("lock"),
+        )
+        listener._on_press(keyboard.Key.f9)
+        listener._on_release(keyboard.Key.f9)
+        self.assertEqual(events, ["start", "lock"])
+
+        listener._on_press(keyboard.Key.f9)
+        listener._on_release(keyboard.Key.f9)
+        self.assertEqual(events, ["start", "lock", "end"])
+
     def test_f9_still_works_after_a_corrupt_binding_is_clamped(self):
         import hotkeys
         from pynput import keyboard
 
         events = []
         listener = hotkeys.Hotkeys(
-            config.Settings(ptt_key="").clamped(),
+            config.Settings(ptt_key="", tap_to_lock=False).clamped(),
             on_talk_start=lambda: events.append("start"),
             on_talk_end=lambda held: events.append("end"),
             on_settings=lambda: None,
@@ -1334,6 +2017,273 @@ class TalkKeyTests(unittest.TestCase):
                 self.assertEqual(
                     config.Settings(ptt_key=good).clamped().ptt_key, good
                 )
+
+
+class BarClickTests(unittest.TestCase):
+    """The bar's own click gesture: a bounce that only means something (and
+    only fires) while a locked recording makes it mean something."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication(
+            ["dictate-tests", "-platform", "offscreen"]
+        )
+
+    @staticmethod
+    def _click(bar, inside: bool = True):
+        from PySide6.QtCore import QPointF
+
+        class _FakeMouseEvent:
+            def __init__(self, pos):
+                self._pos = pos
+
+            def position(self):
+                return self._pos
+
+        pos = (
+            QPointF(bar.width() / 2, bar.height() / 2)
+            if inside
+            else QPointF(-50, -50)
+        )
+        bar.mousePressEvent(_FakeMouseEvent(pos))
+        bar.mouseReleaseEvent(_FakeMouseEvent(pos))
+
+    def test_click_does_nothing_while_not_armed(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        fired = []
+        b.clicked.connect(lambda: fired.append(1))
+
+        self._click(b)
+
+        self.assertEqual(fired, [])
+        self.assertEqual(b._press_target, 1.0)  # never dipped -- nothing to press
+
+    def test_click_fires_and_dips_while_armed(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        fired = []
+        b.clicked.connect(lambda: fired.append(1))
+        b.set_clickable(True)
+
+        from PySide6.QtCore import QPointF
+
+        class _FakeMouseEvent:
+            def __init__(self, pos):
+                self._pos = pos
+
+            def position(self):
+                return self._pos
+
+        centre = QPointF(b.width() / 2, b.height() / 2)
+        b.mousePressEvent(_FakeMouseEvent(centre))
+        self.assertEqual(b._press_target, bar_mod.PRESS_DIP)
+
+        b.mouseReleaseEvent(_FakeMouseEvent(centre))
+        self.assertEqual(fired, [1])
+        self.assertEqual(b._press_target, 1.0)  # springs back on release
+
+    def test_release_outside_the_bar_does_not_fire(self):
+        """A drag-off-and-release should not count as a click -- ordinary
+        button semantics, and it still resets the press dip either way."""
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        fired = []
+        b.clicked.connect(lambda: fired.append(1))
+        b.set_clickable(True)
+
+        self._click(b, inside=False)
+
+        self.assertEqual(fired, [])
+        self.assertEqual(b._press_target, 1.0)
+
+    def test_set_clickable_toggles_the_cursor(self):
+        import bar as bar_mod
+        from PySide6.QtCore import Qt
+
+        b = bar_mod.Bar(config.Settings())
+        self.assertTrue(b.testAttribute(Qt.WA_TransparentForMouseEvents))
+        b.set_clickable(True)
+        self.assertEqual(b.cursor().shape(), Qt.PointingHandCursor)
+        self.assertFalse(b.testAttribute(Qt.WA_TransparentForMouseEvents))
+        b.set_clickable(False)
+        self.assertEqual(b.cursor().shape(), Qt.ArrowCursor)
+        self.assertTrue(b.testAttribute(Qt.WA_TransparentForMouseEvents))
+
+    def test_state_change_morphs_from_the_drawn_position_not_the_target(self):
+        """Regression: _apply_state used to capture _target, which can differ
+        from what is actually on screen (_drawn) because the spring lags and
+        overshoots -- a real, if usually small, source of a visible pop."""
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        b._drawn[:] = 0.3
+        b._target[:] = 0.9  # spring hasn't caught up yet
+
+        b._apply_state("listening", "")
+
+        self.assertTrue((b._morph_from == 0.3).all())
+
+    def test_listening_starts_as_a_small_empty_connected_card(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        b._apply_state("listening", "")
+
+        self.assertTrue(b._card_active)
+        self.assertEqual(b._card_target, 0.0)
+        self.assertEqual((b._text_top, b._text_bottom), ("", ""))
+
+    def test_transcript_and_bar_use_one_connected_outer_silhouette(self):
+        import bar as bar_mod
+        from PySide6.QtCore import QPointF
+
+        path = bar_mod._surface_path(bar_mod.CARD_FULL_H)
+        centre_x = bar_mod.SHADOW_PAD + bar_mod.PILL_W / 2
+
+        self.assertTrue(
+            path.contains(QPointF(centre_x, bar_mod.PILL_TOP + bar_mod.PILL_H / 2))
+        )
+        self.assertTrue(
+            path.contains(
+                QPointF(centre_x, bar_mod.PILL_TOP - bar_mod.CARD_FULL_H / 2)
+            )
+        )
+        # The overlap itself belongs to the same path, so no internal border
+        # or shadow can be painted through the card-to-pill connection.
+        self.assertTrue(
+            path.contains(QPointF(centre_x, bar_mod.PILL_TOP + 1))
+        )
+
+    def test_disabled_live_preview_has_no_card_or_text(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings(live_preview_enabled=False))
+        b._apply_state("listening", "")
+        b.set_live_text("this must remain hidden")
+
+        self.assertFalse(b._card_active)
+        self.assertEqual(b._card_target, 0.0)
+        self.assertEqual(b._text_to, ("", ""))
+
+    def test_live_text_expands_into_only_the_newest_two_rows(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        b._apply_state("listening", "")
+        b.set_live_text(
+            "This is enough dictated text to wrap across several narrow preview rows "
+            "while the person continues speaking"
+        )
+
+        self.assertEqual(b._card_target, 1.0)
+        self.assertIsNotNone(b._text_elapsed)
+        self.assertTrue(b._text_to[1])
+        # The UI contract is two rows, not an accumulating transcript view.
+        self.assertEqual(len(b._text_to), 2)
+
+    def test_one_line_uses_the_compact_height_then_grows_for_a_second(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        b._apply_state("listening", "")
+        b.set_live_text("one short line")
+        one_line_target = b._card_target
+
+        self.assertGreater(one_line_target, 0.0)
+        self.assertLess(one_line_target, 1.0)
+        b._text_top, b._text_bottom = b._text_to
+        b._text_elapsed = None
+        b.set_live_text(
+            "one short line with enough extra spoken words to need the history row"
+        )
+        self.assertEqual(b._card_target, 1.0)
+
+    def test_latest_preview_words_remain_tentative(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        b._apply_state("listening", "")
+        b.set_live_text("these settled words may still change")
+
+        self.assertLess(b._text_confirmed_to[1], len(b._text_to[1]))
+
+    def test_a_new_wrapped_row_uses_the_upward_line_transition(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        b._apply_state("listening", "")
+        b.set_live_text("first short line")
+        b._text_top, b._text_bottom = b._text_to
+        b._text_elapsed = None
+        b.set_live_text(
+            "first short line followed by enough additional words to create another row"
+        )
+
+        self.assertTrue(b._text_advancing)
+
+
+class BarClickWiringTests(unittest.TestCase):
+    """main.py's side of the gesture: arming/disarming the bar and routing
+    a click to the same finish path a second key-press already used."""
+
+    @staticmethod
+    def _app():
+        import main
+
+        app = main.App.__new__(main.App)
+        app.hotkeys = Mock()
+        app.bar = Mock()
+        app.lock_limit_timer = Mock()
+        app.meter_timer = Mock()
+        app.live_preview_timer = Mock()
+        app._preview_generation = 0
+        app._preview_running = False
+        app.mic = Mock()
+        app.cues = Mock()
+        app._dictation_active = True
+        app._busy = False
+        app._start_cue_at = 0.0
+        return app, main
+
+    def test_click_finishes_a_locked_recording(self):
+        app, _main = self._app()
+        app.hotkeys.is_locked.return_value = True
+
+        app._on_bar_clicked()
+
+        app.hotkeys.release_lock.assert_called_once()
+
+    def test_click_does_nothing_when_not_locked(self):
+        app, _main = self._app()
+        app.hotkeys.is_locked.return_value = False
+
+        app._on_bar_clicked()
+
+        app.hotkeys.release_lock.assert_not_called()
+
+    def test_locking_arms_the_bar(self):
+        app, _main = self._app()
+        app._on_talk_locked()
+        app.bar.set_clickable.assert_called_once_with(True)
+
+    def test_cancelling_disarms_the_bar(self):
+        app, _main = self._app()
+        app.mic.stop.return_value = None
+        app._cancel_listening()
+        app.bar.set_clickable.assert_called_once_with(False)
+
+    def test_stopping_disarms_the_bar(self):
+        import numpy as _np
+        app, _main = self._app()
+        app.mic.stop.return_value = _np.zeros(0, dtype=_np.float32)
+        app._stop_listening(0.01)
+        app.bar.set_clickable.assert_called_once_with(False)
 
 
 class SoundCueTests(unittest.TestCase):
@@ -1351,6 +2301,50 @@ class SoundCueTests(unittest.TestCase):
         # Stored near full scale for dynamic range; loudness is one knob.
         self.assertGreater(sounds.FILE_PEAK, 0.5)
         self.assertLessEqual(sounds.CUE_VOLUME, 0.6)
+
+    def test_note_pitch_settles_from_a_bend(self):
+        """The onset should measurably start sharp of the target pitch and
+        settle to it well before the note ends -- the "pluck" character,
+        not just a vibe. More zero crossings in an early window than an
+        equal-length late window means a higher instantaneous frequency."""
+        import sounds
+
+        note = sounds._note(sounds.HIGH_HZ)
+        window = int(sounds.SAMPLE_RATE * sounds.PITCH_BEND_TAU * 2)
+
+        def zero_crossings(x):
+            return int(np.sum(np.diff(np.sign(x)) != 0))
+
+        self.assertGreater(zero_crossings(note[:window]), zero_crossings(note[-window:]))
+
+    def test_decay_has_a_quieter_tail_under_the_main_decay(self):
+        """The two-stage envelope should stay above a pure single-exponential
+        decay late in the note -- that lingering difference is the "bloom"."""
+        import sounds
+
+        t = np.arange(int(sounds.SAMPLE_RATE * sounds.NOTE_SECONDS)) / sounds.SAMPLE_RATE
+        single_stage = np.exp(-t / sounds.DECAY_TAU)
+        two_stage = (1.0 - sounds.TAIL_MIX) * np.exp(-t / sounds.DECAY_TAU) + (
+            sounds.TAIL_MIX * np.exp(-t / sounds.TAIL_TAU)
+        )
+        late = len(t) * 3 // 4
+        self.assertGreater(two_stage[late], single_stage[late])
+
+    def test_new_timbre_constants_are_in_the_fingerprint(self):
+        """Regression guard: a future constant added to _note() that is not
+        also added to _fingerprint()'s recipe would leave a stale cached
+        .wav on disk after the sound is retuned."""
+        import sounds
+
+        for attr in ("PITCH_BEND", "PITCH_BEND_TAU", "TAIL_TAU", "TAIL_MIX"):
+            with self.subTest(constant=attr):
+                before = sounds._fingerprint()
+                original = getattr(sounds, attr)
+                try:
+                    setattr(sounds, attr, original + 0.001)
+                    self.assertNotEqual(sounds._fingerprint(), before)
+                finally:
+                    setattr(sounds, attr, original)
 
     def test_retuning_a_cue_invalidates_the_cached_file(self):
         import sounds
@@ -1370,6 +2364,86 @@ class SoundCueTests(unittest.TestCase):
         # The cues must stay a matched pair; if one is retuned and the other
         # is not they stop reading as "open" and "close".
         self.assertEqual(len(sounds._cues()["start"]), len(sounds._cues()["stop"]))
+
+    def test_no_cue_is_louder_than_the_others(self):
+        """Peak alone does not settle loudness, so hold every cue to one RMS.
+
+        The lock cue is two notes at the same pitch. They overlap
+        constructively where a rising or falling pair does not, so peak
+        normalisation alone left it hitting the same maximum sample while
+        carrying noticeably more energy -- which is what the ear actually
+        hears as "louder".
+        """
+        import sounds
+
+        levels = {
+            name: float(np.sqrt(np.mean(np.square(clip))))
+            for name, clip in sounds._cues().items()
+        }
+        for name, rms in levels.items():
+            with self.subTest(cue=name):
+                self.assertLessEqual(rms, sounds.RMS_CEILING + 1e-6)
+        # And they must stay close to each other, not merely under the cap.
+        self.assertLess(max(levels.values()) - min(levels.values()), 0.02)
+
+    def test_every_cue_stays_click_free_after_the_loudness_cap(self):
+        """The RMS cap rescales the clip, so re-check the zero endpoints."""
+        import sounds
+
+        for name, clip in sounds._cues().items():
+            with self.subTest(cue=name):
+                self.assertAlmostEqual(float(clip[0]), 0.0, places=4)
+                self.assertAlmostEqual(float(clip[-1]), 0.0, places=4)
+                self.assertLessEqual(float(abs(clip).max()), sounds.FILE_PEAK + 1e-6)
+
+    def test_locking_a_recording_plays_its_own_cue(self):
+        """The lock cue is deferred until the start cue has actually
+        finished (both end on the same A5, so overlapping them would phase
+        against each other) -- see main.py's _play_lock_cue."""
+        import main
+
+        app = main.App.__new__(main.App)
+        app._dictation_active = True
+        app._start_cue_at = 0.0
+        app.cues = Mock()
+        app.hotkeys = Mock()
+        app.hotkeys.is_locked.return_value = True
+        app.bar = Mock()
+        app.lock_limit_timer = Mock()
+
+        app._on_talk_locked()
+        app.cues.play.assert_not_called()  # not yet -- the start cue is still playing
+
+        app._play_lock_cue()
+        app.cues.play.assert_called_once_with("lock")
+
+    def test_lock_cue_is_skipped_if_the_lock_already_ended(self):
+        """A very fast finish-tap right after locking can end the recording
+        before the deferred cue fires; playing "lock" for a recording that
+        is already over would be actively misleading."""
+        import main
+
+        app = main.App.__new__(main.App)
+        app.cues = Mock()
+        app.hotkeys = Mock()
+        app.hotkeys.is_locked.return_value = False
+
+        app._play_lock_cue()
+
+        app.cues.play.assert_not_called()
+
+    def test_a_lock_that_never_started_makes_no_sound(self):
+        import main
+
+        app = main.App.__new__(main.App)
+        app._dictation_active = False
+        app.cues = Mock()
+        app.hotkeys = Mock()
+        app.lock_limit_timer = Mock()
+
+        app._on_talk_locked()
+
+        app.cues.play.assert_not_called()
 
     def test_disabled_cues_never_touch_the_audio_device(self):
         import sounds

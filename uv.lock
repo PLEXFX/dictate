@@ -113,7 +113,7 @@ wheels = [
 
 [[package]]
 name = "dictate"
-version = "0.1.2b3"
+version = "0.2.0b2"
 source = { virtual = "." }
 dependencies = [
     { name = "faster-whisper" },

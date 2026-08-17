@@ -4,7 +4,17 @@ Hold a key anywhere in Windows, speak, release. The text appears in whatever
 you were typing in. Transcription runs on this machine — no account and no
 cloud transcription. Speech-model files may download the first time they are used.
 
-## What's new in v0.1.2-beta.3
+## What's new in v0.2.0-beta.2
+
+Tap the talk key instead of holding it and recording locks on until you tap
+it again — hands-free for long passages, with Esc to cancel and a 5-minute
+safety cap. A live transcript preview now appears above the waveform as you
+talk, growing from an empty lip into a one- or two-line card, with an
+optional Enhanced (Alpha) mode that keeps that preview responsive on slower
+machines. "Undo last dictation" is in the tray menu, refusing whenever it
+can't be sure the text it would remove is still there. The waveform itself
+glows a touch brighter as you speak louder, and an always-visible idle bar
+now breathes gently instead of sitting flat.
 
 Update checks actually run now — earlier betas refused to check GitHub at
 all until Dictate had a code-signing certificate. Updates still require the
@@ -33,9 +43,11 @@ segments sweep along it, and transcribing undulates them with two waves
 crossing in opposite directions so the line never repeats a pattern.
 States morph into one another rather than swapping, each capsule starting a
 beat after its neighbour so the change ripples across, and it takes its colour
-from your Windows accent. It draws at your display's refresh rate, is built
-for whatever scale factor that display uses, and stops entirely once nothing
-is moving.
+from your Windows accent, glowing a little brighter the louder you speak. It
+draws at your display's refresh rate, is built for whatever scale factor
+that display uses, and stops entirely once nothing is moving. A live
+transcript card grows out of the same surface while you talk, showing the
+last line or two of what Dictate has heard so far.
 
 ## Install
 
@@ -55,9 +67,14 @@ and no console window either. The first launch explains the core controls and
 lets you choose a microphone.
 
 - **Hold F9** — talk. Release and the text is pasted where your cursor is.
+- **Tap F9** — for anything longer than a sentence. Recording stays on with your
+  hands free; tap again to finish, or press Esc to throw it away. A short level
+  tone marks the moment it locks, and the bar staying on screen after you let go
+  is the other half of that signal. A locked recording stops itself after five
+  minutes so a forgotten one cannot run all day.
 - **Ctrl+Alt+D** — settings.
 - Tray icon — left click for settings, right click for a menu (load model now,
-  copy the last dictation, unload model, quit).
+  copy the last dictation, undo the last dictation, unload model, quit).
 
 Use `run-dictate-debug.bat` instead when something is wrong; it keeps a
 console open so `[dictate]` status lines and errors are visible, and you can
@@ -75,6 +92,7 @@ app-data folder rather than beside the source code.
 | --- | --- |
 | Microphone | Windows default or a specific available microphone |
 | Hold to talk | Click and press the key or mouse button to hold, default `f9`. Hold inputs together to record a combination such as `ctrl+mouse4`. An empty or unusable binding falls back to `f9`. |
+| Tap to keep recording | On by default. Tapping the talk key instead of holding it locks recording on until you tap again. Turn it off to make the key hold-only. |
 | Transcription mode | Everyday, Fast response, Best accuracy, or Max accuracy without model jargon |
 | Words I use | Local names, brands, and terms that help Dictate recognize uncommon words |
 | Sleep when idle / Sleep after | Release model memory after a clear slider-controlled delay |
@@ -94,6 +112,15 @@ Dictate always pastes the result and adds one separating space. Those are
 consistent app behaviors rather than settings. Slider values show the default
 and offer a Reset control whenever they move away from it.
 
+**Undo last dictation** in the tray menu takes back the text Dictate just
+pasted, and refuses whenever it cannot be confident that text is still the last
+thing to have changed. It will not act if you have typed or clicked in that
+window since, if the window has closed, if more than 30 seconds have passed, or
+if the window will not come back to the front. It is offered once per dictation.
+Dictate cannot read another application's undo history, so refusing on any doubt
+is the only safe rule: a refused undo costs you one re-selection, while a wrong
+one would destroy work Dictate never wrote.
+
 The tray menu can copy the most recent dictation again. It keeps that one
 result in memory only; choosing it temporarily replaces the clipboard, then
 restores what was there after 5 seconds. If you copy anything in that window,
@@ -111,10 +138,18 @@ language. Debug output reports activity and errors without printing dictated tex
 
 ## Sounds
 
-Two cues, on by default and switchable off under Sounds in Settings: a rising
-pair of notes when the microphone opens and the same two notes falling when it
-closes and transcription begins. They are the same idea heard twice, so they
-read as "open" and "close" rather than as two unrelated beeps.
+Three cues, on by default and switchable off under Sounds in Settings: a rising
+pair of notes when the microphone opens, the same two notes falling when it
+closes and transcription begins, and the same pair at one pitch — neither rising
+nor falling — when a tap locks recording on. They are the same idea heard three
+ways, so they read as "open", "close" and "staying open" rather than as
+unrelated beeps.
+
+No cue can be louder than the others. Each is normalised to a shared peak and
+then held to a shared RMS, because peak alone does not settle how loud something
+sounds: the lock cue's two same-pitch notes overlap constructively where a rising
+pair does not, and matching only their peaks left it audibly the loudest of the
+three.
 
 They are synthesised rather than shipped as files — `sounddevice` and numpy
 are already here for capture and the waveform. Each is about 150 ms and begins

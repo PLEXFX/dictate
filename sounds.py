@@ -1,21 +1,41 @@
-"""Two short cues: one when the microphone opens, one when it closes.
+"""Short cues: the microphone opening, the microphone closing, and recording
+locking on.
 
 Synthesised rather than shipped as files. sounddevice is already a dependency
 for capture, numpy is already used for the waveform, and a generated tone is a
-few lines against two binary assets that have to be produced, licensed and
-kept in sync with any future change of pitch or length.
+few lines against binary assets that have to be produced, licensed and kept in
+sync with any future change of pitch or length.
 
-The pair is deliberately one idea heard twice. Both cues are the same two
+The set is deliberately one idea heard three ways. Every cue is the same two
 notes a perfect fifth apart -- rising when the microphone opens, falling when
 it closes -- so they read as an "open" and a matching "close" rather than as
-two unrelated beeps. That mirrors the bar itself, which rises into view when
-you start and settles back into its line when you stop.
+unrelated beeps. That mirrors the bar itself, which rises into view when you
+start and settles back into its line when you stop.
+
+The lock cue is the same two notes at one pitch, neither rising nor falling,
+because that is what locking is: the open cue climbed to the upper note and
+the lock simply stays there. It is the only cue whose meaning is "nothing is
+changing", and a flat pair says that without introducing a third pitch.
+
+Loudness is not a per-cue decision. ``_cue`` normalises every clip to
+``FILE_PEAK`` and playback applies the single ``CUE_VOLUME``, so a cue added
+here cannot end up louder than the ones already there.
 
 What keeps them from being annoying, given they fire on every single use:
-about 150 ms with an exponential decay, a raised-cosine attack and a faded
-tail (a waveform that starts or ends away from zero is a click, and a click is
-the most fatiguing thing a repeated UI sound can have), and a sine with one
-gentle octave partial rather than anything in the harsh 2-4 kHz region.
+about 150 ms with a raised-cosine attack and a faded tail (a waveform that
+starts or ends away from zero is a click, and a click is the most fatiguing
+thing a repeated UI sound can have), and a sine with one gentle octave
+partial rather than anything in the harsh 2-4 kHz region.
+
+Two more things give each note its "pluck" rather than reading as a flat
+synth beep, both borrowed from the same idea the bar's own springs use
+elsewhere in this app -- a touch of overshoot that settles is what makes
+motion (or here, a tone) feel like it arrived rather than merely started.
+``_note`` bends a note's pitch down from slightly sharp into true pitch over
+its first ~15 ms, the way a plucked string or a struck bell settles into its
+resting pitch rather than starting there; and its decay is two exponentials
+rather than one, a fast initial "hit" under a quieter, longer tail, so the
+note has a touch of bloom instead of a single clean cutoff.
 
 **Playback is QSoundEffect, not sounddevice.** The first version called
 `sd.play()`, which opens a brand new output stream on every cue -- and the
@@ -52,8 +72,17 @@ HIGH_HZ = 880.00
 NOTE_SECONDS = 0.11
 GAP_SECONDS = 0.04   # second note starts before the first has died away
 DECAY_TAU = 0.038
+# A quieter, slower-decaying layer under the main decay -- the "bloom" after
+# the initial pluck, like a struck bell's ring persisting under its attack.
+TAIL_TAU = 0.09
+TAIL_MIX = 0.22
 ATTACK_SECONDS = 0.004
 OCTAVE_MIX = 0.18    # a little body, well short of sounding like a square wave
+# Same ~5% figure as bar.py's SPRING_ZETA overshoot, on purpose: both exist so
+# the thing settling into place (a capsule's height, here a note's pitch)
+# reads as having arrived rather than simply appearing already at rest.
+PITCH_BEND = 0.05
+PITCH_BEND_TAU = 0.012
 
 # The stored waveform sits near full scale so the 16-bit file keeps its
 # dynamic range; how loud the cue actually is comes from CUE_VOLUME, which is
@@ -61,16 +90,33 @@ OCTAVE_MIX = 0.18    # a little body, well short of sounding like a square wave
 FILE_PEAK = 0.90
 CUE_VOLUME = 0.125
 
+# Peak alone does not settle how loud a cue *sounds*. Two notes at the same
+# pitch overlap constructively where two notes a fifth apart do not, so the
+# lock cue reaches the same peak while carrying noticeably more energy behind
+# it. Loudness tracks that energy, not the single highest sample, so every cue
+# is also held to this RMS -- the level the original rising and falling pair
+# already sat at. Whichever limit bites harder wins, and no cue added later
+# can come out louder than the ones that are already there.
+RMS_CEILING = 0.26
+
 _CUES: dict[str, np.ndarray] = {}
 
 
 def _note(freq: float) -> np.ndarray:
     count = int(SAMPLE_RATE * NOTE_SECONDS)
     t = np.arange(count, dtype=np.float64) / SAMPLE_RATE
-    wave_form = np.sin(2 * np.pi * freq * t) + OCTAVE_MIX * np.sin(
-        2 * np.pi * freq * 2 * t
+
+    # Bends from PITCH_BEND above freq down to freq over PITCH_BEND_TAU.
+    # Integrating the instantaneous frequency into a phase (rather than just
+    # writing sin(2*pi*freq*t) with a time-varying freq) is what keeps this
+    # continuous -- differentiating a naive substitution would pop.
+    instantaneous = freq * (1.0 + PITCH_BEND * np.exp(-t / PITCH_BEND_TAU))
+    phase = 2 * np.pi * np.cumsum(instantaneous) / SAMPLE_RATE
+    wave_form = np.sin(phase) + OCTAVE_MIX * np.sin(2 * phase)
+
+    envelope = (1.0 - TAIL_MIX) * np.exp(-t / DECAY_TAU) + TAIL_MIX * np.exp(
+        -t / TAIL_TAU
     )
-    envelope = np.exp(-t / DECAY_TAU)
     attack = int(SAMPLE_RATE * ATTACK_SECONDS)
     if attack > 1:
         # Raised cosine in, so the waveform starts from silence instead of
@@ -89,6 +135,9 @@ def _cue(first: float, second: float) -> np.ndarray:
     loudest = float(np.abs(out).max())
     if loudest > 0.0:
         out *= FILE_PEAK / loudest
+    energy = float(np.sqrt(np.mean(np.square(out))))
+    if energy > RMS_CEILING:
+        out *= RMS_CEILING / energy
     tail = int(SAMPLE_RATE * 0.006)
     if tail > 1:
         out[-tail:] *= np.linspace(1.0, 0.0, tail)
@@ -99,7 +148,23 @@ def _cues() -> dict[str, np.ndarray]:
     if not _CUES:
         _CUES["start"] = _cue(LOW_HZ, HIGH_HZ)    # rising: the mic is open
         _CUES["stop"] = _cue(HIGH_HZ, LOW_HZ)     # falling: it is closed, working
+        # Level: recording stayed on after the key came up. Picks up on the
+        # note the start cue just landed on, so a tap reads as one phrase.
+        _CUES["lock"] = _cue(HIGH_HZ, HIGH_HZ)
     return _CUES
+
+
+def cue_seconds(name: str) -> float:
+    """Wall-clock length of a cue's actual clip, tail included.
+
+    Lets a caller time a second cue to start only once this one has finished
+    rather than guessing a duration by hand -- see main.py's lock cue, which
+    would otherwise start its own A5 while the start cue's closing A5 (the
+    same pitch, by design) is still decaying, and the two audibly phase
+    against each other instead of reading as one settled tone.
+    """
+    clip = _cues().get(name)
+    return (clip.size / SAMPLE_RATE) if clip is not None else 0.0
 
 
 def _fingerprint() -> str:
@@ -110,7 +175,11 @@ def _fingerprint() -> str:
     """
     recipe = (
         LOW_HZ, HIGH_HZ, NOTE_SECONDS, GAP_SECONDS, DECAY_TAU,
-        ATTACK_SECONDS, OCTAVE_MIX, FILE_PEAK, SAMPLE_RATE,
+        TAIL_TAU, TAIL_MIX, ATTACK_SECONDS, OCTAVE_MIX,
+        PITCH_BEND, PITCH_BEND_TAU, FILE_PEAK, RMS_CEILING, SAMPLE_RATE,
+        # Which cues exist, so adding or removing one also invalidates the
+        # cache rather than leaving an orphaned file behind.
+        tuple(sorted(_cues())),
     )
     return hashlib.sha1(repr(recipe).encode()).hexdigest()[:8]
 

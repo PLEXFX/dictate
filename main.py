@@ -21,6 +21,7 @@ import ctypes
 import os
 import sys
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -45,6 +46,29 @@ from version import VERSION
 
 APP_NAME = "Dictate"
 MUTEX_NAME = "Global\\DictateSingleInstance"
+
+# Longest a locked (tap-started) recording runs before Dictate stops it and
+# transcribes what it has. A hold is bounded by the user's finger; a lock is
+# not, so a forgotten one would otherwise hold the microphone open all day.
+MAX_LOCKED_SECONDS = 5 * 60
+
+# Whisper is an offline model, so "live" text is a throttled rolling preview:
+# one bounded audio window at a time, never a queue of increasingly stale
+# inference jobs.  The final release transcription still uses the full clip.
+LIVE_PREVIEW_POLL_MS = 80
+LIVE_PREVIEW_INTERVAL_MS = 450
+LIVE_PREVIEW_PAUSE_SETTLE_MS = 160
+LIVE_PREVIEW_PAUSE_MIN_GAP_MS = 180
+LIVE_PREVIEW_WINDOW_SECONDS = 6.0
+LIVE_PREVIEW_MIN_SECONDS = 0.45
+ENHANCED_PREVIEW_SLOW_SECONDS = 0.9
+
+# How long "Undo last dictation" stays on offer. Dictate cannot read another
+# app's undo history, so it can never *prove* its paste is still the top of
+# that stack -- it can only refuse whenever it has evidence otherwise. A short
+# window is the last of those guards: the longer the offer sits there, the more
+# chance the app's own state has moved on in some way no listener can see.
+UNDO_WINDOW_SECONDS = 30
 
 # (name, description) pairs for the debug console's `help` output. A plain
 # list rather than a dict so the printed order matches the order below --
@@ -124,11 +148,49 @@ def make_icon(color: QColor = QColor(76, 194, 255)) -> QIcon:
     return QIcon(pixmap)
 
 
+def _tray_tip(settings) -> str:
+    """One sentence for the tray icon, naming whichever gestures are live."""
+    key = hotkeys_mod.format_combo(settings.ptt_key)
+    if settings.tap_to_lock:
+        return f"{APP_NAME} — hold {key} to talk, or tap it to keep recording"
+    return f"{APP_NAME} — hold {key} to talk"
+
+
+def preview_hardware() -> tuple[int, float, bool]:
+    """Return logical CPU threads, installed RAM in GiB, and a cautious limit flag."""
+    threads = os.cpu_count() or 1
+    ram_gib = 0.0
+    try:
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("length", ctypes.c_ulong),
+                ("memory_load", ctypes.c_ulong),
+                ("total_physical", ctypes.c_ulonglong),
+                ("available_physical", ctypes.c_ulonglong),
+                ("total_page_file", ctypes.c_ulonglong),
+                ("available_page_file", ctypes.c_ulonglong),
+                ("total_virtual", ctypes.c_ulonglong),
+                ("available_virtual", ctypes.c_ulonglong),
+                ("available_extended_virtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatus()
+        status.length = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            ram_gib = status.total_physical / (1024 ** 3)
+    except (AttributeError, OSError):
+        pass
+    limited = threads < 8 or (ram_gib > 0 and ram_gib < 12.0)
+    return threads, ram_gib, limited
+
+
 class Bridge(QObject):
     """Signal-only object used to hop onto the UI thread from other threads."""
 
     talk_started = Signal()
     talk_ended = Signal(float)
+    talk_locked = Signal()  # a tap turned the hold into a locked recording
+    talk_cancelled = Signal()  # a locked recording was abandoned, audio discarded
     open_settings = Signal()
     engine_state = Signal(str, str, object)  # state, detail, progress (0..1 or None)
     finished = Signal(str, str)  # state, detail
@@ -137,6 +199,10 @@ class Bridge(QObject):
     update_current = Signal()  # a manual check found nothing newer
     update_status_changed = Signal()  # live status/progress text changed
     dictated = Signal(str)  # successfully inserted text, kept only in memory
+    pasted_into = Signal(int)  # window handle the text landed in, for undo
+    # generation, rolling text, measured inference seconds (-1 on failure),
+    # and whether the dedicated Enhanced preview model handled the request.
+    live_preview = Signal(int, str, float, bool)
 
 
 class App:
@@ -163,6 +229,7 @@ class App:
         self.engine = engine_mod.Engine(
             self.settings, on_state=self.bridge.engine_state.emit
         )
+        self.preview_engine = engine_mod.PreviewEngine(self.settings)
         self.bar = Bar(self.settings)
         self.theme_watcher.changed.connect(self._on_theme_changed)
         self.cues = sounds_mod.Cues(self.settings.sound_cues)
@@ -170,8 +237,17 @@ class App:
         self._busy = False
         self._dictation_active = False  # mic open or its captured audio is still processing
         self._ptt_preload_pending = False  # background warm-up started by a PTT press
+        self._start_cue_at = 0.0  # when the "start" cue began, so "lock" can wait it out
         self._reload_pending = False  # set only by a Settings-triggered reload
         self._last_dictation = ""
+        self._undo_target = None  # window the last paste landed in
+        self._undo_at = 0.0
+        self._preview_generation = 0
+        self._preview_running = False
+        self._preview_last_request_at = 0.0
+        self._preview_last_voice_at = 0.0
+        self._preview_was_speaking = False
+        self._enhanced_benchmark_pending = False
         self._clipboard_restore = None
         self._clipboard_restore_timer = QTimer()
         self._clipboard_restore_timer.setSingleShot(True)
@@ -185,10 +261,29 @@ class App:
             on_talk_start=self.bridge.talk_started.emit,
             on_talk_end=self.bridge.talk_ended.emit,
             on_settings=self.bridge.open_settings.emit,
+            on_talk_lock=self.bridge.talk_locked.emit,
+            on_talk_cancel=self.bridge.talk_cancelled.emit,
         )
+
+        # Stops a locked recording that was started and then forgotten. Without
+        # it a lock left running holds the microphone open and grows the capture
+        # buffer for as long as the app runs.
+        self.lock_limit_timer = QTimer()
+        self.lock_limit_timer.setSingleShot(True)
+        self.lock_limit_timer.setInterval(int(MAX_LOCKED_SECONDS * 1000))
+        self.lock_limit_timer.timeout.connect(self._on_lock_limit)
+
+        # Retires the undo offer on its own, so a menu left unopened for an
+        # hour never presents a stale one.
+        self.undo_expiry_timer = QTimer()
+        self.undo_expiry_timer.setSingleShot(True)
+        self.undo_expiry_timer.setInterval(UNDO_WINDOW_SECONDS * 1000)
+        self.undo_expiry_timer.timeout.connect(self._withdraw_undo)
 
         self.bridge.talk_started.connect(self._start_listening)
         self.bridge.talk_ended.connect(self._stop_listening)
+        self.bridge.talk_locked.connect(self._on_talk_locked)
+        self.bridge.talk_cancelled.connect(self._cancel_listening)
         self.bridge.open_settings.connect(self._show_settings)
         self.bridge.engine_state.connect(self._on_engine_state)
         self.bridge.finished.connect(self._on_finished)
@@ -197,11 +292,18 @@ class App:
         self.bridge.update_current.connect(self._on_update_current)
         self.bridge.update_status_changed.connect(self._on_update_status_changed)
         self.bridge.dictated.connect(self._remember_last_dictation)
+        self.bridge.pasted_into.connect(self._offer_undo)
+        self.bridge.live_preview.connect(self._on_live_preview)
+        self.bar.clicked.connect(self._on_bar_clicked)
 
         # Drives the waveform. Only runs while the mic is open.
         self.meter_timer = QTimer()
         self.meter_timer.setInterval(16)
         self.meter_timer.timeout.connect(self._pump_meter)
+
+        self.live_preview_timer = QTimer()
+        self.live_preview_timer.setInterval(LIVE_PREVIEW_POLL_MS)
+        self.live_preview_timer.timeout.connect(self._request_live_preview)
 
         self._build_tray()
         self.hotkeys.start()
@@ -232,9 +334,7 @@ class App:
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self.icon)
-        self.tray.setToolTip(
-            f"{APP_NAME} — hold {hotkeys_mod.format_combo(self.settings.ptt_key)} to talk"
-        )
+        self.tray.setToolTip(_tray_tip(self.settings))
 
         menu = QMenu()
         act_settings = QAction(f"Settings\t{self.settings.settings_hotkey}", menu)
@@ -254,6 +354,11 @@ class App:
         self.act_copy_last.setEnabled(False)
         self.act_copy_last.triggered.connect(self._copy_last_dictation)
         menu.addAction(self.act_copy_last)
+
+        self.act_undo = QAction("Undo last dictation", menu)
+        self.act_undo.setEnabled(False)
+        self.act_undo.triggered.connect(self._undo_last_paste)
+        menu.addAction(self.act_undo)
         menu.addSeparator()
 
         act_check_update = QAction("Check for updates", menu)
@@ -387,11 +492,16 @@ class App:
 
     def _start_listening(self) -> None:
         if self._busy:
-            return  # still pasting the last one; ignore the new press
+            # Still pasting the last one; ignore the new press. Cancelling the
+            # lock too stops a tap here from locking a recording that never
+            # started.
+            self.hotkeys.cancel_lock()
+            return
         self.meter.reset()
         try:
             self.mic.start()
         except Exception as exc:
+            self.hotkeys.cancel_lock()
             self.bar.set_state("error", "No microphone")
             print(f"[dictate] mic error: {exc}")
             return
@@ -399,6 +509,7 @@ class App:
         # cannot delay capture, and never before it, so a failed mic is
         # silent rather than chiming and then showing an error.
         self.cues.play("start")
+        self._start_cue_at = time.monotonic()
         # Capture is already live. Warming an unloaded model now overlaps its
         # cold-start cost with the user's speech instead of making them wait
         # after release. ``preload`` is asynchronous and ``ensure_loaded``
@@ -409,9 +520,66 @@ class App:
             self.engine.preload()
         self.bar.set_state("listening")
         self.meter_timer.start()
+        self._preview_generation += 1
+        now = time.perf_counter()
+        self._preview_last_request_at = now
+        self._preview_last_voice_at = now
+        self._preview_was_speaking = False
+        if self.settings.live_preview_enabled:
+            self.live_preview_timer.start()
+
+    def _on_talk_locked(self) -> None:
+        """A tap locked the recording on. The bar staying up is the signal."""
+        if not self._dictation_active:
+            # The microphone never opened, so there is nothing to keep running.
+            self.hotkeys.cancel_lock()
+            return
+        self.lock_limit_timer.start()
+        # A tap is by definition faster than MIN_HOLD_SECONDS, so without this
+        # the lock cue's A5 starts while the start cue's own closing A5 (same
+        # pitch, on purpose -- see sounds.py) is still decaying, and the two
+        # audibly phase against each other instead of reading as one settled
+        # tone. Wait out whatever's left of the start cue first.
+        remaining = sounds_mod.cue_seconds("start") - (time.monotonic() - self._start_cue_at)
+        QTimer.singleShot(max(0, int(remaining * 1000)), self._play_lock_cue)
+        self.bar.set_clickable(True)
+        print("[dictate] recording locked on — press the talk key again to finish")
+
+    def _play_lock_cue(self) -> None:
+        # The delay above means the lock could already be over by the time
+        # this fires (a very fast finish-tap right after locking); playing
+        # the cue for a recording that has already ended would be confusing.
+        if self.hotkeys.is_locked():
+            self.cues.play("lock")
+
+    def _on_bar_clicked(self) -> None:
+        """Clicking the bar while it is armed finishes a locked recording,
+        the mouse equivalent of pressing the talk key again."""
+        if self.hotkeys.is_locked():
+            self.hotkeys.release_lock()
+
+    def _on_lock_limit(self) -> None:
+        print(f"[dictate] locked recording hit {MAX_LOCKED_SECONDS}s — finishing it")
+        self.hotkeys.release_lock()
+
+    def _cancel_listening(self) -> None:
+        """Throw away a locked recording without transcribing it."""
+        self.lock_limit_timer.stop()
+        self.meter_timer.stop()
+        self.live_preview_timer.stop()
+        self._preview_generation += 1
+        self.mic.stop()
+        self._dictation_active = False
+        self.bar.set_clickable(False)
+        self.bar.set_state("idle")
+        print("[dictate] recording cancelled")
 
     def _stop_listening(self, duration: float) -> None:
+        self.lock_limit_timer.stop()
         self.meter_timer.stop()
+        self.live_preview_timer.stop()
+        self._preview_generation += 1
+        self.bar.set_clickable(False)
         clip = self.mic.stop()
         if duration < hotkeys_mod.MIN_HOLD_SECONDS or clip.size == 0:
             self._dictation_active = False
@@ -447,6 +615,10 @@ class App:
         # Dictate always pastes and always leaves one separating space. These
         # are app behavior, not decisions a user should have to configure.
         payload = text + " "
+        # Read the focused window before pasting, not after: the paste itself
+        # cannot move focus, but anything the user does next can, and this is
+        # the identity the undo offer is anchored to.
+        target = inject.foreground_window()
         try:
             # Stop our own listener from seeing the synthetic Ctrl+V, which
             # would otherwise leave 'ctrl' stuck in the pressed-key set.
@@ -461,6 +633,8 @@ class App:
 
         preview = text if len(text) <= 18 else text[:17] + "…"
         self.bridge.dictated.emit(text)
+        if target is not None:
+            self.bridge.pasted_into.emit(target)
         self.bridge.finished.emit("done", preview)
 
     def _on_finished(self, state: str, detail: str) -> None:
@@ -472,6 +646,92 @@ class App:
 
     def _pump_meter(self) -> None:
         self.bar.set_levels(self.meter.update(self.mic.latest_window()))
+
+    def _request_live_preview(self) -> None:
+        """Start one coalesced preview, favoring natural pauses in speech."""
+        if (
+            not self.settings.live_preview_enabled
+            or self._preview_running
+            or not self._dictation_active
+        ):
+            return
+
+        now = time.perf_counter()
+        latest = self.mic.latest_window()
+        voice_now = (
+            latest.size >= 32
+            and audio_mod.rms_level(latest)
+            >= audio_mod.SILENCE_RMS_THRESHOLD * 1.15
+        )
+        if voice_now:
+            self._preview_last_voice_at = now
+            self._preview_was_speaking = True
+        pause_edge = (
+            self._preview_was_speaking
+            and (now - self._preview_last_voice_at) * 1000
+            >= LIVE_PREVIEW_PAUSE_SETTLE_MS
+        )
+        since_last_ms = (now - self._preview_last_request_at) * 1000
+        if pause_edge:
+            self._preview_was_speaking = False
+        if since_last_ms < LIVE_PREVIEW_INTERVAL_MS and not (
+            pause_edge and since_last_ms >= LIVE_PREVIEW_PAUSE_MIN_GAP_MS
+        ):
+            return
+
+        clip = self.mic.snapshot(LIVE_PREVIEW_WINDOW_SECONDS)
+        if clip.size < int(audio_mod.SAMPLE_RATE * LIVE_PREVIEW_MIN_SECONDS):
+            return
+        if audio_mod.rms_level(clip) < audio_mod.SILENCE_RMS_THRESHOLD:
+            return
+        generation = self._preview_generation
+        self._preview_running = True
+        self._preview_last_request_at = now
+        enhanced = self.settings.enhanced_preview_enabled
+
+        def work() -> None:
+            measured = 0.0
+            try:
+                if enhanced:
+                    text, measured = self.preview_engine.transcribe(clip)
+                else:
+                    text = self.engine.transcribe_preview(clip)
+            except Exception as exc:
+                # Preview is decorative and must never break the dependable
+                # release-to-paste path.  The final pass will report a real
+                # transcription failure through its existing error state.
+                print(f"[dictate] live preview skipped: {exc}")
+                text = ""
+                measured = -1.0
+            self.bridge.live_preview.emit(generation, text, measured, enhanced)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_live_preview(
+        self, generation: int, text: str, measured: float = 0.0, enhanced: bool = False
+    ) -> None:
+        self._preview_running = False
+        if enhanced and self._enhanced_benchmark_pending:
+            self._enhanced_benchmark_pending = False
+            if measured < 0:
+                message = (
+                    "Hardware limit: Enhanced preview could not start. "
+                    "Turn it off to keep using normal preview."
+                )
+            elif measured > ENHANCED_PREVIEW_SLOW_SECONDS:
+                message = (
+                    f"Hardware limit detected: Enhanced preview took {measured:.1f}s. "
+                    "Normal preview may feel smoother on this PC."
+                )
+            else:
+                message = f"Enhanced preview ready — measured {measured:.2f}s per update."
+            self.tray.showMessage(
+                APP_NAME, message, QSystemTrayIcon.Information, 6000
+            )
+        if generation != self._preview_generation or not self._dictation_active:
+            return
+        if text:
+            self.bar.set_live_text(text)
 
     # --- settings ---
 
@@ -537,14 +797,115 @@ class App:
         self.settings = settings
         if settings.auto_update_enabled != old.auto_update_enabled:
             self.updater.set_enabled(settings.auto_update_enabled)
+        if settings.live_preview_enabled != old.live_preview_enabled:
+            self._preview_generation += 1
+            if settings.live_preview_enabled and self._dictation_active:
+                self.live_preview_timer.start()
+            else:
+                self.live_preview_timer.stop()
+        enhanced_turned_on = (
+            settings.enhanced_preview_enabled
+            and not old.enhanced_preview_enabled
+        )
+        if enhanced_turned_on:
+            self._enhanced_benchmark_pending = True
+            threads, ram_gib, limited = preview_hardware()
+            hardware = f"{threads} CPU threads"
+            if ram_gib:
+                hardware += f", {ram_gib:.0f} GB RAM"
+            if limited:
+                message = (
+                    f"Hardware limit warning — {hardware}. Enhanced preview may lag; "
+                    "Dictate will measure it while you speak."
+                )
+            else:
+                message = (
+                    f"Enhanced preview is on — {hardware}. The Base speech model "
+                    "downloads on first use, then Dictate measures its speed."
+                )
+            self.tray.showMessage(
+                APP_NAME, message, QSystemTrayIcon.Information, 6500
+            )
+        elif old.enhanced_preview_enabled and not settings.enhanced_preview_enabled:
+            self._enhanced_benchmark_pending = False
+            preview_engine = getattr(self, "preview_engine", None)
+            if preview_engine is not None:
+                threading.Thread(target=preview_engine.unload, daemon=True).start()
         self.mic.set_device(settings.input_device)
         self.engine.update_settings(settings)
+        preview_engine = getattr(self, "preview_engine", None)
+        if preview_engine is not None:
+            preview_engine.update_settings(settings)
         self.hotkeys.update_settings(settings)
+        if not settings.tap_to_lock:
+            # Turning the gesture off must also release a lock already running,
+            # or it would keep recording with no supported way to end it.
+            self.hotkeys.cancel_lock()
         self.bar.update_settings(settings)
         self.cues.update_settings(settings)
-        self.tray.setToolTip(
-            f"{APP_NAME} — hold {hotkeys_mod.format_combo(settings.ptt_key)} to talk"
-        )
+        self.tray.setToolTip(_tray_tip(settings))
+
+    # --- undoing a paste ---
+
+    def _offer_undo(self, handle: int) -> None:
+        """Arm "Undo last dictation" for the window the text just landed in."""
+        self._undo_target = handle
+        self._undo_at = time.monotonic()
+        self.hotkeys.watch_window(handle, inject.foreground_window)
+        self.act_undo.setEnabled(True)
+        self.undo_expiry_timer.start()
+
+    def _withdraw_undo(self) -> None:
+        self._undo_target = None
+        self.hotkeys.stop_watching()
+        self.undo_expiry_timer.stop()
+        self.act_undo.setEnabled(False)
+
+    def _undo_refusal(self) -> str:
+        """Why undo must not fire, or an empty string when it is safe.
+
+        Every branch here answers the same question: is Dictate's paste still
+        the newest thing in that window's undo history? It cannot ask the app
+        directly, so it refuses on any evidence to the contrary rather than
+        guessing. A refused undo costs one re-selection; a wrong one destroys
+        work Dictate did not create.
+        """
+        if self._undo_target is None:
+            return "there is nothing to undo"
+        if time.monotonic() - self._undo_at > UNDO_WINDOW_SECONDS:
+            return "too long ago to be sure it is still the last change"
+        if self.hotkeys.watched_hits():
+            return "you have typed or clicked in that window since"
+        if not inject.window_is_alive(self._undo_target):
+            return "that window is gone"
+        return ""
+
+    def _undo_last_paste(self) -> None:
+        refusal = self._undo_refusal()
+        if refusal:
+            print(f"[dictate] not undoing — {refusal}")
+            self.bar.notify(f"Cannot undo: {refusal}", tone="info")
+            self._withdraw_undo()
+            return
+
+        target = self._undo_target
+        # One use only. Withdrawing first means a failure part-way through
+        # cannot leave a stale offer pointing at a window that has moved on.
+        self._withdraw_undo()
+        self.hotkeys.suppress(True)
+        try:
+            sent = inject.undo_in(target)
+        except Exception as exc:
+            print(f"[dictate] undo error: {exc}")
+            sent = False
+        finally:
+            self.hotkeys.suppress(False)
+
+        if sent:
+            print("[dictate] undid the last dictation")
+        else:
+            print("[dictate] not undoing — could not focus that window again")
+            self.bar.notify("Cannot undo: that window would not come forward")
 
     def _remember_last_dictation(self, text: str) -> None:
         """Keep one result in RAM for recovery without creating a transcript log."""
@@ -603,6 +964,9 @@ class App:
     def _quit(self) -> None:
         self.hotkeys.stop()
         self.engine.shutdown()
+        preview_engine = getattr(self, "preview_engine", None)
+        if preview_engine is not None:
+            preview_engine.shutdown()
         self.updater.shutdown()
         self.tray.hide()
         self.qt.quit()

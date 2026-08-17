@@ -117,8 +117,19 @@ PILL_W = int(2 * PAD + WAVE_W)
 PILL_H = 40
 RADIUS = 8             # Windows 11 flyout radius; 16 read as iOS
 SHADOW_PAD = 12        # room around the pill for the ambient shadow
+# The transcript is part of this same frameless window.  Reserving its full
+# height keeps the waveform anchored above the taskbar while the card grows
+# upward instead of making the whole control jump when the first words arrive.
+CARD_FULL_H = 48        # two compact rows with Windows-like 4px top breathing room
+CARD_ONE_H = 29         # one row stays compact until history actually exists
+CARD_STUB_H = 8        # the small connected lip visible before speech resolves
+CARD_OVERLAP = 3       # tucks under the pill so the two surfaces read as one
+CARD_INSET = 4
+CARD_TEXT_PAD = 12
+CARD_RADIUS = 8
+PILL_TOP = SHADOW_PAD + CARD_FULL_H
 WIDTH = PILL_W + 2 * SHADOW_PAD
-HEIGHT = PILL_H + 2 * SHADOW_PAD
+HEIGHT = PILL_TOP + PILL_H + SHADOW_PAD
 MAX_BAR_H = PILL_H - 12
 
 # One hairline runs the width of the bar and never moves. At rest the bars sit
@@ -142,6 +153,16 @@ SPRING_OMEGA = 58.0
 # that is correct and motion that is satisfying. Much below 0.65 it starts
 # to wobble and reads as cheap again.
 SPRING_ZETA = 0.70
+# The click bounce (locked recording only, see set_clickable) reuses this same
+# closed-form spring rather than a separate canned animation -- "everything is
+# sprung" applies to the one interactive gesture the bar has, not just the
+# capsules. Tuned tighter and snappier than SPRING_OMEGA/ZETA on purpose: the
+# capsules are meant to read as breath, loose and organic; a button press in
+# Windows is solid and barely overshoots. Reusing the capsules' looser spring
+# here would make a click feel like it wobbles instead of clicks.
+PRESS_OMEGA = 90.0
+PRESS_ZETA = 0.85
+PRESS_DIP = 0.97   # how far the pill shrinks on press; subtle, not a bounce toy
 # Fluent point-to-point motion is 150-250 ms. An earlier build stacked a
 # 350 ms dwell floor, a 200 ms morph and a 144 ms ripple, so a state change
 # could take 694 ms end to end and read as lag. These are sized so the worst
@@ -179,6 +200,44 @@ RISE_PX = 8.0              # entrance rises from the taskbar edge
 # against the recovery frame -- at 0.05 the faster, narrower transcribing hump
 # lurched 0.35 of full scale in a single frame coming out of a freeze.
 MAX_DT = 0.025
+
+# Transcript motion.  The card itself uses a near-critically-damped spring;
+# words use a shorter Fluent crossfade so they feel responsive without
+# flickering each time Whisper revises the unfinished phrase.
+CARD_OMEGA = 31.0
+CARD_ZETA = 0.78
+TEXT_TRANSITION_SECONDS = 0.24
+TEXT_RISE_PX = 7.0
+
+# A word settling from tentative (52% alpha) to confirmed does not just pop
+# to full opacity: its trailing, newly-confirmed span rises the last couple
+# of pixels of a quick, critically-damped settle while briefly reading a
+# touch brighter than the rest of the line. Critically damped on purpose --
+# a *confirmation* overshooting would read as a wobble, not as certainty.
+CONFIRM_PULSE_SECONDS = 0.16
+CONFIRM_PULSE_RISE_PX = 1.5
+CONFIRM_PULSE_BRIGHTEN = 0.30
+
+# Loudness nudges the listening accent brighter/more saturated rather than
+# changing colour outright -- colour is still reserved for states that
+# genuinely differ. Smoothed on its own, slower spring so it tracks the
+# *envelope* of your voice, not every frame of mic jitter the way the
+# capsules themselves do.
+LOUD_GLOW_OMEGA = 14.0
+# _spring_scalar's closed form divides by sqrt(1 - zeta^2), so 1.0 (exactly
+# critical) is a division by zero. 0.98 is indistinguishable from critical --
+# no visible overshoot -- while staying just inside the solver's domain.
+LOUD_GLOW_ZETA = 0.98
+LOUD_GLOW_SAT = 0.18
+LOUD_GLOW_LIGHT = 0.10
+
+# A permanently visible idle bar (Settings: "always visible") breathes very
+# slowly at its centre rather than sitting dead flat, so it reads as alive
+# and listening rather than merely undismissed. Amplitude stays under
+# LIFT_FADE_PX at its peak so it is felt more than seen.
+IDLE_BREATH_HZ = 0.12          # ~8.3 s per cycle
+IDLE_BREATH_AMPLITUDE = 0.16
+IDLE_BREATH_SPAN = 1.6         # how far from centre the breathing reaches
 
 _U = np.linspace(0.0, 1.0, N_BARS, dtype=np.float32)
 _CENTRE_D = np.abs(np.arange(N_BARS) - (N_BARS - 1) / 2) / ((N_BARS - 1) / 2)
@@ -262,15 +321,59 @@ def _noise_tile(dpr: float, dark: bool = True) -> QPixmap:
     return pixmap
 
 
-def _shadow(dpr: float, dark: bool = True) -> QPixmap:
-    """Ambient elevation under the pill, blurred once and cached per scale.
+def _surface_path(
+    card_height: float = 0.0,
+    *,
+    y_offset: float = 0.0,
+    pixel_inset: float = 0.0,
+) -> QPainterPath:
+    """One outer silhouette for the pill and its connected transcript card.
+
+    Building the union before either the shadow or outline is painted removes
+    the internal border that made the two surfaces look like stacked boxes.
+    """
+    pill = QPainterPath()
+    pill.addRoundedRect(
+        QRectF(
+            SHADOW_PAD + pixel_inset,
+            PILL_TOP + y_offset + pixel_inset,
+            PILL_W - 2 * pixel_inset,
+            PILL_H - 2 * pixel_inset,
+        ),
+        RADIUS,
+        RADIUS,
+    )
+    if card_height <= 0.0:
+        return pill
+    card = QPainterPath()
+    card.addRoundedRect(
+        QRectF(
+            SHADOW_PAD + CARD_INSET + pixel_inset,
+            PILL_TOP + CARD_OVERLAP + y_offset - card_height + pixel_inset,
+            PILL_W - 2 * CARD_INSET - 2 * pixel_inset,
+            card_height - 2 * pixel_inset,
+        ),
+        CARD_RADIUS,
+        CARD_RADIUS,
+    )
+    return pill.united(card)
+
+
+def _shadow(
+    dpr: float, dark: bool = True, card_height: float = 0.0
+) -> QPixmap:
+    """Ambient elevation under the complete control, cached per card height.
 
     Rendered at the display's device pixel ratio and tagged with it, so the
     shadow is as sharp on a 4K 150% display as on a 1080p one. A single 1x
     bitmap scaled up is exactly the kind of soft, slightly wrong edge that
     makes a hand-painted window look unlike the rest of the shell.
     """
-    key = ("shadow", round(dpr, 3), dark)
+    # Two-pixel buckets keep the animated edge visually continuous without
+    # doing three blur passes on every frame of the height spring.
+    card_height = max(0.0, min(CARD_FULL_H, card_height))
+    shadow_card_height = float(int(round(card_height / 2.0)) * 2)
+    key = ("shadow", round(dpr, 3), dark, shadow_card_height)
     if key in _CACHE:
         return _CACHE[key]
     width, height = int(round(WIDTH * dpr)), int(round(HEIGHT * dpr))
@@ -280,11 +383,10 @@ def _shadow(dpr: float, dark: bool = True) -> QPixmap:
     p.setRenderHint(QPainter.Antialiasing, True)
     p.setPen(Qt.NoPen)
     p.scale(dpr, dpr)
-    path = QPainterPath()
-    path.addRoundedRect(
-        QRectF(SHADOW_PAD, SHADOW_PAD + 2, PILL_W, PILL_H), RADIUS, RADIUS
-    )
-    p.fillPath(path, colors(dark)["shadow"])
+    path = _surface_path(shadow_card_height, y_offset=2.0)
+    shadow_color = QColor(colors(dark)["shadow"])
+    shadow_color.setAlpha(round(shadow_color.alpha() * 0.76))
+    p.fillPath(path, shadow_color)
     p.end()
 
     arr = np.frombuffer(layer.constBits(), np.uint8).reshape(height, width, 4)
@@ -317,6 +419,8 @@ EXIT_MS = 150
 
 
 class Bar(QWidget):
+    clicked = Signal()   # only fires while set_clickable(True) -- see mouseReleaseEvent
+
     def __init__(self, settings):
         super().__init__(None)
         self._settings = settings
@@ -330,6 +434,37 @@ class Bar(QWidget):
         self._toast_on_click = None      # optional callback for an actionable notice
         self._linger_ms = settings.bar_linger_ms
         self._preview_margin: int | None = None  # live override while dragging the Settings slider
+
+        self._clickable = False          # only true while a locked recording is running
+        self._press_scale = 1.0
+        self._press_vel = 0.0
+        self._press_target = 1.0
+
+        # Rolling two-line transcript.  ``_card_expand == 0`` still paints a
+        # small lip while listening; the first line opens a compact card and
+        # 1 reveals enough room for both lines.
+        self._card_active = False
+        self._card_expand = 0.0
+        self._card_vel = 0.0
+        self._card_target = 0.0
+        self._text_top = ""
+        self._text_bottom = ""
+        self._text_from = ("", "")
+        self._text_to = ("", "")
+        self._text_confirmed_from = (0, 0)
+        self._text_confirmed_to = (0, 0)
+        self._preview_raw = ""
+        self._text_elapsed: float | None = None
+        self._text_advancing = False
+        # Bottom-row-only: the confirmed-char count the settle pulse is
+        # rising out of, and how far through that settle it is.
+        self._confirm_pulse_from = 0
+        self._confirm_pulse_elapsed: float | None = None
+        self._loud_glow = 0.0
+        self._loud_glow_vel = 0.0
+        self._text_font = QFont("Segoe UI Variable Text", 9)
+        if not self._text_font.exactMatch():
+            self._text_font = QFont("Segoe UI", 9)
 
         self._drawn = np.zeros(N_BARS, dtype=np.float32)
         self._vel = np.zeros(N_BARS, dtype=np.float32)
@@ -362,6 +497,11 @@ class Bar(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
+        # The transcript reserves its full upward animation area even while
+        # collapsed.  Keep those transparent pixels click-through unless a
+        # locked recording has explicitly armed the bar's finish-on-click
+        # action, or the invisible rectangle would block the app underneath.
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setFixedSize(WIDTH, HEIGHT)
 
         self._toast = Toast()
@@ -401,7 +541,7 @@ class Bar(QWidget):
     def pill_geometry(self) -> QRect:
         """Where the visible pill is on screen, ignoring the shadow margin."""
         geo = self.geometry()
-        return QRect(geo.x() + SHADOW_PAD, geo.y() + SHADOW_PAD, PILL_W, PILL_H)
+        return QRect(geo.x() + SHADOW_PAD, geo.y() + PILL_TOP, PILL_W, PILL_H)
 
     def reposition(self) -> None:
         """Centre horizontally, sit just above the taskbar.
@@ -418,7 +558,7 @@ class Bar(QWidget):
         area = screen.availableGeometry()
         x = area.center().x() - WIDTH // 2
         margin = self._preview_margin if self._preview_margin is not None else self._settings.bar_margin
-        y = area.bottom() + 1 - max(0, margin) - PILL_H - SHADOW_PAD
+        y = area.bottom() + 1 - max(0, margin) - PILL_H - PILL_TOP
         self.move(x, y)
         self._toast.follow(self.pill_geometry())
 
@@ -440,6 +580,12 @@ class Bar(QWidget):
         self._accent = system_accent()
         self._linger_ms = settings.bar_linger_ms
         self._preview_margin = None    # the real value just landed; stop overriding it
+        if settings.live_preview_enabled:
+            if self._state == "listening":
+                self._card_active = True
+        else:
+            self._card_active = False
+            self.clear_live_text()
         if settings.always_visible and self._state == "idle":
             self.show_bar()
         self.reposition()
@@ -526,10 +672,13 @@ class Bar(QWidget):
         self, state: str, detail: str, progress: float | None = None
     ) -> None:
         if state != self._state:
-            # Morph out of what is actually on screen, not out of a canned
-            # shape for the old state, so an animation interrupted halfway
-            # carries its current form through the change.
-            self._morph_from = self._target.copy()
+            # Morph out of what is actually on screen (_drawn), not out of
+            # wherever the spring happened to be heading (_target) -- the
+            # spring lags its target and overshoots by ~5%, so at the instant
+            # a state changes those two can differ slightly. Starting from
+            # _drawn means an animation interrupted mid-flight always carries
+            # its true current shape into the change, with no last-instant pop.
+            self._morph_from = self._drawn.copy()
             self._morph_from_tint = QColor(self._tint)
             self._morph_elapsed = 0.0
         self._state = state
@@ -541,6 +690,8 @@ class Bar(QWidget):
             self._history[:] = 0.0
             self._mic_level = 0.0
             self._slice_accum = 0.0
+            self._card_active = self._settings.live_preview_enabled
+            self.clear_live_text()
             self._hide_timer.stop()
             self.show_bar()
         elif state in ("transcribing", "loading"):
@@ -565,11 +716,43 @@ class Bar(QWidget):
                 dot = SUCCESS if self._notice_tone == "success" else self._accent
                 self._toast.show_message(detail, self.pill_geometry(), dot_color=dot)
         elif state == "idle":
+            self._card_active = False
+            self._card_target = 0.0
             if self._settings.always_visible:
                 self.show_bar()             # keeps the clock alive for the morph
             else:
                 self._hide_timer.start(600)
         self.update()
+
+    def set_clickable(self, clickable: bool) -> None:
+        """Arm or disarm the bar's own click gesture.
+
+        Deliberately not tied to ``_state`` -- a locked recording keeps the
+        ordinary "listening" state throughout (main.py's choice, so the tap
+        -to-lock feature never had to touch this file's state machine).
+        main.py calls this exactly when clicking the bar would mean
+        something: on while a locked recording is running, off the moment it
+        ends. A click while this is off does not bounce or fire ``clicked`` --
+        an idle bar that visibly reacts to a click but does nothing reads as
+        broken, not premium.
+        """
+        self._clickable = clickable
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not clickable)
+        self.setCursor(Qt.PointingHandCursor if clickable else Qt.ArrowCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if self._clickable:
+            self._press_target = PRESS_DIP
+            if not self._timer.isActive():
+                self._last_tick = time.perf_counter()
+                self._timer.start()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if not self._clickable:
+            return
+        self._press_target = 1.0
+        if self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
 
     def set_levels(self, levels: np.ndarray) -> None:
         """Take the newest meter reading. Deliberately does not repaint.
@@ -580,6 +763,134 @@ class Bar(QWidget):
         """
         if levels.size:
             self._mic_level = float(np.sqrt(np.mean(np.square(levels))))
+
+    def set_live_text(self, text: str) -> None:
+        """Animate a rolling Whisper preview into the two-row card.
+
+        Only the last two fitted rows are kept.  When a new row begins, the
+        lower row rises toward the history slot while the older row dissolves;
+        ordinary corrections within the current row use a quieter crossfade.
+        """
+        if self._state != "listening" or not self._settings.live_preview_enabled:
+            return
+        normalized = " ".join(text.split())
+        rows = self._fit_live_rows(normalized)
+        top, bottom = self._fit_live_lines(normalized)
+        if not bottom:
+            return
+        incoming = (top, bottom)
+        current = self._text_to if self._text_elapsed is not None else (
+            self._text_top,
+            self._text_bottom,
+        )
+        if incoming == current:
+            return
+
+        # Preview updates are deliberately slower than this transition, but
+        # if a loaded GPU returns twice in quick succession, use the newest
+        # target as the visual starting point instead of jumping backwards.
+        if self._text_elapsed is not None:
+            self._text_top, self._text_bottom = self._text_to
+        self._text_from = (self._text_top, self._text_bottom)
+        self._text_confirmed_from = self._text_confirmed_to
+        self._text_to = incoming
+
+        words = normalized.split()
+        previous = self._preview_raw.split()
+        stable_words = 0
+        for old_word, new_word in zip(previous, words):
+            if old_word != new_word:
+                break
+            stable_words += 1
+        # Whisper's unfinished tail is the part most likely to change.  Keep
+        # the newest two words visibly tentative even when the rest of a new
+        # result has not had a second pass yet.
+        stable_words = max(stable_words, max(0, len(words) - 2))
+        confirmed: list[int] = []
+        for _line, start, end in rows:
+            count = max(0, min(end, stable_words) - start)
+            confirmed.append(len(" ".join(words[start:start + count])))
+        if len(confirmed) == 1:
+            confirmed = [0, confirmed[0]]
+        prev_bottom_confirmed = self._text_confirmed_to[1]
+        self._text_confirmed_to = tuple(confirmed[-2:])
+        self._preview_raw = normalized
+        self._text_advancing = bool(
+            self._text_from[1]
+            and incoming[0]
+            and incoming[0] != self._text_from[0]
+        )
+        # A settle pulse only makes sense when the bottom row is still the
+        # same row growing more confirmed tail -- not when it just became a
+        # new row, which is the row-rise motion's job instead.
+        if (
+            not self._text_advancing
+            and self._text_confirmed_to[1] > prev_bottom_confirmed
+        ):
+            self._confirm_pulse_from = prev_bottom_confirmed
+            self._confirm_pulse_elapsed = 0.0
+        else:
+            self._confirm_pulse_elapsed = None
+        self._text_elapsed = 0.0
+        self._card_target = (
+            1.0
+            if top
+            else (CARD_ONE_H - CARD_STUB_H) / (CARD_FULL_H - CARD_STUB_H)
+        )
+        self._card_active = True
+        if not self._timer.isActive():
+            self._last_tick = time.perf_counter()
+            self._timer.start()
+        self.update()
+
+    def clear_live_text(self) -> None:
+        """Return the listening card to its empty connected lip."""
+        self._text_top = ""
+        self._text_bottom = ""
+        self._text_from = ("", "")
+        self._text_to = ("", "")
+        self._text_confirmed_from = (0, 0)
+        self._text_confirmed_to = (0, 0)
+        self._preview_raw = ""
+        self._text_elapsed = None
+        self._text_advancing = False
+        self._confirm_pulse_from = 0
+        self._confirm_pulse_elapsed = None
+        self._card_target = 0.0
+        self.update()
+
+    def _fit_live_lines(self, text: str) -> tuple[str, str]:
+        """Word-wrap a rolling preview and retain only its newest two rows."""
+        rows = self._fit_live_rows(text)
+        if not rows:
+            return "", ""
+        lines = [row[0] for row in rows]
+        if len(lines) == 1:
+            return "", lines[0]
+        return lines[0], lines[1]
+
+    def _fit_live_rows(self, text: str) -> list[tuple[str, int, int]]:
+        """Return the newest fitted rows plus their word-index ranges."""
+        words = " ".join(text.split()).split(" ")
+        if not words or words == [""]:
+            return []
+        metrics = QFontMetrics(self._text_font)
+        max_width = PILL_W - 2 * (CARD_INSET + CARD_TEXT_PAD)
+        rows: list[tuple[str, int, int]] = []
+        current = ""
+        start = 0
+        for index, word in enumerate(words):
+            candidate = word if not current else f"{current} {word}"
+            if metrics.horizontalAdvance(candidate) <= max_width:
+                current = candidate
+                continue
+            if current:
+                rows.append((current, start, index))
+            current = word
+            start = index
+        if current:
+            rows.append((current, start, len(words)))
+        return rows[-2:]
 
     # --- reveal ---
 
@@ -641,6 +952,10 @@ class Bar(QWidget):
         self._morph_elapsed = None
         self._sweep = 0.0
         self._tint = QColor(self._palette["idle"])
+        self._card_active = False
+        self._card_expand = 0.0
+        self._card_vel = 0.0
+        self.clear_live_text()
 
     # --- animation ---
 
@@ -673,6 +988,36 @@ class Bar(QWidget):
         # Bars collapse into the progress track only for the long wait.
         want_sweep = 1.0 if self._state == "loading" else 0.0
         self._sweep += (want_sweep - self._sweep) * (1.0 - math.exp(-dt / SWEEP_TAU))
+
+        self._press_scale, self._press_vel = _spring_scalar(
+            self._press_scale, self._press_vel, self._press_target,
+            PRESS_OMEGA, PRESS_ZETA, dt,
+        )
+        self._card_expand, self._card_vel = _spring_scalar(
+            self._card_expand,
+            self._card_vel,
+            self._card_target,
+            CARD_OMEGA,
+            CARD_ZETA,
+            dt,
+        )
+        if self._text_elapsed is not None:
+            self._text_elapsed += dt
+            if self._text_elapsed >= TEXT_TRANSITION_SECONDS:
+                self._text_top, self._text_bottom = self._text_to
+                self._text_elapsed = None
+        if self._confirm_pulse_elapsed is not None:
+            self._confirm_pulse_elapsed += dt
+            if self._confirm_pulse_elapsed >= CONFIRM_PULSE_SECONDS:
+                self._confirm_pulse_elapsed = None
+
+        # Tracks the mic envelope while listening and relaxes to 0 the moment
+        # it stops, so the tint glow never lingers into another state.
+        target_glow = self._mic_level if self._state == "listening" else 0.0
+        self._loud_glow, self._loud_glow_vel = _spring_scalar(
+            self._loud_glow, self._loud_glow_vel, target_glow,
+            LOUD_GLOW_OMEGA, LOUD_GLOW_ZETA, dt,
+        )
 
         live = self._signal(self._state)
         if self._morph_elapsed is not None:
@@ -707,9 +1052,21 @@ class Bar(QWidget):
             and self._sweep < 0.01
             and float(np.abs(self._drawn - self._target).max()) < 0.002
             and float(np.abs(self._vel).max()) < 0.01
+            and abs(self._press_scale - self._press_target) < 0.002
+            and abs(self._press_vel) < 0.01
+            and abs(self._card_expand - self._card_target) < 0.002
+            and abs(self._card_vel) < 0.01
+            and self._text_elapsed is None
+            and self._confirm_pulse_elapsed is None
+            and abs(self._loud_glow) < 0.002
+            and abs(self._loud_glow_vel) < 0.01
         ):
             self._drawn[:] = self._target
             self._vel[:] = 0.0
+            self._press_scale = self._press_target
+            self._press_vel = 0.0
+            self._card_expand = self._card_target
+            self._card_vel = 0.0
             self._timer.stop()
 
         self.update()
@@ -728,6 +1085,15 @@ class Bar(QWidget):
             return np.clip(slid, 0.0, 1.0).astype(np.float32)
         if state == "loading":
             return np.zeros(N_BARS, dtype=np.float32)    # collapsed to the track
+        if state == "idle":
+            if not self._settings.always_visible:
+                return np.zeros(N_BARS, dtype=np.float32)
+            # A slow, centre-weighted breath rather than a flat line, so an
+            # always-visible idle bar reads as listening rather than stuck.
+            # Kept under LIFT_FADE_PX at its peak -- felt, not seen.
+            breath = 0.5 - 0.5 * math.cos(2.0 * math.pi * self._clock * IDLE_BREATH_HZ)
+            shape = np.clip(1.0 - _CENTRE_D * IDLE_BREATH_SPAN, 0.0, 1.0) ** 2
+            return (IDLE_BREATH_AMPLITUDE * breath * shape).astype(np.float32)
         if state == "transcribing":
             # Two travelling components moving in opposite directions at
             # different speeds. Where they reinforce, a crest rises; where they
@@ -768,6 +1134,8 @@ class Bar(QWidget):
             return SUCCESS if self._notice_tone == "success" else self._accent
         if state == "idle":
             return self._palette["idle"]
+        if state == "listening" and self._loud_glow > 0.01:
+            return _loud_tint(self._accent, self._loud_glow)
         return self._accent
 
     # --- painting ---
@@ -780,8 +1148,10 @@ class Bar(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
         # Fade, rise and scale all come off the same value, so they cannot drift.
-        scale = 0.92 + 0.08 * self._reveal
-        cx, cy = SHADOW_PAD + PILL_W / 2.0, SHADOW_PAD + PILL_H / 2.0
+        # The click press-dip multiplies in on top -- same pivot, so a click
+        # mid-entrance still shrinks from wherever the reveal scale already is.
+        scale = (0.92 + 0.08 * self._reveal) * self._press_scale
+        cx, cy = SHADOW_PAD + PILL_W / 2.0, PILL_TOP + PILL_H / 2.0
         p.translate(0.0, RISE_PX * (1.0 - self._reveal))
         p.translate(cx, cy)
         p.scale(scale, scale)
@@ -792,22 +1162,40 @@ class Bar(QWidget):
         dpr = self.devicePixelRatioF()
 
         p.setOpacity(self._reveal)
-        p.drawPixmap(0, 0, _shadow(dpr, self._dark))
+        expand = _smoothstep(min(1.0, max(0.0, self._card_expand)))
+        visible_card_h = (
+            CARD_STUB_H + (CARD_FULL_H - CARD_STUB_H) * expand
+            if self._card_active
+            else 0.0
+        )
+        p.drawPixmap(0, 0, _shadow(dpr, self._dark, visible_card_h))
 
-        pill = QRectF(SHADOW_PAD + 0.5, SHADOW_PAD + 0.5, PILL_W - 1, PILL_H - 1)
+        if self._card_active:
+            self._paint_transcript_card(p, dpr)
+
+        pill = QRectF(SHADOW_PAD + 0.5, PILL_TOP + 0.5, PILL_W - 1, PILL_H - 1)
         path = QPainterPath()
         path.addRoundedRect(pill, RADIUS, RADIUS)
         p.fillPath(path, self._palette["surface"])
         p.fillPath(path, QBrush(_noise_tile(dpr, self._dark)))   # the grain in Acrylic
+
+        # One external hairline around the union.  Drawing the two rounded
+        # rectangles separately left a horizontal border through their join.
+        p.setOpacity(self._reveal)
         p.setPen(QPen(self._palette["stroke"], 1))
-        p.drawPath(path)
+        p.drawPath(
+            _surface_path(
+                visible_card_h if self._card_active else 0.0,
+                pixel_inset=0.5,
+            )
+        )
         p.setPen(Qt.NoPen)
 
         # The hairline is the one thing that never moves or fades, so the bars
         # and the sweep are only ever *on* it. Drawing it once, outside the
         # crossfade, is what stops the collapse into loading from reading as
         # one widget being swapped for another.
-        cy = SHADOW_PAD + PILL_H / 2.0
+        cy = PILL_TOP + PILL_H / 2.0
         x0 = SHADOW_PAD + PAD
         hairline = QPainterPath()
         hairline.addRoundedRect(
@@ -825,6 +1213,142 @@ class Bar(QWidget):
             else:
                 self._paint_sweep(p)
 
+    def _paint_transcript_card(self, p: QPainter, dpr: float) -> None:
+        """Paint the connected listening lip and its two live text rows."""
+        expand = _smoothstep(min(1.0, max(0.0, self._card_expand)))
+        visible_h = CARD_STUB_H + (CARD_FULL_H - CARD_STUB_H) * expand
+        bottom = PILL_TOP + CARD_OVERLAP
+        card = QRectF(
+            SHADOW_PAD + CARD_INSET + 0.5,
+            bottom - visible_h,
+            PILL_W - 2 * CARD_INSET - 1,
+            visible_h,
+        )
+        path = QPainterPath()
+        path.addRoundedRect(card, CARD_RADIUS, CARD_RADIUS)
+
+        p.save()
+        base_opacity = self._reveal
+        p.setOpacity(base_opacity)
+        # The card is intentionally only a tonal step away from the bar: dark
+        # mode uses a slightly blacker surface, light mode a slightly whiter
+        # one, matching Windows Settings groups without creating a new colour.
+        surface = QColor(35, 35, 35, 248) if self._dark else QColor(255, 255, 255, 250)
+        p.fillPath(path, surface)
+        p.fillPath(path, QBrush(_noise_tile(dpr, self._dark)))
+        # The shared outline is painted after the pill, around the union of
+        # both shapes.  There is intentionally no card-only border here.
+
+        text_opacity = _smoothstep(
+            min(
+                1.0,
+                max(
+                    0.0,
+                    (visible_h - CARD_STUB_H) / (CARD_ONE_H - CARD_STUB_H),
+                ),
+            )
+        )
+        if text_opacity <= 0.001:
+            p.restore()
+            return
+
+        p.setClipPath(path)
+        p.setFont(self._text_font)
+        metrics = QFontMetrics(self._text_font)
+        text_left = card.left() + CARD_TEXT_PAD
+        text_width = card.width() - 2 * CARD_TEXT_PAD
+        line_h = max(16, metrics.height() + 2)
+        # Anchor the newest row to the bar.  The first line therefore does not
+        # jump when the card grows upward to make room for history above it.
+        bottom_y = card.bottom() - 4 - line_h
+        top_y = bottom_y - line_h
+
+        pulse_t = 1.0
+        if self._confirm_pulse_elapsed is not None:
+            pulse_t = _smoothstep(self._confirm_pulse_elapsed / CONFIRM_PULSE_SECONDS)
+
+        def draw_line(
+            text: str,
+            y: float,
+            alpha: float,
+            offset: float = 0.0,
+            confirmed_chars: int = 0,
+            pulse_from: int | None = None,
+        ) -> None:
+            if not text or alpha <= 0.001:
+                return
+            p.setPen(self._palette["text"])
+            fitted = metrics.elidedText(text, Qt.ElideRight, int(text_width))
+            confirmed_chars = min(max(0, confirmed_chars), len(fitted))
+            solid = fitted[:confirmed_chars]
+            tentative = fitted[confirmed_chars:]
+            settled, fresh = solid, ""
+            if pulse_from is not None and 0 <= pulse_from < len(solid):
+                settled, fresh = solid[:pulse_from], solid[pulse_from:]
+            if settled:
+                p.setOpacity(base_opacity * text_opacity * alpha)
+                p.drawText(
+                    QRectF(text_left, y + offset, text_width, line_h),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    settled,
+                )
+            if fresh:
+                # The word that just settled rises the last CONFIRM_PULSE_RISE_PX
+                # and cools from a brief accent tint back to the ordinary text
+                # colour, instead of popping straight to full opacity.
+                fresh_x = text_left + metrics.horizontalAdvance(settled)
+                p.setPen(_lerp_color(self._palette["text"], self._tint, CONFIRM_PULSE_BRIGHTEN * (1.0 - pulse_t)))
+                p.setOpacity(base_opacity * text_opacity * alpha)
+                p.drawText(
+                    QRectF(
+                        fresh_x,
+                        y + offset - CONFIRM_PULSE_RISE_PX * (1.0 - pulse_t),
+                        max(0.0, text_width - (fresh_x - text_left)),
+                        line_h,
+                    ),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    fresh,
+                )
+                p.setPen(self._palette["text"])
+            if tentative:
+                tentative_x = text_left + metrics.horizontalAdvance(solid)
+                p.setOpacity(base_opacity * text_opacity * alpha * 0.52)
+                p.drawText(
+                    QRectF(
+                        tentative_x,
+                        y + offset,
+                        max(0.0, text_width - (tentative_x - text_left)),
+                        line_h,
+                    ),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    tentative,
+                )
+
+        if self._text_elapsed is None:
+            draw_line(self._text_top, top_y, 0.56, confirmed_chars=self._text_confirmed_to[0])
+            draw_line(self._text_bottom, bottom_y, 0.98, confirmed_chars=self._text_confirmed_to[1])
+        else:
+            t = _smoothstep(self._text_elapsed / TEXT_TRANSITION_SECONDS)
+            old_top, old_bottom = self._text_from
+            new_top, new_bottom = self._text_to
+            old_confirmed = self._text_confirmed_from
+            new_confirmed = self._text_confirmed_to
+            if self._text_advancing:
+                row_rise = bottom_y - top_y
+                draw_line(old_top, top_y, 0.56 * (1.0 - t), -TEXT_RISE_PX * t, old_confirmed[0])
+                draw_line(old_bottom, bottom_y, 0.98 * (1.0 - t), -row_rise * t, old_confirmed[1])
+                draw_line(new_top, top_y, 0.56 * t, confirmed_chars=new_confirmed[0])
+                draw_line(new_bottom, bottom_y, 0.98 * t, TEXT_RISE_PX * (1.0 - t), new_confirmed[1])
+            else:
+                draw_line(old_top, top_y, 0.56 * (1.0 - t), confirmed_chars=old_confirmed[0])
+                draw_line(new_top, top_y, 0.56 * t, confirmed_chars=new_confirmed[0])
+                draw_line(old_bottom, bottom_y, 0.98 * (1.0 - t), -2.0 * t, old_confirmed[1])
+                draw_line(
+                    new_bottom, bottom_y, 0.98 * t, 3.0 * (1.0 - t), new_confirmed[1],
+                    pulse_from=self._confirm_pulse_from,
+                )
+        p.restore()
+
     def _paint_bars(self, p: QPainter) -> None:
         """Slim capsules growing out of the hairline.
 
@@ -835,7 +1359,7 @@ class Bar(QWidget):
         to be -- and the faintness of a quiet voice becomes part of the
         signal instead of an on/off edge.
         """
-        cy = SHADOW_PAD + PILL_H / 2.0
+        cy = PILL_TOP + PILL_H / 2.0
         x0 = SHADOW_PAD + PAD
         base_alpha = self._tint.alphaF()
 
@@ -856,7 +1380,7 @@ class Bar(QWidget):
     def _paint_sweep(self, p: QPainter) -> None:
         """Windows' indeterminate ProgressBar, running along the same hairline
         the bars just sank into: two accent segments, the longer one leading."""
-        cy = SHADOW_PAD + PILL_H / 2.0
+        cy = PILL_TOP + PILL_H / 2.0
         x0 = SHADOW_PAD + PAD
         width = WAVE_W
 
@@ -890,7 +1414,7 @@ class Bar(QWidget):
         introducing a second widget, for the same reason the sweep collapses
         onto the hairline instead of appearing beside it.
         """
-        cy = SHADOW_PAD + PILL_H / 2.0
+        cy = PILL_TOP + PILL_H / 2.0
         x0 = SHADOW_PAD + PAD
         filled = WAVE_W * float(np.clip(fraction, 0.0, 1.0))
         if filled <= 0.5:
@@ -939,9 +1463,40 @@ def _spring(
     return new_pos.astype(np.float32), new_vel.astype(np.float32)
 
 
+def _spring_scalar(
+    pos: float, vel: float, target: float, omega: float, zeta: float, dt: float
+) -> tuple[float, float]:
+    """Same closed-form solution as ``_spring``, for the one scalar value
+    (the click press-scale) that does not need a 21-wide array."""
+    offset = pos - target
+    damped = omega * math.sqrt(1.0 - zeta * zeta)
+    decay = math.exp(-zeta * omega * dt)
+    cos_t = math.cos(damped * dt)
+    sin_t = math.sin(damped * dt)
+    a = offset
+    b = (vel + zeta * omega * offset) / damped
+    swing = a * cos_t + b * sin_t
+    new_pos = target + decay * swing
+    new_vel = decay * (-zeta * omega * swing + damped * (b * cos_t - a * sin_t))
+    return new_pos, new_vel
+
+
 def _smoothstep(t: float) -> float:
     t = min(1.0, max(0.0, t))
     return t * t * (3.0 - 2.0 * t)
+
+
+def _loud_tint(base: QColor, level: float) -> QColor:
+    """Nudge the listening accent brighter and a touch more saturated as the
+    mic reads louder, so a quiet voice keeps the calm accent and a loud one
+    glows -- without ever becoming a different colour."""
+    hue, sat, light, alpha = base.getHslF()
+    amount = min(1.0, max(0.0, level))
+    if hue < 0.0:            # a grey accent has no hue to keep, per system_accent
+        hue = 0.0
+    sat = min(1.0, sat + LOUD_GLOW_SAT * amount)
+    light = min(0.85, light + LOUD_GLOW_LIGHT * amount)
+    return QColor.fromHslF(hue, sat, light, alpha)
 
 
 def _lerp_color(a: QColor, b: QColor, t: float) -> QColor:

@@ -6,6 +6,14 @@ press/release pair that hold-to-talk needs. Keeping one shared pressed-input set
 also lets a hold-to-talk binding include mouse buttons, such as
 ``ctrl+mouse4``.
 
+The same binding carries two gestures. Holding it records for as long as it is
+down, which is the original behaviour. Tapping it -- releasing before
+``MIN_HOLD_SECONDS`` -- locks recording on instead, so a long passage does not
+have to be dictated with a finger held down; the next press ends it. That tap
+used to be discarded as a stray press, so the gesture costs nothing that was
+previously useful, and the two are told apart by how long the key was down
+rather than by a second binding the user has to learn.
+
 Threading: pynput calls into this on its own listener thread. Nothing here
 touches Qt directly -- callbacks are handed straight to the caller, which is
 responsible for marshalling onto the UI thread.
@@ -19,7 +27,13 @@ from typing import Callable
 
 from pynput import keyboard, mouse
 
-MIN_HOLD_SECONDS = 0.25  # shorter than this is a stray tap, not an utterance
+MIN_HOLD_SECONDS = 0.25  # released faster than this is a tap, not an utterance
+
+# Key that cancels a locked recording and throws the audio away. Not
+# configurable: Esc means "get me out of this" everywhere else in Windows, and
+# a locked recording is exactly the state where a user wants that reflex to
+# work without having looked up a binding first.
+CANCEL_KEY = "esc"
 
 _MODIFIERS = {
     keyboard.Key.ctrl: "ctrl", keyboard.Key.ctrl_l: "ctrl", keyboard.Key.ctrl_r: "ctrl",
@@ -131,18 +145,28 @@ class Hotkeys:
         on_talk_start: Callable[[], None],
         on_talk_end: Callable[[float], None],
         on_settings: Callable[[], None],
+        on_talk_lock: Callable[[], None] | None = None,
+        on_talk_cancel: Callable[[], None] | None = None,
     ):
         self._settings = settings
         self._on_talk_start = on_talk_start
         self._on_talk_end = on_talk_end
         self._on_settings = on_settings
+        self._on_talk_lock = on_talk_lock or (lambda: None)
+        self._on_talk_cancel = on_talk_cancel or (lambda: None)
 
         self._pressed: set[str] = set()
         self._talking = False
         self._press_time = 0.0
         self._combo_latched = False
+        self._locked = False    # recording continues with the key released
+        self._lockable = True   # this press may still turn into a lock
+        self._ending_lock = False  # the press that ended a lock is still down
         self._suppressed = False  # ignore our own synthetic paste keystrokes
         self._capture_active = False  # Settings is recording a new binding
+        self._watched = None            # window whose input we are counting
+        self._watched_foreground = None  # callable giving the focused window
+        self._watched_hits = 0
         self._lock = threading.Lock()
         self._listener: keyboard.Listener | None = None
         self._mouse_listener: mouse.Listener | None = None
@@ -170,6 +194,81 @@ class Hotkeys:
             self._pressed.clear()
         if active:
             self._combo_latched = False
+            # Rebinding the talk key while a locked recording runs would leave
+            # a capture that the new binding cannot stop. Drop it.
+            self.cancel_lock()
+
+    # --- watching one window for user input ---
+
+    def watch_window(self, handle, foreground) -> None:
+        """Start counting input that lands in ``handle``.
+
+        ``foreground`` is a callable returning the focused window, injected
+        rather than imported so this module keeps knowing nothing about
+        Windows APIs and stays testable without one.
+
+        Only input delivered *while that window is focused* counts. That is
+        the whole point: keystrokes typed into some other app cannot have
+        disturbed this one's undo history, and neither can the click that
+        opens Dictate's own tray menu.
+        """
+        self._watched = handle
+        self._watched_foreground = foreground
+        self._watched_hits = 0
+
+    def stop_watching(self) -> None:
+        self._watched = None
+        self._watched_foreground = None
+        self._watched_hits = 0
+
+    def watched_hits(self) -> int:
+        """How much user input the watched window has taken since watching began."""
+        return self._watched_hits
+
+    def _note_activity(self) -> None:
+        if self._watched is None or self._suppressed:
+            return
+        try:
+            if self._watched_foreground() == self._watched:
+                self._watched_hits += 1
+        except Exception:
+            # Never let a failed window query silently under-report activity;
+            # counting it means undo refuses, which is the safe direction.
+            self._watched_hits += 1
+
+    # --- locked recording ---
+
+    def lock_enabled(self) -> bool:
+        return bool(getattr(self._settings, "tap_to_lock", True))
+
+    def is_locked(self) -> bool:
+        return self._locked
+
+    def cancel_lock(self) -> None:
+        """Abandon a locked recording, and stop the current press forming one.
+
+        Called both by the Esc handler and by the app when it could not
+        actually open the microphone -- otherwise a tap would lock a recording
+        that was never running, and the bar would sit there capturing nothing.
+        """
+        was_locked = self._locked
+        self._locked = False
+        self._lockable = False
+        if was_locked:
+            self._talking = False
+            self._on_talk_cancel()
+
+    def release_lock(self) -> None:
+        """End a locked recording as though the user had pressed the key.
+
+        The app calls this when a locked recording hits its time limit, so the
+        audio so far is transcribed rather than discarded.
+        """
+        if not self._locked:
+            return
+        self._locked = False
+        self._talking = False
+        self._on_talk_end(time.monotonic() - self._press_time)
 
     def start(self) -> None:
         self._listener = keyboard.Listener(
@@ -195,11 +294,17 @@ class Hotkeys:
 
     def _on_mouse_click(self, _x, _y, button, pressed: bool) -> None:
         if pressed:
+            # A click inside the target window moves the caret, which is
+            # enough to make a later undo land somewhere unintended.
             self._press(normalize_mouse(button))
         else:
             self._release(normalize_mouse(button))
 
     def _press(self, name: str) -> None:
+        # Counted before the early return, so a press that no binding uses
+        # still marks the window as touched -- typing an ordinary letter is
+        # exactly the thing that moves an undo stack on.
+        self._note_activity()
         if self._suppressed or self._capture_active or not name:
             return
         with self._lock:
@@ -215,8 +320,28 @@ class Hotkeys:
             return
 
         ptt = parse_combo(self._settings.ptt_key)
-        if ptt and ptt <= pressed and first_press and not self._talking:
+
+        # Esc abandons a locked recording -- unless Esc is itself part of the
+        # talk binding, where ending the recording normally is what was meant.
+        if self._locked and name == CANCEL_KEY and CANCEL_KEY not in ptt:
+            self.cancel_lock()
+            return
+
+        if not (ptt and ptt <= pressed and first_press):
+            return
+
+        if self._locked:
+            # Any press of the talk key ends a locked recording. The duration
+            # runs from the original press, so the whole capture counts.
+            self._locked = False
+            self._talking = False
+            self._ending_lock = True
+            self._on_talk_end(time.monotonic() - self._press_time)
+            return
+
+        if not self._talking:
             self._talking = True
+            self._lockable = True
             self._press_time = time.monotonic()
             self._on_talk_start()
 
@@ -232,6 +357,24 @@ class Hotkeys:
             self._combo_latched = False
 
         ptt = parse_combo(self._settings.ptt_key)
-        if self._talking and not (ptt <= pressed):
-            self._talking = False
-            self._on_talk_end(time.monotonic() - self._press_time)
+        still_held = not ptt or ptt <= pressed
+        if still_held:
+            return
+
+        if self._ending_lock:
+            # Letting go of the press that finished a locked recording. The
+            # capture already ended on the press; there is nothing to end here.
+            self._ending_lock = False
+            return
+
+        if not self._talking:
+            return
+
+        held = time.monotonic() - self._press_time
+        if held < MIN_HOLD_SECONDS and self._lockable and self.lock_enabled():
+            self._locked = True
+            self._on_talk_lock()
+            return
+
+        self._talking = False
+        self._on_talk_end(held)

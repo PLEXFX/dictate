@@ -113,8 +113,8 @@ class MicCapture:
 
     def _callback(self, indata, frames, time_info, status):
         chunk = indata[:, 0].copy()
-        self._frames.append(chunk)
         with self._lock:
+            self._frames.append(chunk)
             if chunk.size >= VIS_WINDOW:
                 self._latest = chunk[-VIS_WINDOW:]
             else:
@@ -123,8 +123,8 @@ class MicCapture:
                 self._latest = np.concatenate([self._latest[chunk.size:], chunk])
 
     def start(self) -> None:
-        self._frames = []
         with self._lock:
+            self._frames = []
             self._latest = np.zeros(VIS_WINDOW, dtype=np.float32)
         self._stream = sd.InputStream(
             device=self._device_index(),
@@ -144,9 +144,28 @@ class MicCapture:
         self._stream = None
         with self._lock:
             self._latest = np.zeros(VIS_WINDOW, dtype=np.float32)
-        if not self._frames:
+        with self._lock:
+            if not self._frames:
+                return np.zeros(0, dtype=np.float32)
+            return np.concatenate(self._frames)
+
+    def snapshot(self, max_seconds: float | None = None) -> np.ndarray:
+        """Copy the audio captured so far without stopping the microphone.
+
+        Live preview reads this while PortAudio is still appending frames, so
+        both the frame-list copy and callback append share ``_lock``.  The
+        expensive concatenate happens after the list has been copied, keeping
+        the realtime callback blocked for only a few microseconds.
+        """
+        with self._lock:
+            frames = list(self._frames)
+        if not frames:
             return np.zeros(0, dtype=np.float32)
-        return np.concatenate(self._frames)
+        clip = np.concatenate(frames)
+        if max_seconds is not None:
+            keep = max(1, int(SAMPLE_RATE * max_seconds))
+            clip = clip[-keep:]
+        return clip
 
     def latest_window(self) -> np.ndarray:
         with self._lock:

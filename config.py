@@ -116,11 +116,14 @@ class Settings:
     # --- input ---
     input_device: str = ""                  # empty means the Windows default
     ptt_key: str = DEFAULT_PTT_KEY          # hold to talk
+    tap_to_lock: bool = True                # a tap of that key locks recording on
     settings_hotkey: str = DEFAULT_SETTINGS_HOTKEY   # open this window
     vocabulary: list[str] = field(default_factory=list)
 
     # --- feedback ---
     sound_cues: bool = True       # short tones when the mic opens and closes
+    live_preview_enabled: bool = True  # rolling two-line card while speaking
+    enhanced_preview_enabled: bool = False  # dedicated Base model on CPU
 
     # --- updates ---
     auto_update_enabled: bool = True  # periodically check GitHub for a new release
@@ -153,7 +156,10 @@ class Settings:
             out.settings_hotkey = DEFAULT_SETTINGS_HOTKEY
         out.vocabulary = clean_vocabulary(out.vocabulary)
         out.start_with_windows = bool(out.start_with_windows)
+        out.tap_to_lock = bool(out.tap_to_lock)
         out.sound_cues = bool(out.sound_cues)
+        out.live_preview_enabled = bool(out.live_preview_enabled)
+        out.enhanced_preview_enabled = bool(out.enhanced_preview_enabled)
         out.auto_update_enabled = bool(out.auto_update_enabled)
         out.onboarding_complete = bool(out.onboarding_complete)
         out.sleep_after_minutes = min(max(float(out.sleep_after_minutes), 0.5), 240.0)

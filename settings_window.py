@@ -14,8 +14,8 @@ from __future__ import annotations
 import ctypes
 from dataclasses import asdict, replace
 
-from PySide6.QtCore import Qt, QPropertyAnimation, QTimer, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Property, Qt, QPropertyAnimation, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -79,6 +79,7 @@ QFrame#settingsRow {
     border-bottom: 1px solid #383838;
     border-radius: 0px;
 }
+QFrame#settingsRow[nested="true"] { background: #272727; }
 QFrame#settingsRow[last="true"] { border-bottom: none; }
 
 QComboBox, QLineEdit, QPlainTextEdit, QPushButton#keyCapture {
@@ -133,16 +134,19 @@ QPushButton#link {
     padding: 5px 2px;
 }
 QPushButton#link:hover { color: #78D3FF; text-decoration: underline; }
-QPushButton#advanced {
-    background: transparent;
-    color: #D8D8D8;
-    border: none;
-    border-radius: 4px;
-    padding: 7px 2px;
+/* Windows 11 expander: the same card the settings groups use, so an open
+   Advanced section reads as a continuation of the page rather than a link
+   someone left at the bottom of it. */
+QPushButton#expander {
+    background: #2B2B2B;
+    border: 1px solid #353535;
+    border-radius: 8px;
     text-align: left;
-    font-weight: 600;
 }
-QPushButton#advanced:hover { color: #FFFFFF; background: #292929; }
+QPushButton#expander:hover { background: #323232; }
+QPushButton#expander:pressed { background: #262626; }
+QPushButton#expander:checked { border-color: #3D3D3D; }
+QLabel#expanderLabel { color: #E8E8E8; font-weight: 600; background: transparent; }
 QPushButton#sliderReset {
     background: transparent;
     color: #4CC2FF;
@@ -218,6 +222,7 @@ QFrame#card { background: #FFFFFF; border: 1px solid #E3E3E3; border-radius: 6px
 QFrame#hero { background: #FAFAFA; border: 1px solid #E0E0E0; border-radius: 8px; }
 QFrame#settingsGroup { background: #FFFFFF; border: 1px solid #E0E0E0; border-radius: 8px; }
 QFrame#settingsRow { background: transparent; border: none; border-bottom: 1px solid #E6E6E6; border-radius: 0px; }
+QFrame#settingsRow[nested="true"] { background: #F8F8F8; }
 QFrame#settingsRow[last="true"] { border-bottom: none; }
 QComboBox, QLineEdit, QPlainTextEdit, QPushButton#keyCapture { background: #FFFFFF; border: 1px solid #C9C9C9; border-bottom: 1px solid #AFAFAF; border-radius: 4px; padding: 5px 10px; color: #1A1A1A; min-height: 18px; selection-background-color: #0078D4; selection-color: #FFFFFF; }
 QComboBox:hover, QLineEdit:hover, QPlainTextEdit:hover, QPushButton#keyCapture:hover { background: #F8F8F8; }
@@ -231,8 +236,11 @@ QPushButton#secondary { background: #FFFFFF; color: #1A1A1A; border: 1px solid #
 QPushButton#secondary:hover { background: #F3F3F3; }
 QPushButton#link, QPushButton#sliderReset { background: transparent; color: #0067B8; border: none; padding: 5px 2px; }
 QPushButton#link:hover, QPushButton#sliderReset:hover { color: #004C87; text-decoration: underline; }
-QPushButton#advanced { background: transparent; color: #3D3D3D; border: none; border-radius: 4px; padding: 7px 2px; text-align: left; font-weight: 600; }
-QPushButton#advanced:hover { color: #1A1A1A; background: #EAEAEA; }
+QPushButton#expander { background: #FFFFFF; border: 1px solid #E0E0E0; border-radius: 8px; text-align: left; }
+QPushButton#expander:hover { background: #F8F8F8; }
+QPushButton#expander:pressed { background: #F0F0F0; }
+QPushButton#expander:checked { border-color: #D6D6D6; }
+QLabel#expanderLabel { color: #1A1A1A; font-weight: 600; background: transparent; }
 QSlider { min-height: 24px; } QSlider::groove:horizontal, QSlider::add-page:horizontal { height: 4px; background: #8A8A8A; border-radius: 2px; }
 QSlider::sub-page:horizontal { background: #0078D4; border-radius: 2px; }
 QSlider::handle:horizontal { background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5, stop:0 #0078D4, stop:0.60 #0078D4, stop:0.62 #FFFFFF, stop:1 #FFFFFF); border: 1px solid #B8B8B8; width: 18px; height: 18px; margin: -8px 0px; border-radius: 10px; }
@@ -346,6 +354,93 @@ def _text_row(title: str, desc: str) -> QFrame:
     body.setWordWrap(True)
     layout.addWidget(body)
     return frame
+
+
+class Chevron(QWidget):
+    """The expander's arrow, drawn rather than typed.
+
+    Windows 11 rotates this glyph through 180 degrees as a section opens; it
+    is the single motion that most makes an expander read as native. A text
+    character cannot do that -- swapping "›" for "⌄" is a jump cut in the
+    middle of an otherwise continuous animation -- so it is painted from two
+    strokes and given a real ``rotation`` property for QPropertyAnimation to
+    drive alongside the height and fade.
+    """
+
+    SIZE = 14
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rotation = 0.0
+        self._color = QColor("#D8D8D8")
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+    def rotation(self) -> float:
+        return self._rotation
+
+    def setRotation(self, angle: float) -> None:
+        self._rotation = float(angle)
+        self.update()
+
+    # Named for Qt's property system, which is what QPropertyAnimation drives.
+    rotation = Property(float, rotation, setRotation)
+
+    def set_color(self, color: QColor) -> None:
+        self._color = color
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.translate(self.width() / 2.0, self.height() / 2.0)
+        painter.rotate(self._rotation)
+
+        pen = QPen(self._color)
+        pen.setWidthF(1.4)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+
+        # A chevron pointing down, drawn about its own centre so rotation has
+        # no visual drift.
+        reach = self.SIZE * 0.26
+        path = QPainterPath()
+        path.moveTo(-reach, -reach * 0.55)
+        path.lineTo(0.0, reach * 0.55)
+        path.lineTo(reach, -reach * 0.55)
+        painter.drawPath(path)
+        painter.end()
+
+
+class ExpanderHeader(QPushButton):
+    """A Windows 11 expander header: label on the left, chevron on the right.
+
+    A plain QPushButton cannot place its text and its glyph at opposite ends
+    of the row, which is what makes the native control read as a card rather
+    than as a link. The button keeps its checkable click behaviour and simply
+    lays its two pieces out itself.
+    """
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("expander")
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(14, 0, 14, 0)
+        row.setSpacing(12)
+
+        self.label = QLabel(text)
+        self.label.setObjectName("expanderLabel")
+        self.label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        row.addWidget(self.label)
+        row.addStretch(1)
+
+        self.chevron = Chevron(self)
+        row.addWidget(self.chevron, 0, Qt.AlignVCenter)
+        self.setMinimumHeight(44)  # the native expander's row height
 
 
 def _settings_group(*rows: QFrame) -> QFrame:
@@ -847,7 +942,9 @@ class FirstRunDialog(QDialog):
         col.addWidget(title)
         intro = QLabel(
             f"Hold {settings.ptt_key.upper()} anywhere in Windows, speak, then release. "
-            "Dictate transcribes locally and puts the words where you were typing."
+            "Dictate transcribes locally and puts the words where you were typing. "
+            "For anything longer, tap that key instead of holding it and recording "
+            "stays on until you tap again."
         )
         intro.setProperty("role", "desc")
         intro.setWordWrap(True)
@@ -943,12 +1040,20 @@ class SettingsWindow(QWidget):
         self.setFont(base if base.exactMatch() else QFont("Segoe UI", 9))
 
         self._build()
+        self._paint_chevron(system_is_dark())
         self._loading = False
 
     def set_theme(self, dark: bool) -> None:
         """Refresh an already-open Settings window after Windows changes theme."""
         self.setStyleSheet(stylesheet(dark))
         apply_native_chrome(int(self.winId()), dark)
+        self._paint_chevron(dark)
+
+    def _paint_chevron(self, dark: bool) -> None:
+        """The chevron is painted, not styled, so it needs the theme by hand."""
+        self.advanced_btn.chevron.set_color(
+            QColor("#D8D8D8") if dark else QColor("#1A1A1A")
+        )
 
     # --- construction ---
 
@@ -997,12 +1102,44 @@ class SettingsWindow(QWidget):
 
         self.ptt_edit = BindingCapture(self._settings.ptt_key)
         self.ptt_edit.bindingChanged.connect(self._queue_save)
+        self.ptt_edit.bindingChanged.connect(self._refresh_tap_lock_desc)
         self.ptt_edit.captureActive.connect(self.capture_active.emit)
         ptt_row = _card(
             "Hold to talk",
             "Click, then press a key or mouse button. Hold inputs together for a combination.",
             self.ptt_edit,
         )
+
+        self.tap_lock_check = ToggleSwitch(self._settings.tap_to_lock)
+        self.tap_lock_check.toggled.connect(self._queue_save)
+        self.tap_lock_row = _card(
+            "Tap to keep recording",
+            self._tap_lock_desc(),
+            self.tap_lock_check,
+        )
+        self.tap_lock_desc_label = self.tap_lock_row.findChild(QLabel, "desc")
+
+        self.live_preview_check = ToggleSwitch(self._settings.live_preview_enabled)
+        self.live_preview_check.toggled.connect(self._queue_save)
+        self.live_preview_check.toggled.connect(self._sync_preview_controls)
+        live_preview_row = _card(
+            "Live transcript preview",
+            "Shows smooth rolling text above the activity bar while you speak.",
+            self.live_preview_check,
+        )
+
+        self.enhanced_preview_check = ToggleSwitch(
+            self._settings.enhanced_preview_enabled
+        )
+        self.enhanced_preview_check.toggled.connect(self._queue_save)
+        enhanced_preview_row = _card(
+            "Enhanced preview (Alpha)",
+            "Uses a separate Base model on the CPU for more responsive live updates. "
+            "Needs a stronger PC and about 250 MB for the model download.",
+            self.enhanced_preview_check,
+        )
+        enhanced_preview_row.setProperty("nested", True)
+        enhanced_preview_row.layout().setContentsMargins(30, 9, 14, 9)
 
         self.mode_box = QComboBox()
         for value, label, _model, _device in config.TRANSCRIPTION_MODES:
@@ -1081,6 +1218,9 @@ class SettingsWindow(QWidget):
             _settings_group(
                 mic_row,
                 ptt_row,
+                self.tap_lock_row,
+                live_preview_row,
+                enhanced_preview_row,
                 mode_row,
                 vocabulary_row,
                 sleep_row,
@@ -1090,9 +1230,7 @@ class SettingsWindow(QWidget):
             )
         )
 
-        self.advanced_btn = QPushButton("›  Advanced settings")
-        self.advanced_btn.setObjectName("advanced")
-        self.advanced_btn.setCheckable(True)
+        self.advanced_btn = ExpanderHeader("Advanced settings")
         self.advanced_btn.toggled.connect(self._toggle_advanced)
         col.addWidget(self.advanced_btn)
 
@@ -1197,6 +1335,9 @@ class SettingsWindow(QWidget):
         )
         self._advanced_fade_anim = QPropertyAnimation(
             self._advanced_opacity, b"opacity", self
+        )
+        self._advanced_chevron_anim = QPropertyAnimation(
+            self.advanced_btn.chevron, b"rotation", self
         )
         self._advanced_height_anim.finished.connect(self._on_advanced_anim_finished)
         col.addWidget(self.advanced_panel)
@@ -1323,41 +1464,47 @@ class SettingsWindow(QWidget):
                 self._queue_save()
 
     def _toggle_advanced(self, open_: bool) -> None:
-        """Grow/shrink the Advanced panel with a fade, the same Fluent
-        point-to-point motion (entrances decelerate, exits accelerate) the
-        floating bar already uses for its own reveals -- reusing bar.py's
-        ENTER_MS/EXIT_MS/FLUENT_DECELERATE/FLUENT_ACCELERATE rather than
-        inventing separate timing for this window.
+        """Grow/shrink the Advanced panel with a fade and a rotating chevron.
+
+        The same Fluent point-to-point motion (entrances decelerate, exits
+        accelerate) the floating bar already uses for its own reveals --
+        reusing bar.py's ENTER_MS/EXIT_MS/FLUENT_DECELERATE/FLUENT_ACCELERATE
+        rather than inventing separate timing for this window.
+
+        All three run on one curve and one duration, because they are one
+        gesture. The chevron turning at a different rate than the panel opens
+        is the thing that makes a hand-built expander feel unlike the real
+        control, even when every individual piece is right.
         """
-        self.advanced_btn.setText(
-            "⌄  Advanced settings" if open_ else "›  Advanced settings"
-        )
         self._advanced_height_anim.stop()
         self._advanced_fade_anim.stop()
+        self._advanced_chevron_anim.stop()
+
+        duration = ENTER_MS if open_ else EXIT_MS
+        curve = FLUENT_DECELERATE if open_ else FLUENT_ACCELERATE
 
         if open_:
             self.advanced_panel.setVisible(True)
-            target_height = self.advanced_panel.sizeHint().height()
-            self._advanced_height_anim.setDuration(ENTER_MS)
-            self._advanced_height_anim.setEasingCurve(FLUENT_DECELERATE)
-            self._advanced_height_anim.setStartValue(self.advanced_panel.height())
-            self._advanced_height_anim.setEndValue(target_height)
-            self._advanced_fade_anim.setDuration(ENTER_MS)
-            self._advanced_fade_anim.setEasingCurve(FLUENT_DECELERATE)
-            self._advanced_fade_anim.setStartValue(self._advanced_opacity.opacity())
-            self._advanced_fade_anim.setEndValue(1.0)
+            end_height = self.advanced_panel.sizeHint().height()
+            end_opacity = 1.0
         else:
-            self._advanced_height_anim.setDuration(EXIT_MS)
-            self._advanced_height_anim.setEasingCurve(FLUENT_ACCELERATE)
-            self._advanced_height_anim.setStartValue(self.advanced_panel.height())
-            self._advanced_height_anim.setEndValue(0)
-            self._advanced_fade_anim.setDuration(EXIT_MS)
-            self._advanced_fade_anim.setEasingCurve(FLUENT_ACCELERATE)
-            self._advanced_fade_anim.setStartValue(self._advanced_opacity.opacity())
-            self._advanced_fade_anim.setEndValue(0.0)
+            end_height = 0
+            end_opacity = 0.0
 
-        self._advanced_height_anim.start()
-        self._advanced_fade_anim.start()
+        for anim, start, end in (
+            (self._advanced_height_anim, self.advanced_panel.height(), end_height),
+            (self._advanced_fade_anim, self._advanced_opacity.opacity(), end_opacity),
+            (
+                self._advanced_chevron_anim,
+                self.advanced_btn.chevron.rotation,
+                180.0 if open_ else 0.0,
+            ),
+        ):
+            anim.setDuration(duration)
+            anim.setEasingCurve(curve)
+            anim.setStartValue(start)
+            anim.setEndValue(end)
+            anim.start()
 
     def _on_advanced_anim_finished(self) -> None:
         # Only actually hide once collapsed -- an expand's "finished" fires
@@ -1437,6 +1584,26 @@ class SettingsWindow(QWidget):
                 self.save_status.setText("The speech model could not load")
                 return
 
+    def _tap_lock_desc(self) -> str:
+        """Explain the gesture using the key that is actually bound to it."""
+        key = hotkeys_mod.format_combo(
+            self.ptt_edit.binding() or self._settings.ptt_key or config.DEFAULT_PTT_KEY
+        )
+        return (
+            f"Tap {key} instead of holding it and Dictate keeps recording. "
+            f"Tap again to finish, or press Esc to discard it."
+        )
+
+    def _refresh_tap_lock_desc(self, *_args) -> None:
+        if self.tap_lock_desc_label is not None:
+            self.tap_lock_desc_label.setText(self._tap_lock_desc())
+
+    def _sync_preview_controls(self, *_args) -> None:
+        """Keep Enhanced preview visibly nested under its parent switch."""
+        self.enhanced_preview_check.setEnabled(
+            self.live_preview_check.isChecked()
+        )
+
     def _collect_settings(self) -> config.Settings:
         return replace(
             self._settings,
@@ -1447,6 +1614,9 @@ class SettingsWindow(QWidget):
             sound_cues=self.sound_check.isChecked(),
             sleep_after_minutes=self.sleep_slider.value(),
             ptt_key=self.ptt_edit.binding() or config.DEFAULT_PTT_KEY,
+            tap_to_lock=self.tap_lock_check.isChecked(),
+            live_preview_enabled=self.live_preview_check.isChecked(),
+            enhanced_preview_enabled=self.enhanced_preview_check.isChecked(),
             settings_hotkey=self.hotkey_edit.binding() or "ctrl+alt+d",
             vocabulary=self._vocabulary,
             always_visible=self.visible_check.isChecked(),
@@ -1515,6 +1685,11 @@ class SettingsWindow(QWidget):
         self.sleep_slider.setEnabled(s.sleep_enabled)
         _fill_microphone_box(self.mic_box, s.input_device)
         self.ptt_edit.setBinding(s.ptt_key)
+        self.tap_lock_check.setChecked(s.tap_to_lock)
+        self.live_preview_check.setChecked(s.live_preview_enabled)
+        self.enhanced_preview_check.setChecked(s.enhanced_preview_enabled)
+        self._sync_preview_controls()
+        self._refresh_tap_lock_desc()
         self.hotkey_edit.setBinding(s.settings_hotkey)
         self._vocabulary = list(s.vocabulary)
         self._update_vocabulary_button()

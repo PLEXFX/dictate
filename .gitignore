@@ -14,3 +14,8 @@ repair-env.bat
 # Installer build output (PyInstaller's dist/ above already covers the
 # PyInstaller side; this is Inno Setup's own default output folder).
 installer/Output/
+
+# Local project handoff file - never commit or release
+CLAUDE.md
+
+AGENTS.md

@@ -7,6 +7,45 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.3-beta.1] - 2026-08-17
+
+### Changed
+
+- Updates no longer download in the background the moment a check finds one.
+  Dictate now shows "Update available," and downloads, verifies, and
+  installs only after you click it — one click does the whole thing, with no
+  separate "now click again to install" step afterward.
+- The installer is about 90% smaller (93 MB vs ~1.07 GB): GPU acceleration
+  files are no longer bundled into every install regardless of whether the
+  machine has a card. Setup detects an NVIDIA card and offers to enable GPU
+  acceleration; the files still download on demand the first time Dictate
+  actually needs them, exactly as they already did when switching to GPU
+  from Settings.
+- Privacy is now a page you navigate to inside Settings instead of a
+  separate window.
+
+### Added
+
+- Real download progress bars in Settings for updates, GPU acceleration,
+  and speech-model downloads, instead of only a text percentage.
+- "Also show Windows notifications" in Settings. Dictate's own floating-bar
+  notification is always on; turn this on to also mirror it as a normal
+  Windows notification.
+- Dictate now tells you when it's open and ready, and again if you try to
+  open a second copy while it's already running.
+- A GitHub link next to Privacy in Settings.
+- Uninstalling now also removes your settings, so a later reinstall starts
+  completely fresh — including the first-run welcome screen.
+
+### Fixed
+
+- "Check for updates" could sometimes silently do nothing when clicked — a
+  timing gap meant the click occasionally landed in the moment before the
+  button had a chance to disable itself. It now disables the instant you
+  click it.
+- Longer notification text no longer gets cut off mid-sentence — it wraps
+  onto a second line instead.
+
 ## [0.2.2-beta.1] - 2026-08-17
 
 ### Fixed

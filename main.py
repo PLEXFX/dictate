@@ -46,6 +46,9 @@ from version import VERSION
 
 APP_NAME = "Dictate"
 MUTEX_NAME = "Global\\DictateSingleInstance"
+# A second launch attempt sets this; the running instance polls it rather
+# than running a message-pump listener for a second, unrelated purpose.
+RUNNING_NOTICE_EVENT = "Global\\DictateShowRunningNotice"
 
 # Longest a locked (tap-started) recording runs before Dictate stops it and
 # transcribes what it has. A hold is bounded by the user's finger; a lock is
@@ -86,7 +89,7 @@ CONSOLE_COMMANDS: list[tuple[str, str]] = [
     ("settings", "open the Settings window"),
     ("check update", "check GitHub for a new release right now"),
     ("open data", "open the settings folder in File Explorer"),
-    ("update test", "simulate an update-ready notification (no network, no install)"),
+    ("update test", "simulate an update-available notification (no network, no download)"),
     ("update test current", "simulate an up-to-date notification"),
     ("quit", "exit Dictate"),
     ("help", "show this list (alias: ?)"),
@@ -113,6 +116,23 @@ def already_running() -> bool:
         return handle != 0 and ctypes.windll.kernel32.GetLastError() == 183
     except Exception:
         return False
+
+
+def _signal_running_notice() -> None:
+    """Wake the already-running instance's "still open" bar notification.
+
+    CreateEventW is idempotent -- this opens the primary instance's own
+    named event rather than needing its window handle -- so a second launch
+    attempt can raise the flag with no IPC channel of its own beyond the
+    name both processes already agree on.
+    """
+    try:
+        handle = ctypes.windll.kernel32.CreateEventW(None, True, False, RUNNING_NOTICE_EVENT)
+        if handle:
+            ctypes.windll.kernel32.SetEvent(handle)
+            ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        pass
 
 
 def load_icon() -> QIcon:
@@ -195,7 +215,9 @@ class Bridge(QObject):
     engine_state = Signal(str, str, object)  # state, detail, progress (0..1 or None)
     finished = Signal(str, str)  # state, detail
     command = Signal(str)  # a line typed into the console, already normalized
-    update_ready = Signal(str, object)  # version, installer Path
+    update_available = Signal(str, str)  # version, release notes -- nothing downloaded yet
+    update_installing = Signal(str)  # version -- installer launched, app should quit now
+    update_error = Signal(str)  # a start_update() download/verify/launch failure
     update_current = Signal()  # a manual check found nothing newer
     update_status_changed = Signal()  # live status/progress text changed
     dictated = Signal(str)  # successfully inserted text, kept only in memory
@@ -284,6 +306,21 @@ class App:
         self.undo_expiry_timer.setInterval(UNDO_WINDOW_SECONDS * 1000)
         self.undo_expiry_timer.timeout.connect(self._withdraw_undo)
 
+        # Polling, not a message-pump listener, because that named event is
+        # the only thing this app ever needs to hear from a second launch
+        # attempt -- see _signal_running_notice() and already_running().
+        try:
+            self._running_notice_handle = ctypes.windll.kernel32.CreateEventW(
+                None, True, False, RUNNING_NOTICE_EVENT
+            )
+        except Exception:
+            self._running_notice_handle = None
+        self.running_notice_timer = QTimer()
+        self.running_notice_timer.setInterval(500)
+        self.running_notice_timer.timeout.connect(self._check_running_notice)
+        if self._running_notice_handle:
+            self.running_notice_timer.start()
+
         self.bridge.talk_started.connect(self._start_listening)
         self.bridge.talk_ended.connect(self._stop_listening)
         self.bridge.talk_locked.connect(self._on_talk_locked)
@@ -292,7 +329,9 @@ class App:
         self.bridge.engine_state.connect(self._on_engine_state)
         self.bridge.finished.connect(self._on_finished)
         self.bridge.command.connect(self._on_command)
-        self.bridge.update_ready.connect(self._on_update_ready)
+        self.bridge.update_available.connect(self._on_update_available)
+        self.bridge.update_installing.connect(self._on_update_installing)
+        self.bridge.update_error.connect(self._on_update_error)
         self.bridge.update_current.connect(self._on_update_current)
         self.bridge.update_status_changed.connect(self._on_update_status_changed)
         self.bridge.dictated.connect(self._remember_last_dictation)
@@ -313,7 +352,9 @@ class App:
         self.hotkeys.start()
         self._start_command_listener()
         self.updater = updater_mod.Updater(
-            on_ready=self.bridge.update_ready.emit,
+            on_available=self.bridge.update_available.emit,
+            on_installing=self.bridge.update_installing.emit,
+            on_error=self.bridge.update_error.emit,
             on_up_to_date=self.bridge.update_current.emit,
             on_status_change=self.bridge.update_status_changed.emit,
             enabled=self.settings.auto_update_enabled,
@@ -326,8 +367,15 @@ class App:
             self.bar.show_bar()
         if not self.settings.onboarding_complete:
             QTimer.singleShot(0, self._show_first_run)
-        if self._update_notice is not None:
+        elif self._update_notice is not None:
             QTimer.singleShot(300, self._show_update_complete)
+        else:
+            # Skipped on first run (the welcome dialog already greets them)
+            # and on a just-updated restart (the What's New dialog already
+            # does) -- this is only the plain "an ordinary launch finished"
+            # case, which otherwise has no visible confirmation at all since
+            # Dictate opens straight to the tray with no window.
+            QTimer.singleShot(500, self._show_ready_notice)
 
     # --- tray ---
 
@@ -476,12 +524,13 @@ class App:
         elif text == "update test":
             # Fakes a "found a newer version" result without touching the
             # network or waiting on the real 24h check cadence, so the
-            # ready-toast (text, colour, click-to-install) can be eyeballed
-            # on demand. Nothing is actually staged in the real Updater, so
-            # clicking the toast is a harmless no-op instead of trying to
-            # launch a nonexistent installer.
-            print("[dictate] simulating an update-ready notification")
-            self.bridge.update_ready.emit("9.9.9-test", Path("dictate-test-installer.exe"))
+            # available-toast (text, colour, click-to-download) can be
+            # eyeballed on demand. Nothing is actually recorded as available
+            # in the real Updater, so clicking the toast finds start_update()
+            # has nothing to do and no-ops instead of trying to download a
+            # nonexistent release.
+            print("[dictate] simulating an update-available notification")
+            self.bridge.update_available.emit("9.9.9-test", "Simulated release notes.")
         elif text == "update test current":
             print("[dictate] simulating an up-to-date notification")
             self.bridge.update_current.emit()
@@ -785,7 +834,6 @@ class App:
             self.settings_window = SettingsWindow(self.settings, self.engine, self.updater)
             self.settings_window.changed.connect(self._apply_settings)
             self.settings_window.capture_active.connect(self.hotkeys.set_capture_active)
-            self.settings_window.restart_to_update.connect(self._apply_pending_update)
             self.settings_window.margin_preview.connect(self.bar.preview_margin)
         self.settings_window.show()
         self.settings_window.raise_()
@@ -793,6 +841,42 @@ class App:
 
     def _show_update_complete(self) -> None:
         UpdateCompleteDialog(VERSION, self._update_notice or "").exec()
+
+    # --- open/already-running notices ---
+
+    def _notify(self, text: str, tone: str = "info", on_click=None) -> None:
+        """Show Dictate's own bar toast, and mirror it to a system tray
+        balloon too when the user has opted into that in Settings.
+
+        The tray balloon is never itself clickable -- ``on_click`` only
+        wires the bar toast's own click gesture -- so an actionable
+        notification (an update available) still has exactly one place to
+        click it regardless of whether system notifications are also on.
+        """
+        self.bar.notify(text, tone=tone, on_click=on_click)
+        if self.settings.system_notifications_enabled:
+            self.tray.showMessage(APP_NAME, text, QSystemTrayIcon.Information, 5000)
+
+    def _show_ready_notice(self) -> None:
+        key = hotkeys_mod.format_combo(self.settings.ptt_key)
+        self._notify(f"Dictate's ready to go — hold {key} to talk", tone="success")
+
+    def _check_running_notice(self) -> None:
+        """Poll the named event a second launch attempt sets.
+
+        WaitForSingleObject with a 0ms timeout is a non-blocking check, not
+        a wait -- this timer fires every 500ms regardless of whether the
+        event is signalled, so a missed check is never more than one tick
+        late.
+        """
+        handle = getattr(self, "_running_notice_handle", None)
+        if handle is None:
+            return
+        if ctypes.windll.kernel32.WaitForSingleObject(handle, 0) != 0:
+            return
+        ctypes.windll.kernel32.ResetEvent(handle)
+        key = hotkeys_mod.format_combo(self.settings.ptt_key)
+        self._notify(f"Dictate's already running — hold {key} to talk", tone="info")
 
     def _apply_settings(self, settings: config.Settings) -> None:
         old = self.settings
@@ -944,26 +1028,40 @@ class App:
 
     # --- updates ---
 
-    def _on_update_ready(self, version: str, installer_path) -> None:
-        # Routed through the bar's own toast rather than a system tray
-        # balloon, so an update result reads as this app's one notification
-        # system instead of a second, differently-timed one bolted on.
-        self.bar.notify(
-            f"Update {version} ready — click to restart and install",
+    def _on_update_available(self, version: str, notes: str) -> None:
+        # No auto-download: this notification is the only thing that ever
+        # happens on its own. Clicking it is the one action that starts the
+        # download, and that same click also carries through to installing
+        # once the download verifies -- see _start_update() and
+        # updater.Updater.start_update()'s own docstring.
+        self._notify(
+            f"Update {version} available — click to download & install",
             tone="info",
-            on_click=self._apply_pending_update,
+            on_click=self._start_update,
         )
 
+    def _start_update(self) -> None:
+        if self.updater.start_update():
+            self.bar.notify("Downloading the update…", tone="info")
+
+    def _on_update_installing(self, version: str) -> None:
+        # The installer is already launched and waiting for this process to
+        # exit before it can overwrite these files -- nothing left to ask.
+        self._quit()
+
+    def _on_update_error(self, message: str) -> None:
+        self.bar.set_state("error", message[:60])
+        if self.settings.system_notifications_enabled:
+            self.tray.showMessage(
+                APP_NAME, f"Update failed: {message}"[:120], QSystemTrayIcon.Warning, 6000
+            )
+
     def _on_update_current(self) -> None:
-        self.bar.notify("You're on the latest version", tone="success")
+        self._notify("You're on the latest version", tone="success")
 
     def _on_update_status_changed(self) -> None:
         if self.settings_window:
             self.settings_window.refresh_status()
-
-    def _apply_pending_update(self) -> None:
-        if self.updater.apply_staged():
-            self._quit()
 
     def _quit(self) -> None:
         self.hotkeys.stop()
@@ -972,6 +1070,10 @@ class App:
         if preview_engine is not None:
             preview_engine.shutdown()
         self.updater.shutdown()
+        running_notice_handle = getattr(self, "_running_notice_handle", None)
+        if running_notice_handle:
+            ctypes.windll.kernel32.CloseHandle(running_notice_handle)
+            self._running_notice_handle = None
         self.tray.hide()
         self.qt.quit()
 
@@ -989,6 +1091,7 @@ class App:
 
 def main() -> int:
     if already_running():
+        _signal_running_notice()
         print("[dictate] already running")
         return 0
     return App().run()

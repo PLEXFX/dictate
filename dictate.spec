@@ -1,27 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller build spec for Dictate.
 
-Onedir, not onefile: faster-whisper/ctranslate2 + PySide6 + the optional CUDA
-DLLs are a heavy, DLL-heavy footprint. Onefile's self-extraction adds real
+Onedir, not onefile: faster-whisper/ctranslate2 + PySide6 are a heavy,
+DLL-heavy footprint on their own. Onefile's self-extraction adds real
 startup latency to a tray app meant to launch fast, and is a stronger
 antivirus/SmartScreen trigger on top of this build already being unsigned.
 Onedir also maps directly onto the Inno Setup installer's Program Files
 layout with no extra unpacking step.
 
-CUDA DLLs (nvidia-cublas-cu12, nvidia-cudnn-cu12, and cuda_nvrtc alongside
-them) are collected here like everything else, but deliberately land under
-their own site-packages-relative path (``_internal/nvidia/...``) rather than
-being merged into anything else -- that predictable, isolated path is what
-lets the Inno Setup script offer them as an optional "GPU acceleration"
-component instead of forcing every user to download them. engine.py's own
-_register_cuda_dlls() already searches for exactly this ``nvidia/<pkg>/bin``
-layout, so nothing there needs to change for either component choice.
+CUDA DLLs (nvidia-cublas-cu12, nvidia-cudnn-cu12, cuda_nvrtc) are
+deliberately NOT collected here. Bundling them made every build/installer
+~1GB regardless of whether the machine had an NVIDIA card. gpu_runtime.py
+already fetches those exact wheels from PyPI and lays them out under
+``_internal/nvidia/<pkg>/bin`` on demand -- the same path engine.py's
+_register_cuda_dlls() already searches -- so a Core-only build plus that
+on-demand download is now the only path to GPU acceleration, at install
+time or later from Settings.
 
 Build with: uv run pyinstaller dictate.spec --noconfirm
 Output: dist/dictate/dictate.exe (plus its _internal/ support tree).
 """
 
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 block_cipher = None
 
@@ -34,12 +34,6 @@ datas += [("icon.ico", ".")]
 
 binaries = []
 binaries += ctranslate2_binaries
-# nvidia-cublas-cu12 / nvidia-cudnn-cu12 (and the cuda_nvrtc pulled in
-# alongside them) are never `import`ed as executable Python -- engine.py only
-# locates them via importlib.util.find_spec -- so PyInstaller's normal import
-# analysis can't discover their DLLs on its own; they have to be collected
-# explicitly.
-binaries += collect_dynamic_libs("nvidia")
 
 hiddenimports = []
 hiddenimports += ctranslate2_hidden

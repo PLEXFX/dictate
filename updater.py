@@ -4,12 +4,15 @@ downloads the installer, and hands off to it once verified.
 The repo is public, so the check is a single unauthenticated GET -- unlike
 server-dashboard's private-repo OAuth flow, there is no token to manage.
 
-Only the installer .exe itself can actually apply an update: a running,
-compiled app can't safely overwrite its own open files. So this module's
-job ends at "a verified installer is sitting in a temp folder, ready to
-run" -- main.py decides when to actually launch it, and only ever does so
-after the user clicks the ready notification, never silently in the
-background.
+Checking and downloading are deliberately two separate steps. ``check_now``
+only ever tells the caller a newer release exists (AVAILABLE) -- it never
+downloads anything on its own, on a timer or otherwise. Downloading only
+starts from an explicit ``start_update()`` call, which main.py wires to a
+person clicking the "download & install" notification, never to a
+background timer. Once that download verifies, the installer is launched
+immediately as part of the same click -- there is no separate "now click
+again to actually install" step, because the click that started the
+download already said what should happen once it finishes.
 """
 
 from __future__ import annotations
@@ -48,8 +51,8 @@ TRUSTED_SIGNER_THUMBPRINT = ""
 IDLE = "idle"
 CHECKING = "checking"
 UP_TO_DATE = "up_to_date"
+AVAILABLE = "available"    # a newer release exists; nothing downloaded yet
 DOWNLOADING = "downloading"
-READY = "ready"
 INSTALLING = "installing"
 ERROR = "error"
 
@@ -323,15 +326,20 @@ def consume_update_notice(version: str) -> Optional[str]:
 
 
 class Updater:
-    """Owns the background check/download cycle.
+    """Owns the background check cycle, and the download+install pipeline
+    once a person explicitly asks for it via start_update().
 
-    UI-agnostic on purpose: main.py wires on_ready to the visible restart
-    notification, never to anything that runs the installer without a click.
+    UI-agnostic on purpose: main.py wires on_available to the bar's
+    click-to-download notification and on_installing to actually quitting
+    the app, never to anything that downloads or runs the installer without
+    that click.
     """
 
     def __init__(
         self,
-        on_ready: Optional[Callable[[str, Path], None]] = None,
+        on_available: Optional[Callable[[str, str], None]] = None,
+        on_installing: Optional[Callable[[str], None]] = None,
+        on_error: Optional[Callable[[str], None]] = None,
         on_up_to_date: Optional[Callable[[], None]] = None,
         on_status_change: Optional[Callable[[], None]] = None,
         current_version: str = VERSION,
@@ -339,7 +347,9 @@ class Updater:
         trusted_signer_thumbprint: str = TRUSTED_SIGNER_THUMBPRINT,
         enabled: bool = True,
     ):
-        self._on_ready = on_ready or (lambda version, path: None)
+        self._on_available = on_available or (lambda version, notes: None)
+        self._on_installing = on_installing or (lambda version: None)
+        self._on_error = on_error or (lambda message: None)
         self._on_up_to_date = on_up_to_date or (lambda: None)
         self._on_status_change = on_status_change or (lambda: None)
         self._current_version = current_version
@@ -348,40 +358,54 @@ class Updater:
         self._enabled = enabled
         self._status_state = IDLE
         self._status_detail = ""
+        self._status_progress: Optional[float] = None
         self._revert_timer: Optional[threading.Timer] = None
         self._stop = threading.Event()
         self._busy = threading.Lock()
-        self._staged: Optional[tuple[str, Path, str]] = None
+        # Set once check_now() finds something newer, cleared the instant
+        # start_update() picks it up -- both act as the "is a download
+        # already spoken for" guard alongside _busy, and as the only record
+        # of which release AVAILABLE is currently naming.
+        self._available: Optional[dict] = None
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     @property
-    def last_status(self) -> tuple[str, str]:
-        """The most recent (state, detail) pair, for a UI that polls
-        reactively rather than wiring its own signal to every status change."""
-        return (self._status_state, self._status_detail)
-
-    @property
-    def has_staged_update(self) -> bool:
-        return self._staged is not None
+    def last_status(self) -> tuple[str, str, Optional[float]]:
+        """The most recent (state, detail, progress) triple, for a UI that
+        polls reactively rather than wiring its own signal to every status
+        change. Mirrors engine.Engine.last_status's exact shape -- progress
+        is a 0..1 fraction while DOWNLOADING, None otherwise -- so
+        settings_window.py can drive one progress-bar widget from either
+        source without a separate case for each.
+        """
+        return (self._status_state, self._status_detail, self._status_progress)
 
     def _set_status(
-        self, state: str, detail: str = "", *, revert_after: Optional[float] = None
+        self,
+        state: str,
+        detail: str = "",
+        *,
+        progress: Optional[float] = None,
+        revert_after: Optional[float] = None,
     ) -> None:
         """Update status and notify. ``revert_after`` schedules a return to
         IDLE that many seconds later -- used for one-shot confirmations
-        (UP_TO_DATE, READY) so a UI polling reactively (settings_window.py's
+        (UP_TO_DATE, ERROR) so a UI polling reactively (settings_window.py's
         refresh_status()) gets a real window to observe and display the
         state before it clears itself, without either side needing to track
         "have I already shown this" -- reverting the source state is simpler
         and race-free against Qt's async signal delivery than trying to
-        debounce on the display side.
+        debounce on the display side. AVAILABLE/DOWNLOADING/INSTALLING never
+        pass one: each is superseded by the next real state in the pipeline
+        rather than reverting to IDLE on its own.
         """
         if self._revert_timer is not None:
             self._revert_timer.cancel()
             self._revert_timer = None
         self._status_state = state
         self._status_detail = detail
+        self._status_progress = progress
         self._on_status_change()
         if revert_after is not None:
             self._revert_timer = threading.Timer(revert_after, self._revert_to_idle)
@@ -391,6 +415,7 @@ class Updater:
     def _revert_to_idle(self) -> None:
         self._status_state = IDLE
         self._status_detail = ""
+        self._status_progress = None
         self._on_status_change()
 
     def _loop(self) -> None:
@@ -413,29 +438,29 @@ class Updater:
             self.check_now()
 
     def check_now(self, *, silent: bool = True) -> None:
-        """Kick off a check in the background.
+        """Kick off a check in the background. Never downloads anything.
 
-        A no-op while checks are turned off in Settings, while a check or
-        download is already running, or once an update is already staged
-        and waiting on the user to click it. ``silent`` suppresses the
-        "you're already up to date" notification for the automatic
-        background cadence -- only a manually triggered check should ever
-        say that out loud.
+        A no-op while checks are turned off in Settings, while a check is
+        already running, while a download/install is already running (both
+        hold the same _busy lock a check needs), or once a release is
+        already AVAILABLE and waiting on start_update() -- re-checking then
+        would just refetch the same answer and risk clobbering the pending
+        state. ``silent`` suppresses the "you're already up to date"
+        notification for the automatic background cadence -- only a
+        manually triggered check should ever say that out loud.
         """
         if not self._enabled:
             return
-        if self._staged is not None or not self._busy.acquire(blocking=False):
+        if self._available is not None or not self._busy.acquire(blocking=False):
             return
-        threading.Thread(
-            target=self._check_and_download, args=(silent,), daemon=True
-        ).start()
+        threading.Thread(target=self._check, args=(silent,), daemon=True).start()
 
-    def _check_and_download(self, silent: bool) -> None:
+    def _check(self, silent: bool) -> None:
         # CHECKING/UP_TO_DATE stay behind `not silent` -- the automatic 24h
         # cadence finding nothing new shouldn't flash "Checking..." at a user
-        # who never asked to see it. A download that's actually happening
-        # (below) always reports, silent or not: it's real work in progress,
-        # not routine background chatter.
+        # who never asked to see it. AVAILABLE always reports regardless:
+        # it is the one thing this module is never allowed to act on by
+        # itself, so the person has to be told about it to ever see it.
         try:
             if not silent:
                 self._set_status(CHECKING, "Checking for updates…")
@@ -447,94 +472,110 @@ class Updater:
                     )
                     self._on_up_to_date()
                 return
-            self._download_and_verify(info, silent)
+            self._available = info
+            print(f"[dictate] update {info['version']} available")
+            self._set_status(AVAILABLE, f"Update {info['version']} is available")
+            self._on_available(info["version"], info["release_notes"])
         finally:
             self._busy.release()
 
-    def _report_error(self, message: str, silent: bool) -> None:
-        print(f"[dictate] update rejected: {message}")
-        if not silent:
-            self._set_status(ERROR, message, revert_after=8.0)
+    def start_update(self) -> bool:
+        """Download, verify, and install the currently available release.
 
-    def _download_and_verify(self, info: dict, silent: bool) -> None:
-        expected_hash = _fetch_expected_sha256(
-            info["checksum_url"], info["installer_name"]
-        )
-        if expected_hash is None:
-            self._report_error("Update integrity information is missing", silent)
-            return
-
-        tmp_dir = Path(tempfile.mkdtemp(prefix=_DOWNLOAD_TEMP_PREFIX))
-        dest = tmp_dir / info["installer_name"]
-
-        last_frac = 0.0
-        last_emit = time.monotonic()
-
-        def on_progress(n: int, total: Optional[int]) -> None:
-            nonlocal last_frac, last_emit
-            if not total:
-                return
-            frac = min(1.0, n / total)
-            now = time.monotonic()
-            if frac < 1.0 and frac - last_frac < 0.01 and now - last_emit < 0.1:
-                return
-            last_frac, last_emit = frac, now
-            pct = int(frac * 100)
-            self._set_status(DOWNLOADING, f"Downloading update {info['version']} — {pct}%")
-
-        try:
-            _download(info["installer_url"], dest, on_progress)
-            if dest.stat().st_size != info["installer_size"]:
-                raise ValueError("download size did not match the release")
-            if _sha256(dest) != expected_hash:
-                raise ValueError("download hash did not match the release")
-            # No cert configured yet -- see TRUSTED_SIGNER_THUMBPRINT's comment.
-            # Once one is, every update is also checked against that signer.
-            if self._trusted_signer_thumbprint and not _verify_authenticode(
-                dest, self._trusted_signer_thumbprint
-            ):
-                raise ValueError("installer signer did not match Dictate")
-        except Exception as exc:
-            dest.unlink(missing_ok=True)
-            try:
-                tmp_dir.rmdir()
-            except OSError:
-                pass
-            self._report_error("The update could not be verified", silent)
-            print(f"[dictate] update verification detail: {exc}")
-            return
-
-        self._staged = (info["version"], dest, info["release_notes"])
-        print(f"[dictate] update {info['version']} ready")
-        # READY does not auto-revert: this remains actionable until the
-        # person chooses Restart now or exits the app normally.
-        self._set_status(
-            READY,
-            f"Update {info['version']} is ready to install",
-        )
-        self._on_ready(info["version"], dest)
-
-    def apply_staged(self) -> bool:
-        """Launch the staged installer silently and report whether it did.
-
-        A True result means the caller should exit immediately after -- a
-        running exe can't be overwritten by its own installer while it's
-        still open. False if nothing is staged (e.g. a stale click after
-        the app was already restarted some other way).
+        Only main.py's click handler for the AVAILABLE notification (bar
+        toast or the Settings button) should ever call this -- never a
+        timer, never automatically after check_now() finds something.
+        Returns False as a harmless no-op if there is nothing available or
+        a download is already running, so a duplicate click (the bar toast
+        and the Settings button both wired to the same Updater) can't start
+        two overlapping downloads.
         """
-        if self._staged is None:
+        info = self._available
+        if info is None or not self._busy.acquire(blocking=False):
             return False
-        version, installer_path, notes = self._staged
-        _write_update_notice(version, notes)
-        try:
-            subprocess.Popen(
-                [str(installer_path), "/SP-", "/VERYSILENT", "/NORESTART"]
-            )
-        except OSError as exc:
-            print(f"[dictate] could not start verified installer: {exc}")
-            return False
-        self._set_status(INSTALLING, "Restarting Dictate to install the update…")
+        self._available = None
+        threading.Thread(
+            target=self._download_and_install, args=(info,), daemon=True
+        ).start()
         return True
+
+    def _fail(self, message: str) -> None:
+        print(f"[dictate] update rejected: {message}")
+        # Always visible, unlike a background check's silent failures --
+        # start_update() only ever runs from an explicit click, so there is
+        # always someone waiting to hear whether it worked.
+        self._set_status(ERROR, message, revert_after=8.0)
+        self._on_error(message)
+
+    def _download_and_install(self, info: dict) -> None:
+        try:
+            expected_hash = _fetch_expected_sha256(
+                info["checksum_url"], info["installer_name"]
+            )
+            if expected_hash is None:
+                self._fail("Update integrity information is missing")
+                return
+
+            tmp_dir = Path(tempfile.mkdtemp(prefix=_DOWNLOAD_TEMP_PREFIX))
+            dest = tmp_dir / info["installer_name"]
+
+            last_frac = 0.0
+            last_emit = time.monotonic()
+
+            def on_progress(n: int, total: Optional[int]) -> None:
+                nonlocal last_frac, last_emit
+                if not total:
+                    return
+                frac = min(1.0, n / total)
+                now = time.monotonic()
+                if frac < 1.0 and frac - last_frac < 0.01 and now - last_emit < 0.1:
+                    return
+                last_frac, last_emit = frac, now
+                pct = int(frac * 100)
+                self._set_status(
+                    DOWNLOADING,
+                    f"Downloading update {info['version']} — {pct}%",
+                    progress=frac,
+                )
+
+            try:
+                _download(info["installer_url"], dest, on_progress)
+                if dest.stat().st_size != info["installer_size"]:
+                    raise ValueError("download size did not match the release")
+                if _sha256(dest) != expected_hash:
+                    raise ValueError("download hash did not match the release")
+                # No cert configured yet -- see TRUSTED_SIGNER_THUMBPRINT's
+                # comment. Once one is, every update is also checked against
+                # that signer.
+                if self._trusted_signer_thumbprint and not _verify_authenticode(
+                    dest, self._trusted_signer_thumbprint
+                ):
+                    raise ValueError("installer signer did not match Dictate")
+            except Exception as exc:
+                dest.unlink(missing_ok=True)
+                try:
+                    tmp_dir.rmdir()
+                except OSError:
+                    pass
+                self._fail("The update could not be verified")
+                print(f"[dictate] update verification detail: {exc}")
+                return
+
+            _write_update_notice(info["version"], info["release_notes"])
+            try:
+                subprocess.Popen([str(dest), "/SP-", "/VERYSILENT", "/NORESTART"])
+            except OSError as exc:
+                self._fail("The update downloaded but could not be started")
+                print(f"[dictate] could not start verified installer: {exc}")
+                return
+
+            print(f"[dictate] update {info['version']} installing")
+            # Does not auto-revert: main.py's on_installing quits the app
+            # right after this, so there is no later moment to revert from.
+            self._set_status(INSTALLING, "Restarting Dictate to install the update…")
+            self._on_installing(info["version"])
+        finally:
+            self._busy.release()
 
     def shutdown(self) -> None:
         self._stop.set()

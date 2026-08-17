@@ -14,8 +14,8 @@ from __future__ import annotations
 import ctypes
 from dataclasses import asdict, replace
 
-from PySide6.QtCore import Property, Qt, QPropertyAnimation, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtCore import Property, Qt, QPropertyAnimation, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -25,9 +25,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -208,6 +210,33 @@ QScrollBar::handle:vertical { background: #4D4D4D; border-radius: 3px; min-heigh
 QScrollBar::handle:vertical:hover { background: #5E5E5E; }
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+/* Windows 11 progress bar: a thin flat track with a rounded accent chunk --
+   used for update/GPU-runtime/model downloads, determinate or (range 0,0)
+   the indeterminate "still working" case, both in the same four-pixel rail
+   the rest of the shell uses instead of a taller stock QProgressBar. */
+QProgressBar#nativeProgress {
+    background: rgba(255, 255, 255, 139);
+    border: none;
+    border-radius: 2px;
+    max-height: 4px;
+    min-height: 4px;
+}
+QProgressBar#nativeProgress::chunk {
+    background: #4CC2FF;
+    border-radius: 2px;
+}
+
+/* Back-navigation header for an in-place sub-page (Privacy). */
+QPushButton#backNav {
+    background: transparent;
+    border: none;
+    color: #4CC2FF;
+    font-weight: 600;
+    padding: 4px 2px;
+    text-align: left;
+}
+QPushButton#backNav:hover { color: #78D3FF; }
 """
 
 LIGHT_STYLE = """
@@ -246,6 +275,10 @@ QSlider::sub-page:horizontal { background: #0078D4; border-radius: 2px; }
 QSlider::handle:horizontal { background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5, stop:0 #0078D4, stop:0.60 #0078D4, stop:0.62 #FFFFFF, stop:1 #FFFFFF); border: 1px solid #B8B8B8; width: 18px; height: 18px; margin: -8px 0px; border-radius: 10px; }
 QSlider::handle:horizontal:hover { background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5, stop:0 #0078D4, stop:0.70 #0078D4, stop:0.72 #FFFFFF, stop:1 #FFFFFF); }
 QScrollArea { border: none; background: #F3F3F3; } QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; } QScrollBar::handle:vertical { background: #A8A8A8; border-radius: 3px; min-height: 24px; } QScrollBar::handle:vertical:hover { background: #7E7E7E; } QScrollBar::add-line, QScrollBar::sub-line { height: 0; } QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+QProgressBar#nativeProgress { background: #DADADA; border: none; border-radius: 2px; max-height: 4px; min-height: 4px; }
+QProgressBar#nativeProgress::chunk { background: #0078D4; border-radius: 2px; }
+QPushButton#backNav { background: transparent; border: none; color: #0067B8; font-weight: 600; padding: 4px 2px; text-align: left; }
+QPushButton#backNav:hover { color: #004C87; }
 """
 
 
@@ -353,6 +386,32 @@ def _text_row(title: str, desc: str) -> QFrame:
     body.setProperty("role", "desc")
     body.setWordWrap(True)
     layout.addWidget(body)
+    return frame
+
+
+def _native_progress_bar() -> QProgressBar:
+    """One shared, Fluent-styled progress bar for every download in the app.
+
+    Update checks, GPU-runtime downloads, and model downloads already flow
+    through the same LOADING-with-optional-progress status shape (see
+    SettingsWindow.refresh_status()); this is the one visual it drives,
+    rather than a separate bar per download kind.
+    """
+    bar = QProgressBar()
+    bar.setObjectName("nativeProgress")
+    bar.setTextVisible(False)
+    bar.setRange(0, 100)
+    bar.setValue(0)
+    bar.setVisible(False)
+    return bar
+
+
+def _progress_row(bar: QProgressBar) -> QFrame:
+    """A slim, title-less row that just holds a full-width progress bar."""
+    frame = QFrame()
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(14, 8, 14, 8)
+    layout.addWidget(bar)
     return frame
 
 
@@ -683,8 +742,117 @@ def _fill_microphone_box(box: QComboBox, selected_key: str) -> None:
     box.blockSignals(blocked)
 
 
+def _populate_privacy_content(col: QVBoxLayout) -> None:
+    """Build the actual privacy disclosure into ``col``.
+
+    Shared by PrivacyDialog (still used by the first-run welcome dialog,
+    which is its own standalone top-level window) and PrivacyPage (the
+    in-place Settings sub-page navigated to from SettingsWindow), so the
+    real content -- the part that matters -- exists in exactly one place.
+    """
+    title = QLabel("Your voice stays on this PC")
+    title.setProperty("role", "header")
+    col.addWidget(title)
+    intro = QLabel(
+        "Dictate is a local tool with no account and no cloud transcription. "
+        "This page explains exactly what it uses and the few things that "
+        "leave this PC."
+    )
+    intro.setProperty("role", "desc")
+    intro.setWordWrap(True)
+    col.addWidget(intro)
+    col.addSpacing(4)
+
+    local_header = QLabel("STAYS ON THIS PC")
+    local_header.setProperty("role", "section")
+    col.addWidget(local_header)
+    col.addWidget(
+        _settings_group(
+            _text_row(
+                "Microphone",
+                "The selected microphone opens only while you hold the talk "
+                "key. Audio is kept in memory long enough to transcribe it; "
+                "Dictate does not save voice recordings.",
+            ),
+            _text_row(
+                "Local transcription",
+                "faster-whisper processes your audio on this computer. "
+                "Dictate does not upload recordings or transcribed text to "
+                "a transcription service.",
+            ),
+            _text_row(
+                "Last dictation",
+                "The most recent successful result is kept in memory only, "
+                "never written to disk, so \"Copy last dictation\" in the "
+                "tray menu can recover it. It's replaced the moment you "
+                "dictate again, and cleared when Dictate closes.",
+            ),
+            _text_row(
+                "Clipboard",
+                "Dictate temporarily uses the Windows clipboard to insert "
+                "the result, then restores the previous contents — "
+                "including an empty clipboard. \"Copy last dictation\" "
+                "works the same way: your prior clipboard returns after "
+                "5 seconds unless you copy something new first.",
+            ),
+            _text_row(
+                "Words I use",
+                "Names, brands, or terms you add are saved to your local "
+                "settings file and used only as local recognition hints "
+                "for Whisper. They never leave this PC.",
+            ),
+            _text_row(
+                "Your settings",
+                "Preferences — device, hotkeys, recognition words, window "
+                "layout — are saved as plain JSON at "
+                "%APPDATA%\\dictate\\settings.json. Nothing here is "
+                "tied to an account or synced anywhere.",
+            ),
+            _text_row(
+                "Diagnostics",
+                "The debug console reports status and errors, but it does "
+                "not print the words you dictated.",
+            ),
+        )
+    )
+
+    network_header = QLabel("LEAVES THIS PC")
+    network_header.setProperty("role", "section")
+    col.addWidget(network_header)
+    col.addWidget(
+        _settings_group(
+            _text_row(
+                "Speech model downloads",
+                "The first time you use a speech model, its files may "
+                "download from Hugging Face. Your audio and words are "
+                "never part of that request.",
+            ),
+            _text_row(
+                "GPU acceleration files",
+                "Switching Processing to GPU downloads NVIDIA's CUDA "
+                "runtime files from PyPI the first time, if your PC has a "
+                "supported GPU but is missing them. Again, no audio or "
+                "text is part of that request.",
+            ),
+            _text_row(
+                "Update checks",
+                "Dictate asks GitHub's public release page once a day, or "
+                "whenever you click \"Check for updates,\" whether a newer "
+                "version exists. No account, hardware ID, or usage data is "
+                "sent — the same plain request any visitor's browser "
+                "would make. Turn off \"Check for updates automatically\" "
+                "in Settings and Dictate never makes this request.",
+            ),
+        )
+    )
+
+
 class PrivacyDialog(QDialog):
-    """Plain-language disclosure of Dictate's real local data flow."""
+    """Plain-language disclosure of Dictate's real local data flow.
+
+    Only reached from FirstRunDialog now -- SettingsWindow navigates to
+    PrivacyPage in place instead of opening this as a second window.
+    """
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -711,101 +879,7 @@ class PrivacyDialog(QDialog):
         col.setSpacing(9)
         scroll.setWidget(page)
 
-        title = QLabel("Your voice stays on this PC")
-        title.setProperty("role", "header")
-        col.addWidget(title)
-        intro = QLabel(
-            "Dictate is a local tool with no account and no cloud transcription. "
-            "This page explains exactly what it uses and the few things that "
-            "leave this PC."
-        )
-        intro.setProperty("role", "desc")
-        intro.setWordWrap(True)
-        col.addWidget(intro)
-        col.addSpacing(4)
-
-        local_header = QLabel("STAYS ON THIS PC")
-        local_header.setProperty("role", "section")
-        col.addWidget(local_header)
-        col.addWidget(
-            _settings_group(
-                _text_row(
-                    "Microphone",
-                    "The selected microphone opens only while you hold the talk "
-                    "key. Audio is kept in memory long enough to transcribe it; "
-                    "Dictate does not save voice recordings.",
-                ),
-                _text_row(
-                    "Local transcription",
-                    "faster-whisper processes your audio on this computer. "
-                    "Dictate does not upload recordings or transcribed text to "
-                    "a transcription service.",
-                ),
-                _text_row(
-                    "Last dictation",
-                    "The most recent successful result is kept in memory only, "
-                    "never written to disk, so \"Copy last dictation\" in the "
-                    "tray menu can recover it. It's replaced the moment you "
-                    "dictate again, and cleared when Dictate closes.",
-                ),
-                _text_row(
-                    "Clipboard",
-                    "Dictate temporarily uses the Windows clipboard to insert "
-                    "the result, then restores the previous contents — "
-                    "including an empty clipboard. \"Copy last dictation\" "
-                    "works the same way: your prior clipboard returns after "
-                    "5 seconds unless you copy something new first.",
-                ),
-                _text_row(
-                    "Words I use",
-                    "Names, brands, or terms you add are saved to your local "
-                    "settings file and used only as local recognition hints "
-                    "for Whisper. They never leave this PC.",
-                ),
-                _text_row(
-                    "Your settings",
-                    "Preferences — device, hotkeys, recognition words, window "
-                    "layout — are saved as plain JSON at "
-                    "%APPDATA%\\dictate\\settings.json. Nothing here is "
-                    "tied to an account or synced anywhere.",
-                ),
-                _text_row(
-                    "Diagnostics",
-                    "The debug console reports status and errors, but it does "
-                    "not print the words you dictated.",
-                ),
-            )
-        )
-
-        network_header = QLabel("LEAVES THIS PC")
-        network_header.setProperty("role", "section")
-        col.addWidget(network_header)
-        col.addWidget(
-            _settings_group(
-                _text_row(
-                    "Speech model downloads",
-                    "The first time you use a speech model, its files may "
-                    "download from Hugging Face. Your audio and words are "
-                    "never part of that request.",
-                ),
-                _text_row(
-                    "GPU acceleration files",
-                    "Switching Processing to GPU downloads NVIDIA's CUDA "
-                    "runtime files from PyPI the first time, if your PC has a "
-                    "supported GPU but is missing them. Again, no audio or "
-                    "text is part of that request.",
-                ),
-                _text_row(
-                    "Update checks",
-                    "Dictate asks GitHub's public release page once a day, or "
-                    "whenever you click \"Check for updates,\" whether a newer "
-                    "version exists. No account, hardware ID, or usage data is "
-                    "sent — the same plain request any visitor's browser "
-                    "would make. Turn off \"Check for updates automatically\" "
-                    "in Settings and Dictate never makes this request.",
-                ),
-            )
-        )
+        _populate_privacy_content(col)
 
         col.addStretch(1)
         close_btn = QPushButton("Close")
@@ -819,6 +893,47 @@ class PrivacyDialog(QDialog):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         apply_native_chrome(int(self.winId()))
+
+
+class PrivacyPage(QWidget):
+    """Privacy as an in-place Settings sub-page, not a popup window.
+
+    Same real content as PrivacyDialog (via _populate_privacy_content), but
+    laid out the way Windows 11's own Settings app handles a sub-page: a
+    back arrow at the top instead of a Close button, swapped into the same
+    window SettingsWindow already owns rather than opened as a new one.
+    """
+
+    back = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("root")
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
+
+        page = QWidget()
+        page.setObjectName("root")
+        col = QVBoxLayout(page)
+        col.setContentsMargins(22, 20, 22, 20)
+        col.setSpacing(9)
+        scroll.setWidget(page)
+
+        back_btn = QPushButton("← Privacy")
+        back_btn.setObjectName("backNav")
+        back_btn.setCursor(Qt.PointingHandCursor)
+        back_btn.clicked.connect(self.back.emit)
+        col.addWidget(back_btn)
+        col.addSpacing(2)
+
+        _populate_privacy_content(col)
+        col.addStretch(1)
 
 
 class UpdateCompleteDialog(QDialog):
@@ -1006,7 +1121,6 @@ class SettingsWindow(QWidget):
     changed = Signal(object)  # emits the new Settings
     capture_active = Signal(bool)  # tells the global listener to stand down
     margin_preview = Signal(int)  # live "Bar position" value while the slider is being dragged
-    restart_to_update = Signal()  # App owns the actual shutdown/handoff
 
     def __init__(
         self,
@@ -1061,10 +1175,20 @@ class SettingsWindow(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
+        # Privacy is a second page in the same window (Windows 11 Settings
+        # style: navigate in, back arrow to return) rather than a popup --
+        # see PrivacyPage. self._pages holds exactly these two.
+        self._pages = QStackedWidget()
+        outer.addWidget(self._pages)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        outer.addWidget(scroll)
+        self._pages.addWidget(scroll)
+
+        self._privacy_page = PrivacyPage()
+        self._privacy_page.back.connect(lambda: self._pages.setCurrentWidget(scroll))
+        self._pages.addWidget(self._privacy_page)
 
         page = QWidget()
         page.setObjectName("root")
@@ -1342,6 +1466,27 @@ class SettingsWindow(QWidget):
         self._advanced_height_anim.finished.connect(self._on_advanced_anim_finished)
         col.addWidget(self.advanced_panel)
 
+        # Notifications section: covers every bar toast this app raises, not
+        # just updates -- Dictate opening, a second launch attempt finding it
+        # already open, and update results all route through the same
+        # App._notify() helper in main.py. Placed before Dictate Update
+        # rather than folded into that card, since it isn't update-specific.
+        notifications_header = QLabel("NOTIFICATIONS")
+        notifications_header.setProperty("role", "section")
+        col.addWidget(notifications_header)
+        self.system_notifications_check = ToggleSwitch(
+            self._settings.system_notifications_enabled
+        )
+        self.system_notifications_check.toggled.connect(self._queue_save)
+        system_notifications_row = _card(
+            "Also show Windows notifications",
+            "Dictate's floating bar already shows every notification it "
+            "raises -- opening, an update, a second launch attempt. Turn "
+            "this on to also mirror them as a Windows notification.",
+            self.system_notifications_check,
+        )
+        col.addWidget(_settings_group(system_notifications_row))
+
         # Windows puts Windows Update at the end of Settings navigation. This
         # single-page app has no navigation rail, so its equivalent is the
         # final primary section -- prominent, never hidden in a footer.
@@ -1363,20 +1508,34 @@ class SettingsWindow(QWidget):
         self.update_btn.clicked.connect(self._check_for_updates)
         update_row = _card(
             "You're up to date",
-            "Dictate checks only its official GitHub release, and verifies "
-            "the download's checksum before installing it.",
+            "Dictate checks only its official GitHub release, and never "
+            "downloads a new version without you clicking to install it.",
             self.update_btn,
         )
         self.update_desc_label = update_row.findChild(QLabel, "desc")
-        col.addWidget(_settings_group(auto_update_row, update_row))
+        self.update_progress = _native_progress_bar()
+        col.addWidget(
+            _settings_group(auto_update_row, update_row, _progress_row(self.update_progress))
+        )
 
         col.addStretch(1)
+
+        # Same shared progress bar style, for the GPU-runtime/model download
+        # that can follow a Transcription mode or Processing change -- lives
+        # next to the "Saved" status text below rather than inside the
+        # Update card, since it isn't update-related.
+        self.reload_progress = _native_progress_bar()
+        col.addWidget(self.reload_progress)
 
         bottom_row = QHBoxLayout()
         self.privacy_btn = QPushButton("Privacy")
         self.privacy_btn.setObjectName("link")
         self.privacy_btn.clicked.connect(self._show_privacy)
         bottom_row.addWidget(self.privacy_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        self.github_btn = QPushButton("GitHub")
+        self.github_btn.setObjectName("link")
+        self.github_btn.clicked.connect(self._open_github)
+        bottom_row.addWidget(self.github_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
         about = QLabel(f"Version {VERSION}")
         about.setProperty("role", "status")
         bottom_row.addWidget(about)
@@ -1513,16 +1672,33 @@ class SettingsWindow(QWidget):
             self.advanced_panel.setVisible(False)
 
     def _show_privacy(self) -> None:
-        PrivacyDialog(self).exec()
+        self._pages.setCurrentWidget(self._privacy_page)
+
+    def _open_github(self) -> None:
+        QDesktopServices.openUrl(QUrl("https://github.com/PLEXFX/dictate"))
 
     def _check_for_updates(self) -> None:
-        if self._updater is not None:
-            if not self.auto_update_check.isChecked():
-                return
-            if self._updater.has_staged_update:
-                self.restart_to_update.emit()
-            else:
-                self._updater.check_now(silent=False)
+        if self._updater is None or not self.auto_update_check.isChecked():
+            return
+        # Disabled synchronously, in this same click -- not left to
+        # refresh_status() reacting later to the updater's own async,
+        # cross-thread status-change signal. That round trip left a real
+        # window where a second click landed on a button that hadn't
+        # visibly disabled yet and got silently swallowed by the updater's
+        # own busy guard, which read as the button "randomly" not doing
+        # anything. Qt never delivers a second click to a widget this
+        # handler already disabled -- it processes one click at a time.
+        u_state, _u_detail, _u_progress = self._updater.last_status
+        if u_state == updater_mod.AVAILABLE:
+            self.update_btn.setEnabled(False)
+            self.update_btn.setText("Downloading…")
+            self._updater.start_update()
+        elif u_state in (updater_mod.CHECKING, updater_mod.DOWNLOADING, updater_mod.INSTALLING):
+            return  # already busy -- the button should already be disabled
+        else:
+            self.update_btn.setEnabled(False)
+            self.update_btn.setText("Checking…")
+            self._updater.check_now(silent=False)
 
     def refresh_status(self) -> None:
         """Finish model-change feedback without a permanent status badge.
@@ -1532,26 +1708,40 @@ class SettingsWindow(QWidget):
         as an ordinary model download, so this one status line covers all
         three rather than needing a separate widget per download kind.
         Updater.last_status reverts itself back to IDLE a few seconds after
-        a one-shot confirmation (UP_TO_DATE/READY) -- see updater.py's
+        a one-shot confirmation (UP_TO_DATE/ERROR) -- see updater.py's
         _set_status -- so this can just poll it fresh each call with no
-        "have I already shown this" bookkeeping of its own. READY remains
-        visible until the person chooses Restart now.
+        "have I already shown this" bookkeeping of its own. AVAILABLE
+        remains visible until the person clicks "Download & install".
         """
         if self._updater is not None:
             auto_update_on = self.auto_update_check.isChecked()
-            u_state, u_detail = self._updater.last_status
+            u_state, u_detail, u_progress = self._updater.last_status
             self.update_btn.setEnabled(
                 auto_update_on
                 and u_state not in (updater_mod.CHECKING, updater_mod.DOWNLOADING, updater_mod.INSTALLING)
             )
-            if u_state == updater_mod.READY:
-                self.update_btn.setText("Restart now")
+            if u_state == updater_mod.AVAILABLE:
+                self.update_btn.setText("Download & install")
             elif u_state == updater_mod.INSTALLING:
                 self.update_btn.setText("Restarting…")
             elif u_state in (updater_mod.CHECKING, updater_mod.DOWNLOADING):
                 self.update_btn.setText("Checking…" if u_state == updater_mod.CHECKING else "Downloading…")
             else:
                 self.update_btn.setText("Check for updates")
+
+            # Real native progress bar, not just a percentage inside the
+            # description text: determinate while a size is known
+            # (DOWNLOADING), indeterminate (range 0,0) for CHECKING/
+            # INSTALLING, where there's real work happening but no fraction.
+            busy = u_state in (updater_mod.CHECKING, updater_mod.DOWNLOADING, updater_mod.INSTALLING)
+            self.update_progress.setVisible(busy)
+            if busy:
+                if u_state == updater_mod.DOWNLOADING and u_progress is not None:
+                    self.update_progress.setRange(0, 100)
+                    self.update_progress.setValue(int(u_progress * 100))
+                else:
+                    self.update_progress.setRange(0, 0)
+
             if u_state != updater_mod.IDLE:
                 self.save_status.setText(u_detail)
                 if self.update_desc_label is not None:
@@ -1571,18 +1761,26 @@ class SettingsWindow(QWidget):
 
         state, detail, progress = self._engine.last_status
         if self._pending_reload:
-            if state == engine_mod.LOADING and progress is not None:
+            busy = state == engine_mod.LOADING and progress is not None
+            self.reload_progress.setVisible(busy)
+            if busy:
+                self.reload_progress.setRange(0, 100)
+                self.reload_progress.setValue(int(progress * 100))
                 self.save_status.setText(f"Saved · {detail}")
                 return
             if state == engine_mod.READY:
                 self._pending_reload = False
+                self.reload_progress.setVisible(False)
                 self.save_status.setText("Saved")
                 self._saved_timer.start()
                 return
             if state == engine_mod.ERROR:
                 self._pending_reload = False
+                self.reload_progress.setVisible(False)
                 self.save_status.setText("The speech model could not load")
                 return
+        else:
+            self.reload_progress.setVisible(False)
 
     def _tap_lock_desc(self) -> str:
         """Explain the gesture using the key that is actually bound to it."""
@@ -1624,6 +1822,7 @@ class SettingsWindow(QWidget):
             bar_linger_ms=self.linger_slider.value(),
             start_with_windows=self.startup_check.isChecked(),
             auto_update_enabled=self.auto_update_check.isChecked(),
+            system_notifications_enabled=self.system_notifications_check.isChecked(),
         ).clamped()
 
     def _queue_save(self, *_args) -> None:
@@ -1698,6 +1897,7 @@ class SettingsWindow(QWidget):
         self.linger_slider.setValue(s.bar_linger_ms)
         self.startup_check.setChecked(s.start_with_windows)
         self.auto_update_check.setChecked(s.auto_update_enabled)
+        self.system_notifications_check.setChecked(s.system_notifications_enabled)
         self._sync_mode_from_advanced()
         self._loading = False
 

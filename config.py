@@ -128,6 +128,14 @@ class Settings:
     # --- updates ---
     auto_update_enabled: bool = True  # periodically check GitHub for a new release
 
+    # --- notifications ---
+    # Dictate's own bar toast is always on and covers every notification this
+    # app raises. This additionally mirrors the same moments to a Windows
+    # system tray balloon for anyone who wants them to persist in Action
+    # Center too. Off by default -- the bar toast is the one notification
+    # system, not a second one bolted on unless asked for.
+    system_notifications_enabled: bool = False
+
     # --- appearance ---
     always_visible: bool = False  # keep the bar on screen even when idle
     bar_margin: int = 8           # gap in px between the bar and the taskbar
@@ -161,6 +169,7 @@ class Settings:
         out.live_preview_enabled = bool(out.live_preview_enabled)
         out.enhanced_preview_enabled = bool(out.enhanced_preview_enabled)
         out.auto_update_enabled = bool(out.auto_update_enabled)
+        out.system_notifications_enabled = bool(out.system_notifications_enabled)
         out.onboarding_complete = bool(out.onboarding_complete)
         out.sleep_after_minutes = min(max(float(out.sleep_after_minutes), 0.5), 240.0)
         out.bar_margin = min(max(int(out.bar_margin), 0), 400)

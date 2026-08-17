@@ -1,13 +1,14 @@
 ; Inno Setup script for Dictate.
 ;
-; Ships one installer with an optional "GPU acceleration" component instead
-; of separate CPU/GPU downloads. dictate.spec's PyInstaller build always
-; bundles the CUDA DLLs under _internal\nvidia\ in their own isolated tree
-; (engine.py's own CUDA DLL search already expects exactly that layout), so
-; this script simply chooses whether that one folder gets copied to disk.
-; Skipping it does not remove CPU support -- that lives in Core and always
-; installs -- it only removes the optional GPU path, which falls back to CPU
-; automatically at runtime either way if it's ever missing or fails to load.
+; dictate.spec's PyInstaller build no longer bundles any CUDA DLLs -- that
+; was most of the installer's ~1GB size for a component most machines never
+; use. This script installs one Core-only file set and, when Setup detects
+; an NVIDIA card (NvidiaCardDetected below), offers a "gpuaccel" task that
+; just seeds a preference in a fresh settings.json. The actual CUDA files
+; are fetched the same way either way: gpu_runtime.py's on-demand PyPI
+; download, the first time the app actually needs them, with its own
+; progress UI in Settings. No card, no task shown, no download ever
+; attempted -- resolve_device() (engine.py) falls back to CPU regardless.
 ;
 ; Build with (from the installer\ folder):
 ;   ISCC.exe dictate.iss
@@ -17,7 +18,7 @@
 ;   ISCC.exe dictate.iss /DMyAppVersion=0.1.0-beta.3
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.2-beta.1"
+  #define MyAppVersion "0.2.3-beta.1"
 #endif
 #define MyAppName "Dictate"
 #define MyAppPublisher "PLEXFX"
@@ -53,17 +54,13 @@ ArchitecturesInstallIn64BitMode=x64compatible
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-[Components]
-Name: "core"; Description: "Dictate (required)"; Types: full compact custom; Flags: fixed
-Name: "gpu"; Description: "GPU acceleration (NVIDIA CUDA) - adds faster transcription on supported NVIDIA graphics cards. Not required - Dictate works on CPU without this."; Types: full
-
 [Tasks]
 Name: "autoupdate"; Description: "Automatically check GitHub for new versions of Dictate"
+Name: "gpuaccel"; Description: "Enable GPU acceleration (NVIDIA card detected) - downloads automatically the first time it's needed"; Check: NvidiaCardDetected
 
 [Files]
-Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Components: core; Flags: ignoreversion
-Source: "{#SourceDir}\_internal\*"; DestDir: "{app}\_internal"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "nvidia\*"
-Source: "{#SourceDir}\_internal\nvidia\*"; DestDir: "{app}\_internal\nvidia"; Components: gpu; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Dictate"; Filename: "{app}\{#MyAppExeName}"
@@ -82,28 +79,91 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--updated"; Flags: nowait skipif
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_internal"
+; settings.json, update-notice.json -- everything config.py/updater.py ever
+; write under %APPDATA%\dictate. Removing it on uninstall means a later
+; reinstall starts genuinely fresh: onboarding_complete is gone, so the
+; first-run welcome dialog shows again exactly as it would for someone who
+; had never installed Dictate, rather than silently inheriting a stranger's
+; old settings from a previous install this machine forgot about.
+Type: filesandordirs; Name: "{userappdata}\dictate"
 
 [Code]
+// NVIDIA driver installs (any of them) create this key -- reading it needs
+// no admin rights and works whether or not the card is currently in use by
+// another app. This is detection only; it never triggers a download itself.
+function NvidiaCardDetected(): Boolean;
+begin
+  Result := RegKeyExists(HKLM, 'SOFTWARE\NVIDIA Corporation');
+end;
+
+var
+  GpuInfoLabel: TNewStaticText;
+
+// The Select Tasks page has no built-in room for plain explanatory text, so
+// this adds one line under the task list itself: which branch a person is
+// in (GPU found vs CPU-only) should not be a guess just because the task
+// checkbox above either appears or doesn't.
+procedure InitializeWizard();
+begin
+  GpuInfoLabel := TNewStaticText.Create(WizardForm);
+  GpuInfoLabel.Parent := WizardForm.TasksList.Parent;
+  GpuInfoLabel.Left := WizardForm.TasksList.Left;
+  GpuInfoLabel.Top := WizardForm.TasksList.Top + WizardForm.TasksList.Height + 12;
+  GpuInfoLabel.Width := WizardForm.TasksList.Width;
+  GpuInfoLabel.AutoSize := False;
+  GpuInfoLabel.WordWrap := True;
+  if NvidiaCardDetected() then
+    GpuInfoLabel.Caption :=
+      'NVIDIA graphics card detected. Check the box above to enable GPU ' +
+      'acceleration -- the files download automatically the first time ' +
+      'Dictate actually uses it.'
+  else
+    GpuInfoLabel.Caption := 'No NVIDIA graphics card detected -- Dictate will run on CPU.';
+end;
+
 // "Start with Windows" deliberately has no installer checkbox -- see the
-// [Run] comment above -- but the auto-update check is a one-time network
-// call at every launch rather than a per-session opt-in like startup, so
-// it gets an install-time choice too. This only ever seeds settings.json
-// with a single override key on a genuinely fresh install; config.py
-// already tolerates a partial settings file and fills in every other
-// default. An existing settings.json (reinstall, upgrade, or repair) is
-// never touched, so a user's own later choice in Settings always wins.
+// [Run] comment above -- but auto-update and GPU acceleration are one-time
+// choices worth surfacing during setup, so they seed settings.json instead.
+// This only ever writes a genuinely fresh settings.json; config.py already
+// tolerates a partial file and fills in every other default. An existing
+// settings.json (reinstall, upgrade, or repair) is never touched, so a
+// user's own later choice in Settings always wins.
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  ConfigDir, ConfigFile: string;
+  ConfigDir, ConfigFile, Json: string;
+  Parts: TStringList;
+  i: Integer;
 begin
-  if (CurStep = ssPostInstall) and (not WizardIsTaskSelected('autoupdate')) then
-  begin
-    ConfigDir := ExpandConstant('{userappdata}\dictate');
-    ConfigFile := ConfigDir + '\settings.json';
-    if not FileExists(ConfigFile) then
+  if CurStep <> ssPostInstall then
+    Exit;
+  ConfigDir := ExpandConstant('{userappdata}\dictate');
+  ConfigFile := ConfigDir + '\settings.json';
+  if FileExists(ConfigFile) then
+    Exit;
+
+  Parts := TStringList.Create;
+  try
+    if not WizardIsTaskSelected('autoupdate') then
+      Parts.Add('"auto_update_enabled": false');
+    // "auto" -- not a hard "cuda" -- so resolve_device() (engine.py) still
+    // falls back to CPU silently if detection was ever wrong for this PC.
+    if WizardIsTaskSelected('gpuaccel') then
+      Parts.Add('"device": "auto"');
+
+    if Parts.Count > 0 then
     begin
+      Json := '{';
+      for i := 0 to Parts.Count - 1 do
+      begin
+        if i > 0 then
+          Json := Json + ', ';
+        Json := Json + Parts[i];
+      end;
+      Json := Json + '}';
       ForceDirectories(ConfigDir);
-      SaveStringToFile(ConfigFile, '{"auto_update_enabled": false}', False);
+      SaveStringToFile(ConfigFile, Json, False);
     end;
+  finally
+    Parts.Free;
   end;
 end;

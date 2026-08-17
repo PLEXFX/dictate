@@ -1767,6 +1767,64 @@ class UiTests(unittest.TestCase):
         self.assertIn("downloads", window.device_desc_label.text().lower())
         window.close()
 
+    def test_privacy_navigates_in_place_instead_of_opening_a_window(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+
+        self.assertIs(window._pages.currentWidget(), window._pages.widget(0))
+        window.privacy_btn.click()
+        self.assertIs(window._pages.currentWidget(), window._privacy_page)
+        self.assertIn(
+            "stays on this PC",
+            " ".join(
+                label.text()
+                for label in window._privacy_page.findChildren(settings_window.QLabel)
+            ),
+        )
+        window._privacy_page.back.emit()
+        self.assertIs(window._pages.currentWidget(), window._pages.widget(0))
+        window.close()
+
+    def test_github_button_opens_the_public_repo(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+            patch.object(settings_window.QDesktopServices, "openUrl") as open_url,
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+            window.github_btn.click()
+
+        open_url.assert_called_once()
+        self.assertEqual(
+            open_url.call_args[0][0].toString(), "https://github.com/PLEXFX/dictate"
+        )
+        window.close()
+
     def test_refresh_status_shows_live_progress_and_updater_state(self):
         import engine
         import settings_window
@@ -1780,7 +1838,7 @@ class UiTests(unittest.TestCase):
                 pass
 
         class DummyUpdater:
-            last_status = (updater.IDLE, "")
+            last_status = (updater.IDLE, "", None)
 
         with (
             patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
@@ -1794,21 +1852,28 @@ class UiTests(unittest.TestCase):
 
             window.refresh_status()
             self.assertIn("42%", window.save_status.text())
+            self.assertFalse(window.reload_progress.isHidden())
+            self.assertEqual(window.reload_progress.value(), 42)
+            self.assertTrue(window.update_progress.isHidden())
 
             # Updater activity takes priority over the engine's own status,
             # and disables the button while a check/download is in flight.
             dummy_updater.last_status = (
                 updater.DOWNLOADING,
                 "Downloading update 0.1.0-beta.3 — 10%",
+                0.10,
             )
             window.refresh_status()
             self.assertIn("Downloading update", window.save_status.text())
             self.assertFalse(window.update_btn.isEnabled())
+            self.assertFalse(window.update_progress.isHidden())
+            self.assertEqual(window.update_progress.value(), 10)
 
-            dummy_updater.last_status = (updater.IDLE, "")
+            dummy_updater.last_status = (updater.IDLE, "", None)
             window.refresh_status()
             self.assertTrue(window.update_btn.isEnabled())
             self.assertIn("42%", window.save_status.text())
+            self.assertTrue(window.update_progress.isHidden())
         window.close()
 
     def test_check_for_updates_button_hidden_without_an_updater(self):
@@ -1824,7 +1889,7 @@ class UiTests(unittest.TestCase):
                 pass
 
         class DummyUpdater:
-            last_status = (updater.IDLE, "")
+            last_status = (updater.IDLE, "", None)
 
         with (
             patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
@@ -1858,8 +1923,7 @@ class UiTests(unittest.TestCase):
                 pass
 
         class DummyUpdater:
-            last_status = (updater.IDLE, "")
-            has_staged_update = False
+            last_status = (updater.IDLE, "", None)
 
         with (
             patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
@@ -2226,6 +2290,50 @@ class BarClickTests(unittest.TestCase):
         )
 
         self.assertTrue(b._text_advancing)
+
+
+class ToastWidthTests(unittest.TestCase):
+    """The toast used to elide routine update text mid-sentence because
+    MAX_W (320px) was narrower than realistic messages -- a long version
+    string plus "available -- click to download & install" easily exceeds
+    that. It now wraps to a second line instead; this locks in that the
+    wrapped box is actually tall enough to hold the whole message, rather
+    than just eyeballing it once."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication(
+            ["dictate-tests", "-platform", "offscreen"]
+        )
+
+    def test_realistic_update_messages_are_not_clipped(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QFontMetrics
+
+        import bar as bar_mod
+
+        toast = bar_mod.Toast()
+        messages = [
+            "You're on the latest version",
+            "Update 0.2.10-beta.12 available — click to download & install",
+            "Dictate's already running — hold Ctrl+Alt+F9 to talk",
+        ]
+        metrics = QFontMetrics(toast._font)
+        for text in messages:
+            toast.show_message(text, bar_mod.QRect(0, 0, 1, 1))
+            rect_w = toast.width() - toast.PAD * 2 - 16
+            if metrics.horizontalAdvance(text) <= rect_w:
+                continue  # fits on one line, drawn verbatim -- nothing to check
+            wrapped = metrics.boundingRect(
+                bar_mod.QRect(0, 0, rect_w, 10_000), Qt.TextWordWrap, text
+            )
+            self.assertLessEqual(
+                wrapped.height(),
+                toast.height(),
+                msg=f"wrapped text still clipped: {text!r}",
+            )
 
 
 class BarClickWiringTests(unittest.TestCase):
@@ -2716,51 +2824,8 @@ class UpdateCleanupTests(unittest.TestCase):
 class UpdaterFlowTests(unittest.TestCase):
     SIGNER = "A" * 40
 
-    def test_unsigned_release_still_stages_on_hash_and_url_alone(self):
-        """No code-signing cert is configured yet (TRUSTED_SIGNER_THUMBPRINT
-        is ""), so updates must still work from URL + SHA-256 verification
-        only -- and must never call the Authenticode check, since a call
-        with an empty expected thumbprint would be meaningless anyway."""
-        ready = threading.Event()
-
-        info = {
-            "version": "9.9.9",
-            "installer_url": "https://x/installer.exe",
-            "installer_name": "installer-unsigned-test.exe",
-            "installer_size": 5,
-            "checksum_url": "https://x/installer.exe.sha256",
-            "release_notes": "Works without a signing cert.",
-        }
-        with (
-            patch.object(updater, "_fetch_latest_release", return_value=info),
-            patch.object(updater, "_fetch_expected_sha256", return_value=hashlib.sha256(b"12345").hexdigest()),
-            patch.object(updater, "_verify_authenticode") as verify_authenticode,
-            patch.object(
-                updater,
-                "_download",
-                side_effect=lambda url, dest, cb: dest.write_bytes(b"12345"),
-            ),
-        ):
-            u = updater.Updater(
-                on_ready=lambda v, p: ready.set(),
-                current_version="0.1.0-beta.2",
-                check_interval=9999,
-                trusted_signer_thumbprint="",
-            )
-            try:
-                self.assertTrue(ready.wait(timeout=5))
-            finally:
-                u.shutdown()
-        verify_authenticode.assert_not_called()
-
-    def test_stages_a_newer_release_and_notifies_ready(self):
-        ready = threading.Event()
-        ready_args = []
-
-        def on_ready(version, path):
-            ready_args.append((version, path))
-            ready.set()
-
+    @staticmethod
+    def _info(**overrides):
         info = {
             "version": "9.9.9",
             "installer_url": "https://x/installer.exe",
@@ -2769,8 +2834,45 @@ class UpdaterFlowTests(unittest.TestCase):
             "checksum_url": "https://x/installer.exe.sha256",
             "release_notes": "A safer updater.",
         }
+        info.update(overrides)
+        return info
+
+    def test_check_now_never_downloads_on_its_own(self):
+        """The core behaviour change: finding a newer release must only ever
+        report AVAILABLE, never start a download by itself -- that is the
+        whole point of dropping the old auto-download-on-check design."""
+        available = threading.Event()
+        downloaded = threading.Event()
+
         with (
-            patch.object(updater, "_fetch_latest_release", return_value=info),
+            patch.object(updater, "_fetch_latest_release", return_value=self._info()),
+            patch.object(updater, "_download", side_effect=lambda *a, **k: downloaded.set()),
+        ):
+            u = updater.Updater(
+                on_available=lambda version, notes: available.set(),
+                current_version="0.1.0-beta.2",
+                check_interval=9999,
+                trusted_signer_thumbprint=self.SIGNER,
+            )
+            try:
+                self.assertTrue(available.wait(timeout=5))
+                time.sleep(0.2)  # give a wrongly-auto-triggered download time to start
+                self.assertFalse(downloaded.is_set())
+                self.assertEqual(u.last_status[0], updater.AVAILABLE)
+            finally:
+                u.shutdown()
+
+    def test_start_update_downloads_verifies_and_installs(self):
+        available = threading.Event()
+        installing = threading.Event()
+        installing_args = []
+
+        def on_installing(version):
+            installing_args.append(version)
+            installing.set()
+
+        with (
+            patch.object(updater, "_fetch_latest_release", return_value=self._info()),
             patch.object(updater, "_fetch_expected_sha256", return_value=hashlib.sha256(b"12345").hexdigest()),
             patch.object(updater, "_verify_authenticode", return_value=True),
             patch.object(
@@ -2778,22 +2880,145 @@ class UpdaterFlowTests(unittest.TestCase):
                 "_download",
                 side_effect=lambda url, dest, cb: dest.write_bytes(b"12345"),
             ),
+            patch.object(updater.subprocess, "Popen") as popen,
         ):
             u = updater.Updater(
-                on_ready=on_ready,
+                on_available=lambda version, notes: available.set(),
+                on_installing=on_installing,
                 current_version="0.1.0-beta.2",
                 check_interval=9999,
                 trusted_signer_thumbprint=self.SIGNER,
             )
             try:
-                self.assertTrue(ready.wait(timeout=5))
+                self.assertTrue(available.wait(timeout=5))
+                self.assertEqual(u.last_status[0], updater.AVAILABLE)
+                self.assertTrue(u.start_update())
+                self.assertTrue(installing.wait(timeout=5))
             finally:
                 u.shutdown()
 
-        version, path = ready_args[0]
-        self.assertEqual(version, "9.9.9")
-        self.assertTrue(path.exists())
-        path.unlink(missing_ok=True)
+        self.assertEqual(installing_args, ["9.9.9"])
+        popen.assert_called_once()
+        args = popen.call_args[0][0]
+        self.assertTrue(args[0].endswith("installer-flow-test.exe"))
+        self.assertEqual(args[1:], ["/SP-", "/VERYSILENT", "/NORESTART"])
+
+    def test_start_update_is_false_with_nothing_available(self):
+        with patch.object(updater, "_fetch_latest_release", return_value=None):
+            u = updater.Updater(
+                current_version="0.1.0-beta.2",
+                check_interval=9999,
+                trusted_signer_thumbprint=self.SIGNER,
+            )
+            try:
+                time.sleep(0.1)
+                self.assertFalse(u.start_update())
+            finally:
+                u.shutdown()
+
+    def test_start_update_is_false_on_a_duplicate_click(self):
+        """A second click (bar toast and Settings button both wired to the
+        same Updater) must not start a second overlapping download."""
+        available = threading.Event()
+        installing = threading.Event()
+        download_started = threading.Event()
+        release_download = threading.Event()
+
+        def slow_download(url, dest, cb):
+            download_started.set()
+            release_download.wait(timeout=5)
+            dest.write_bytes(b"12345")
+
+        with (
+            patch.object(updater, "_fetch_latest_release", return_value=self._info()),
+            patch.object(updater, "_fetch_expected_sha256", return_value=hashlib.sha256(b"12345").hexdigest()),
+            patch.object(updater, "_verify_authenticode", return_value=True),
+            patch.object(updater, "_download", side_effect=slow_download),
+            patch.object(updater.subprocess, "Popen"),
+        ):
+            u = updater.Updater(
+                on_available=lambda version, notes: available.set(),
+                on_installing=lambda version: installing.set(),
+                current_version="0.1.0-beta.2",
+                check_interval=9999,
+                trusted_signer_thumbprint=self.SIGNER,
+            )
+            try:
+                self.assertTrue(available.wait(timeout=5))
+                self.assertTrue(u.start_update())
+                self.assertTrue(download_started.wait(timeout=5))
+                self.assertFalse(u.start_update())  # the duplicate click
+                release_download.set()
+                self.assertTrue(installing.wait(timeout=5))
+            finally:
+                u.shutdown()
+
+    def test_unsigned_release_still_installs_on_hash_and_url_alone(self):
+        """No code-signing cert is configured yet (TRUSTED_SIGNER_THUMBPRINT
+        is ""), so updates must still work from URL + SHA-256 verification
+        only -- and must never call the Authenticode check, since a call
+        with an empty expected thumbprint would be meaningless anyway."""
+        available = threading.Event()
+        installing = threading.Event()
+
+        with (
+            patch.object(updater, "_fetch_latest_release", return_value=self._info()),
+            patch.object(updater, "_fetch_expected_sha256", return_value=hashlib.sha256(b"12345").hexdigest()),
+            patch.object(updater, "_verify_authenticode") as verify_authenticode,
+            patch.object(
+                updater,
+                "_download",
+                side_effect=lambda url, dest, cb: dest.write_bytes(b"12345"),
+            ),
+            patch.object(updater.subprocess, "Popen"),
+        ):
+            u = updater.Updater(
+                on_available=lambda version, notes: available.set(),
+                on_installing=lambda version: installing.set(),
+                current_version="0.1.0-beta.2",
+                check_interval=9999,
+                trusted_signer_thumbprint="",
+            )
+            try:
+                self.assertTrue(available.wait(timeout=5))
+                self.assertTrue(u.start_update())
+                self.assertTrue(installing.wait(timeout=5))
+            finally:
+                u.shutdown()
+        verify_authenticode.assert_not_called()
+
+    def test_start_update_reports_an_error_on_a_bad_checksum(self):
+        """A download/verify failure during start_update() must always be
+        reported -- unlike a background check, there is no silent path here,
+        because the only way to reach this code is an explicit click."""
+        available = threading.Event()
+        errored = threading.Event()
+        errors = []
+
+        with (
+            patch.object(updater, "_fetch_latest_release", return_value=self._info()),
+            patch.object(updater, "_fetch_expected_sha256", return_value="0" * 64),
+            patch.object(
+                updater,
+                "_download",
+                side_effect=lambda url, dest, cb: dest.write_bytes(b"12345"),
+            ),
+        ):
+            u = updater.Updater(
+                on_available=lambda version, notes: available.set(),
+                on_error=lambda message: (errors.append(message), errored.set()),
+                current_version="0.1.0-beta.2",
+                check_interval=9999,
+                trusted_signer_thumbprint=self.SIGNER,
+            )
+            try:
+                self.assertTrue(available.wait(timeout=5))
+                self.assertTrue(u.start_update())
+                self.assertTrue(errored.wait(timeout=5))
+                self.assertEqual(u.last_status[0], updater.ERROR)
+            finally:
+                u.shutdown()
+        self.assertEqual(len(errors), 1)
 
     def test_up_to_date_notification_fires_only_for_a_manual_check(self):
         startup_checked = threading.Event()
@@ -2832,58 +3057,6 @@ class UpdaterFlowTests(unittest.TestCase):
             finally:
                 u.shutdown()
         self.assertEqual(calls, [1])
-
-    def test_apply_staged_is_false_with_nothing_ready(self):
-        with patch.object(updater, "_fetch_latest_release", return_value=None):
-            u = updater.Updater(
-                current_version="0.1.0-beta.2",
-                check_interval=9999,
-                trusted_signer_thumbprint=self.SIGNER,
-            )
-            try:
-                time.sleep(0.1)
-                self.assertFalse(u.apply_staged())
-            finally:
-                u.shutdown()
-
-    def test_apply_staged_launches_the_installer_silently(self):
-        ready = threading.Event()
-        info = {
-            "version": "9.9.9",
-            "installer_url": "https://x/installer.exe",
-            "installer_name": "installer-apply-test.exe",
-            "installer_size": 5,
-            "checksum_url": "https://x/installer.exe.sha256",
-            "release_notes": "Improved update safety.",
-        }
-        with (
-            patch.object(updater, "_fetch_latest_release", return_value=info),
-            patch.object(updater, "_fetch_expected_sha256", return_value=hashlib.sha256(b"12345").hexdigest()),
-            patch.object(updater, "_verify_authenticode", return_value=True),
-            patch.object(
-                updater,
-                "_download",
-                side_effect=lambda url, dest, cb: dest.write_bytes(b"12345"),
-            ),
-        ):
-            u = updater.Updater(
-                on_ready=lambda v, p: ready.set(),
-                current_version="0.1.0-beta.2",
-                check_interval=9999,
-                trusted_signer_thumbprint=self.SIGNER,
-            )
-            try:
-                self.assertTrue(ready.wait(timeout=5))
-                with patch.object(updater.subprocess, "Popen") as popen:
-                    result = u.apply_staged()
-                self.assertTrue(result)
-                popen.assert_called_once()
-                args = popen.call_args[0][0]
-                self.assertTrue(args[0].endswith(info["installer_name"]))
-                self.assertEqual(args[1:], ["/SP-", "/VERYSILENT", "/NORESTART"])
-            finally:
-                u.shutdown()
-
 
     def test_disabled_updater_never_checks_until_re_enabled(self):
         fetch_calls = threading.Event()

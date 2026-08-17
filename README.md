@@ -4,35 +4,27 @@ Hold a key anywhere in Windows, speak, release. The text appears in whatever
 you were typing in. Transcription runs on this machine — no account and no
 cloud transcription. Speech-model files may download the first time they are used.
 
-## What's new in v0.2.2-beta.1
+## What's new in v0.2.3-beta.1
 
-An applied update no longer leaves its ~1 GB download sitting in your temp
-folder forever — old ones are now cleaned up automatically on the next launch.
+Updates no longer download in the background the moment a check finds one —
+Dictate now shows "Update available," and downloads, verifies, and installs
+only once you click it, with real progress and no separate "now click again
+to install" step afterward. A timing bug that could make "Check for
+updates" silently do nothing when clicked is fixed. Dictate now tells you
+when it's open and ready, and again if you try to open a second copy while
+it's already running; a new "Also show Windows notifications" toggle in
+Settings mirrors any of these as a normal Windows notification too, and
+longer notification text no longer gets cut off mid-sentence.
 
-Tap the talk key instead of holding it and recording locks on until you tap
-it again — hands-free for long passages, with Esc to cancel and a 5-minute
-safety cap. A live transcript preview now appears above the waveform as you
-talk, growing from an empty lip into a one- or two-line card, with an
-optional Enhanced (Alpha) mode that keeps that preview responsive on slower
-machines. "Undo last dictation" is in the tray menu, refusing whenever it
-can't be sure the text it would remove is still there. The waveform itself
-glows a touch brighter as you speak louder, and an always-visible idle bar
-now breathes gently instead of sitting flat.
-
-Update checks actually run now — earlier betas refused to check GitHub at
-all until Dictate had a code-signing certificate. Updates still require the
-exact official release URL and a matching checksum; see `SECURITY.md` for
-the current trust model. Update checks are also optional — turn them off
-from a Settings toggle or an installer checkbox at setup, and Dictate never
-contacts GitHub. Running from source with `run-dictate.bat` no longer leaves
-a console window open behind
-the app; use `run-dictate-debug.bat` when you want to see it. Dictate can
-also be installed as a normal Windows app — no Python required — with an
-optional GPU-acceleration add-on and a background updater that keeps it
-current. Skipped GPU acceleration at install time? Switching to GPU in
-Settings now downloads it on the spot instead of silently staying on CPU. A
-silent or dead microphone and a slow first-time model download now both give
-clear feedback instead of looking stuck.
+The installer is about 90% smaller — 93 MB instead of ~1.07 GB — since GPU
+acceleration files are no longer bundled into every install regardless of
+whether the machine has a card. Setup now detects an NVIDIA card and offers
+to enable GPU acceleration, downloading the files on demand the first time
+Dictate actually needs them, exactly as switching to GPU from Settings
+already did. Uninstalling now also removes your settings, so a later
+reinstall starts completely fresh, first-run screen included. Privacy is
+now a page inside Settings instead of a separate window, and there's a
+GitHub link next to it.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete version history.
 Read [PRIVACY.md](PRIVACY.md) for exactly what Dictate processes and what its
@@ -58,10 +50,15 @@ Download the latest `Dictate-Setup-*.exe` from
 [Releases](https://github.com/PLEXFX/dictate/releases/latest) and run it — no
 Python or setup needed. It's unsigned, so Windows SmartScreen will show an
 "unrecognized publisher" warning the first time; click **More info → Run
-anyway**. The installer offers an optional GPU-acceleration component for
-supported NVIDIA graphics cards, and a checkbox for whether Dictate should
-check GitHub for new versions in the background afterward — on by default,
-and also changeable later from Settings.
+anyway**. If Setup detects a supported NVIDIA graphics card, it offers a
+checkbox to enable GPU acceleration — the actual files download on demand
+the first time Dictate needs them rather than being bundled into the
+installer, so machines without a card never download them at all. There's
+also a checkbox for whether Dictate should check GitHub for new versions in
+the background afterward — on by default, and also changeable later from
+Settings. Uninstalling removes your settings along with the program, so a
+later reinstall starts completely fresh rather than picking up an old
+configuration.
 
 ## Running it
 
@@ -129,13 +126,22 @@ result in memory only; choosing it temporarily replaces the clipboard, then
 restores what was there after 5 seconds. If you copy anything in that window,
 Dictate leaves your newer clipboard item alone.
 
+A Notifications section in Settings has one toggle, "Also show Windows
+notifications" — off by default. Dictate's own floating-bar notification
+always shows for everything it raises (opening, an update, a second launch
+attempt); turning this on also mirrors each one as a normal Windows
+notification.
+
 The Dictate Update section at the bottom of Settings has its own toggle,
 "Check for updates automatically" — on by default, and also set at install
 time. Turning it off stops the daily background check and disables the
 manual "Check for updates" button; Dictate makes no GitHub request at all
-while it's off.
+while it's off. Finding a newer version never downloads it automatically —
+Settings shows "Download & install," and the bar shows the same
+notification; either one starts the download, verifies it, and installs it
+only once you click it.
 
-The Privacy link at the bottom of Settings explains microphone use, local
+The Privacy page at the bottom of Settings explains microphone use, local
 transcription, model downloads, clipboard behavior, and diagnostics in plain
 language. Debug output reports activity and errors without printing dictated text.
 

@@ -1524,7 +1524,13 @@ class Toast(QWidget):
     PAD = 12
     GAP = 8       # px between the toast's bottom edge and the pill's top edge
     HEIGHT = 38
-    MAX_W = 320
+    # A realistic update message ("Update 0.2.10-beta.12 available — click
+    # to download & install") measures ~750px at this font -- far past any
+    # single-line width worth showing at the bar's own compact scale. Rather
+    # than growing MAX_W to match (an oversized pill, and still not proof
+    # against the next longer message), text past this width wraps to a
+    # second line instead of eliding, so nothing is ever cut off.
+    MAX_W = 400
     RADIUS = 8
 
     clicked = Signal()
@@ -1561,8 +1567,19 @@ class Toast(QWidget):
         self._dot_color = dot_color
 
         metrics = QFontMetrics(self._font)
-        w = max(160, min(self.MAX_W, metrics.horizontalAdvance(text) + self.PAD * 2 + 22))
-        self.setFixedSize(w, self.HEIGHT)
+        chrome = self.PAD * 2 + 22  # dot + its left offset + the pill's own side padding
+        if metrics.horizontalAdvance(text) + chrome <= self.MAX_W:
+            w = max(160, metrics.horizontalAdvance(text) + chrome)
+            h = self.HEIGHT
+        else:
+            # Wrap rather than elide once one line at MAX_W isn't enough --
+            # see the MAX_W comment above.
+            w = self.MAX_W
+            wrapped = metrics.boundingRect(
+                QRect(0, 0, w - chrome, 10_000), Qt.TextWordWrap, text
+            )
+            h = max(self.HEIGHT, wrapped.height() + self.PAD * 2)
+        self.setFixedSize(w, h)
 
         end_pos = self._anchor_pos(anchor_rect)
         start_pos = QPoint(end_pos.x(), end_pos.y() + 10)
@@ -1613,6 +1630,13 @@ class Toast(QWidget):
     def _anchor_pos(self, anchor_rect: QRect) -> QPoint:
         x = anchor_rect.center().x() - self.width() // 2
         y = anchor_rect.top() - self.height() - self.GAP
+        # The bar itself is always screen-centred (Bar.reposition), so this
+        # only ever bites on an unusually narrow or heavily-zoomed display --
+        # but a wider MAX_W makes it worth guarding rather than assuming.
+        screen = QApplication.screenAt(anchor_rect.center()) or QApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            x = max(area.left(), min(x, area.right() - self.width()))
         return QPoint(x, y)
 
     def paintEvent(self, event) -> None:
@@ -1637,8 +1661,9 @@ class Toast(QWidget):
         p.setPen(palette["text"])
         rect = QRectF(self.PAD + 16, 0, self.width() - self.PAD * 2 - 16, self.height())
         metrics = QFontMetrics(self._font)
-        p.drawText(
-            rect,
-            Qt.AlignVCenter | Qt.AlignLeft,
-            metrics.elidedText(self._text, Qt.ElideRight, int(rect.width())),
-        )
+        if metrics.horizontalAdvance(self._text) <= rect.width():
+            p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, self._text)
+        else:
+            # show_message() already sized the box to fit this wrapped -- see
+            # its MAX_W comment -- so this is a real reflow, not a fallback.
+            p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft | Qt.TextWordWrap, self._text)

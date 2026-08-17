@@ -1521,6 +1521,43 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
 class UpdaterFlowTests(unittest.TestCase):
     SIGNER = "A" * 40
 
+    def test_unsigned_release_still_stages_on_hash_and_url_alone(self):
+        """No code-signing cert is configured yet (TRUSTED_SIGNER_THUMBPRINT
+        is ""), so updates must still work from URL + SHA-256 verification
+        only -- and must never call the Authenticode check, since a call
+        with an empty expected thumbprint would be meaningless anyway."""
+        ready = threading.Event()
+
+        info = {
+            "version": "9.9.9",
+            "installer_url": "https://x/installer.exe",
+            "installer_name": "installer-unsigned-test.exe",
+            "installer_size": 5,
+            "checksum_url": "https://x/installer.exe.sha256",
+            "release_notes": "Works without a signing cert.",
+        }
+        with (
+            patch.object(updater, "_fetch_latest_release", return_value=info),
+            patch.object(updater, "_fetch_expected_sha256", return_value=hashlib.sha256(b"12345").hexdigest()),
+            patch.object(updater, "_verify_authenticode") as verify_authenticode,
+            patch.object(
+                updater,
+                "_download",
+                side_effect=lambda url, dest, cb: dest.write_bytes(b"12345"),
+            ),
+        ):
+            u = updater.Updater(
+                on_ready=lambda v, p: ready.set(),
+                current_version="0.1.0-beta.2",
+                check_interval=9999,
+                trusted_signer_thumbprint="",
+            )
+            try:
+                self.assertTrue(ready.wait(timeout=5))
+            finally:
+                u.shutdown()
+        verify_authenticode.assert_not_called()
+
     def test_stages_a_newer_release_and_notifies_ready(self):
         ready = threading.Event()
         ready_args = []

@@ -20,7 +20,9 @@ Dictate accepts an in-app update only when all of the following are true:
 
 1. It is the exact installer asset for a release from `PLEXFX/dictate`.
 2. Its release checksum asset matches the downloaded bytes.
-3. Windows validates the installer signature and it matches Dictate's pinned
-   code-signing certificate.
 
-An unsigned or incorrectly signed release is rejected rather than installed.
+Dictate does not yet have a code-signing certificate, so there is no
+Authenticode signature check on top of the two above — if a future release
+adds one, this policy will be updated to describe it. Until then, the
+protection above defends against a corrupted or tampered-with download, not
+against a compromise of the `PLEXFX/dictate` GitHub account itself.

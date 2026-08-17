@@ -4,11 +4,15 @@ Hold a key anywhere in Windows, speak, release. The text appears in whatever
 you were typing in. Transcription runs on this machine — no account and no
 cloud transcription. Speech-model files may download the first time they are used.
 
-## What's new in v0.1.2-beta.2
+## What's new in v0.1.2-beta.3
 
-Update checks are now optional — turn them off from a Settings toggle or an
-installer checkbox at setup, and Dictate never contacts GitHub. Running from
-source with `run-dictate.bat` no longer leaves a console window open behind
+Update checks actually run now — earlier betas refused to check GitHub at
+all until Dictate had a code-signing certificate. Updates still require the
+exact official release URL and a matching checksum; see `SECURITY.md` for
+the current trust model. Update checks are also optional — turn them off
+from a Settings toggle or an installer checkbox at setup, and Dictate never
+contacts GitHub. Running from source with `run-dictate.bat` no longer leaves
+a console window open behind
 the app; use `run-dictate-debug.bat` when you want to see it. Dictate can
 also be installed as a normal Windows app — no Python required — with an
 optional GPU-acceleration add-on and a background updater that keeps it

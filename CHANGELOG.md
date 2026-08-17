@@ -7,6 +7,16 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.2-beta.3] - 2026-08-17
+
+### Security
+
+- Dictate has no code-signing certificate yet, so update checks no longer
+  refuse to run because of that. Updates still require the exact
+  `PLEXFX/dictate` release URL and a matching SHA-256 checksum; there is
+  just no Authenticode signature check layered on top until a signed
+  release exists. See `SECURITY.md` for the current update trust model.
+
 ## [0.1.2-beta.2] - 2026-08-17
 
 ### Security

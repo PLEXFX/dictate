@@ -1212,8 +1212,8 @@ class SettingsWindow(QWidget):
         auto_update_row = _card(
             "Check for updates automatically",
             "Dictate periodically checks its official GitHub release for a "
-            "new signed version. Turn this off and Dictate never contacts "
-            "GitHub about updates.",
+            "new version. Turn this off and Dictate never contacts GitHub "
+            "about updates.",
             self.auto_update_check,
         )
         self.update_btn = QPushButton("Check for updates")
@@ -1222,7 +1222,8 @@ class SettingsWindow(QWidget):
         self.update_btn.clicked.connect(self._check_for_updates)
         update_row = _card(
             "You're up to date",
-            "Dictate checks only its official GitHub release for a signed update.",
+            "Dictate checks only its official GitHub release, and verifies "
+            "the download's checksum before installing it.",
             self.update_btn,
         )
         self.update_desc_label = update_row.findChild(QLabel, "desc")
@@ -1413,7 +1414,8 @@ class SettingsWindow(QWidget):
             if self.update_desc_label is not None:
                 if auto_update_on:
                     self.update_desc_label.setText(
-                        "Dictate checks only its official GitHub release for a signed update."
+                        "Dictate checks only its official GitHub release, and "
+                        "verifies the download's checksum before installing it."
                     )
                 else:
                     self.update_desc_label.setText(

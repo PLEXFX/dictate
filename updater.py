@@ -32,9 +32,14 @@ from version import VERSION
 REPO = "PLEXFX/dictate"
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 
-# This is an identity pin, not a secret.  Set it to Dictate's production
-# certificate thumbprint before the first signed release.  Empty deliberately
-# fails closed so an unsigned beta can never be accepted as an auto-update.
+# This is an identity pin, not a secret. Set it to Dictate's production
+# certificate thumbprint once a signed release exists, and every update from
+# then on is also checked against this specific signer. Empty means Dictate
+# has no code-signing certificate yet: updates still require the exact
+# PLEXFX/dictate release URL and a matching SHA-256 checksum (both always
+# enforced below, never skipped), just not a signature -- a deliberate,
+# requested trade-off so updates work today rather than the stronger
+# guarantee a signed release would give. Revisit once signing is set up.
 TRUSTED_SIGNER_THUMBPRINT = ""
 
 # Status states, reported through last_status for a UI that polls reactively
@@ -46,7 +51,6 @@ DOWNLOADING = "downloading"
 READY = "ready"
 INSTALLING = "installing"
 ERROR = "error"
-UNAVAILABLE = "unavailable"
 
 _API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 _RELEASE_PREFIX = f"/{REPO}/releases/download/"
@@ -371,15 +375,6 @@ class Updater:
         # (below) always reports, silent or not: it's real work in progress,
         # not routine background chatter.
         try:
-            if not self._trusted_signer_thumbprint:
-                print("[dictate] update check unavailable: this is not a signed release build")
-                if not silent:
-                    self._set_status(
-                        UNAVAILABLE,
-                        "Updates will be available in the signed Dictate release",
-                        revert_after=8.0,
-                    )
-                return
             if not silent:
                 self._set_status(CHECKING, "Checking for updates…")
             info = _fetch_latest_release()
@@ -431,7 +426,11 @@ class Updater:
                 raise ValueError("download size did not match the release")
             if _sha256(dest) != expected_hash:
                 raise ValueError("download hash did not match the release")
-            if not _verify_authenticode(dest, self._trusted_signer_thumbprint):
+            # No cert configured yet -- see TRUSTED_SIGNER_THUMBPRINT's comment.
+            # Once one is, every update is also checked against that signer.
+            if self._trusted_signer_thumbprint and not _verify_authenticode(
+                dest, self._trusted_signer_thumbprint
+            ):
                 raise ValueError("installer signer did not match Dictate")
         except Exception as exc:
             dest.unlink(missing_ok=True)

@@ -4,12 +4,10 @@ Hold a key anywhere in Windows, speak, release. The text appears in whatever
 you were typing in. Transcription runs on this machine — no account and no
 cloud transcription. Speech-model files may download the first time they are used.
 
-## What's new in v0.2.1-beta.1
+## What's new in v0.2.2-beta.1
 
-Update checking actually works now — it never has before. GitHub's "latest
-release" endpoint hides prereleases, and every Dictate release has been one,
-so the check silently found nothing since the very first beta. Fixed, and a
-checksum sidecar now ships with every release so the check can stay working.
+An applied update no longer leaves its ~1 GB download sitting in your temp
+folder forever — old ones are now cleaned up automatically on the next launch.
 
 Tap the talk key instead of holding it and recording locks on until you tap
 it again — hands-free for long passages, with Esc to cancel and a 5-minute

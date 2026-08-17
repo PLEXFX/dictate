@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -263,6 +264,32 @@ def _verify_authenticode(path: Path, trusted_thumbprint: str) -> bool:
     return result.returncode == 0 and result.stdout.strip() == "trusted"
 
 
+_DOWNLOAD_TEMP_PREFIX = "dictate-update-"
+
+
+def cleanup_stale_downloads() -> None:
+    """Remove temp folders a past update download left behind.
+
+    ``_download_and_verify`` only deletes its own ``dictate-update-*`` temp
+    dir when verification fails -- a *successful* update hands the ~1 GB
+    installer off to a detached process and quits immediately after, and
+    never comes back to clean up its own download. Left alone, every
+    applied update leaves another full installer sitting in %TEMP% forever.
+
+    Safe to sweep unconditionally at startup: whatever process created one
+    of these folders has already finished with it (or crashed) by the time
+    a *new* instance is starting, since a fresh app owns its own updater
+    and always downloads fresh rather than resuming a prior temp file.
+    """
+    base = Path(tempfile.gettempdir())
+    try:
+        candidates = list(base.glob(f"{_DOWNLOAD_TEMP_PREFIX}*"))
+    except OSError:
+        return
+    for folder in candidates:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def _update_notice_path() -> Path:
     return Path(os.environ.get("APPDATA", Path.home())) / "dictate" / "update-notice.json"
 
@@ -437,7 +464,7 @@ class Updater:
             self._report_error("Update integrity information is missing", silent)
             return
 
-        tmp_dir = Path(tempfile.mkdtemp(prefix="dictate-update-"))
+        tmp_dir = Path(tempfile.mkdtemp(prefix=_DOWNLOAD_TEMP_PREFIX))
         dest = tmp_dir / info["installer_name"]
 
         last_frac = 0.0

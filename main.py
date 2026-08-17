@@ -255,6 +255,10 @@ class App:
         self._update_notice = (
             updater_mod.consume_update_notice(VERSION) if "--updated" in sys.argv else None
         )
+        # A successful update never comes back to delete its own ~1 GB
+        # temp download once it hands off to the installer -- do it here
+        # instead, once per launch, so old downloads don't pile up in %TEMP%.
+        updater_mod.cleanup_stale_downloads()
 
         self.hotkeys = hotkeys_mod.Hotkeys(
             self.settings,

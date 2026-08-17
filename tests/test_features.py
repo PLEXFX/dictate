@@ -2654,6 +2654,65 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
             self.assertIsNone(updater._fetch_latest_release())
 
 
+class UpdateNoticeTests(unittest.TestCase):
+    """The What's New dialog after a restart: written pre-update, read once
+    by the version it names, at the notice path (patched here rather than
+    the real %APPDATA%, so this test can't ever touch a real user's file)."""
+
+    def test_notes_survive_the_restart_when_versions_match(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "update-notice.json"
+            with patch.object(updater, "_update_notice_path", return_value=path):
+                updater._write_update_notice("0.2.2-beta.1", "Short release notes.")
+                self.assertEqual(
+                    updater.consume_update_notice("0.2.2-beta.1"), "Short release notes."
+                )
+
+    def test_notice_is_discarded_for_a_different_version(self):
+        # This is what a relabeled-same-binary test release looks like: the
+        # notice names the release tag, but the exe that actually restarted
+        # is still the old build, so its compiled-in VERSION won't match.
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "update-notice.json"
+            with patch.object(updater, "_update_notice_path", return_value=path):
+                updater._write_update_notice("0.2.2-beta.1", "Notes for the real build.")
+                self.assertIsNone(updater.consume_update_notice("0.2.1-beta.1"))
+
+    def test_consuming_the_notice_deletes_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "update-notice.json"
+            with patch.object(updater, "_update_notice_path", return_value=path):
+                updater._write_update_notice("0.2.2-beta.1", "Notes.")
+                updater.consume_update_notice("0.2.2-beta.1")
+                self.assertFalse(path.exists())
+
+    def test_no_notice_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "update-notice.json"
+            with patch.object(updater, "_update_notice_path", return_value=path):
+                self.assertIsNone(updater.consume_update_notice("0.2.2-beta.1"))
+
+
+class UpdateCleanupTests(unittest.TestCase):
+    def test_removes_stale_download_folders(self):
+        with tempfile.TemporaryDirectory() as fake_temp:
+            stale = Path(fake_temp) / f"{updater._DOWNLOAD_TEMP_PREFIX}abc123"
+            stale.mkdir()
+            (stale / "Dictate-Setup-0.2.1-beta.1.exe").write_bytes(b"not a real installer")
+            unrelated = Path(fake_temp) / "some-other-app-temp"
+            unrelated.mkdir()
+            with patch.object(updater.tempfile, "gettempdir", return_value=fake_temp):
+                updater.cleanup_stale_downloads()
+            self.assertFalse(stale.exists())
+            self.assertTrue(unrelated.exists())
+
+    def test_tolerates_an_unreadable_temp_directory(self):
+        with patch.object(
+            updater.Path, "glob", side_effect=OSError("permission denied")
+        ):
+            updater.cleanup_stale_downloads()  # must not raise
+
+
 class UpdaterFlowTests(unittest.TestCase):
     SIGNER = "A" * 40
 

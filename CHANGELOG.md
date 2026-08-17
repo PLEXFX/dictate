@@ -7,6 +7,14 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.2-beta.1] - 2026-08-17
+
+### Fixed
+
+- An applied update no longer leaves its ~1 GB download sitting in your temp
+  folder forever — old ones are now cleaned up automatically the next time
+  Dictate starts.
+
 ## [0.2.1-beta.1] - 2026-08-17
 
 ### Fixed

@@ -37,6 +37,7 @@ import hotkeys as hotkeys_mod
 import startup as startup_mod
 from theme import system_is_dark
 from toggle import ToggleSwitch
+from version import VERSION
 
 DARK_STYLE = """
 QWidget#root { background: #202020; }
@@ -955,7 +956,7 @@ class SettingsWindow(QWidget):
         self.privacy_btn.setObjectName("link")
         self.privacy_btn.clicked.connect(self._show_privacy)
         bottom_row.addWidget(self.privacy_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        about = QLabel("Version 0.1.0-beta.1")
+        about = QLabel(f"Version {VERSION}")
         about.setProperty("role", "status")
         bottom_row.addWidget(about)
         bottom_row.addStretch(1)

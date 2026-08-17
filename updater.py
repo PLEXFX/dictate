@@ -14,7 +14,6 @@ background.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import subprocess
@@ -81,15 +80,11 @@ def _fetch_latest_release() -> Optional[dict]:
     )
     if not version or installer is None:
         return None
-    sha_asset = next(
-        (a for a in assets if str(a.get("name", "")).lower().endswith(".sha256")), None
-    )
     return {
         "version": version,
         "installer_url": installer.get("browser_download_url"),
         "installer_name": installer.get("name") or "Dictate-Setup.exe",
         "installer_size": installer.get("size"),
-        "sha256_url": sha_asset.get("browser_download_url") if sha_asset else None,
     }
 
 
@@ -109,29 +104,6 @@ def _download(
                 downloaded += len(chunk)
                 if on_progress is not None:
                     on_progress(downloaded, total)
-
-
-def _sha256_matches(path: Path, sha256_url: str) -> bool:
-    """Compare a downloaded installer against its published checksum.
-
-    A network failure fetching the checksum itself is not treated as a
-    mismatch -- that would turn a flaky connection into "this update can
-    never apply" forever. The checksum is a corruption guard on top of an
-    ordinary HTTPS download, not the only thing standing between this and
-    running the file.
-    """
-    try:
-        req = urllib.request.Request(sha256_url, headers={"User-Agent": _USER_AGENT})
-        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
-            published = resp.read().decode("utf-8").strip().split()[0].lower()
-    except Exception:
-        return True
-
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(_DOWNLOAD_CHUNK), b""):
-            digest.update(chunk)
-    return digest.hexdigest().lower() == published
 
 
 class Updater:
@@ -208,11 +180,6 @@ class Updater:
         expected = info.get("installer_size")
         if expected and dest.stat().st_size != expected:
             print("[dictate] update download incomplete, discarding")
-            dest.unlink(missing_ok=True)
-            return
-
-        if info.get("sha256_url") and not _sha256_matches(dest, info["sha256_url"]):
-            print("[dictate] update checksum mismatch, discarding")
             dest.unlink(missing_ok=True)
             return
 

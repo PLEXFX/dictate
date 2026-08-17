@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sys
@@ -778,7 +777,7 @@ class UpdaterVersionTests(unittest.TestCase):
 
 
 class UpdaterReleaseFetchTests(unittest.TestCase):
-    def test_parses_the_installer_and_checksum_assets(self):
+    def test_parses_the_installer_asset(self):
         payload = json.dumps(
             {
                 "tag_name": "v0.1.0-beta.3",
@@ -787,10 +786,6 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
                         "name": "Dictate-Setup-0.1.0-beta.3.exe",
                         "browser_download_url": "https://x/installer.exe",
                         "size": 12345,
-                    },
-                    {
-                        "name": "Dictate-Setup-0.1.0-beta.3.exe.sha256",
-                        "browser_download_url": "https://x/installer.exe.sha256",
                     },
                 ],
             }
@@ -802,7 +797,6 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
         self.assertEqual(info["version"], "0.1.0-beta.3")
         self.assertEqual(info["installer_url"], "https://x/installer.exe")
         self.assertEqual(info["installer_size"], 12345)
-        self.assertEqual(info["sha256_url"], "https://x/installer.exe.sha256")
 
     def test_returns_none_without_an_installer_asset(self):
         payload = json.dumps({"tag_name": "v0.1.0-beta.3", "assets": []}).encode("utf-8")
@@ -816,43 +810,6 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
             updater.urllib.request, "urlopen", side_effect=OSError("offline")
         ):
             self.assertIsNone(updater._fetch_latest_release())
-
-
-class UpdaterChecksumTests(unittest.TestCase):
-    def test_a_correct_checksum_matches(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "file.bin"
-            path.write_bytes(b"hello world")
-            digest = hashlib.sha256(b"hello world").hexdigest()
-            with patch.object(
-                updater.urllib.request,
-                "urlopen",
-                return_value=_fake_response(digest.encode("utf-8")),
-            ):
-                self.assertTrue(updater._sha256_matches(path, "https://x/file.sha256"))
-
-    def test_a_mismatched_checksum_is_rejected(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "file.bin"
-            path.write_bytes(b"hello world")
-            with patch.object(
-                updater.urllib.request,
-                "urlopen",
-                return_value=_fake_response(b"0" * 64),
-            ):
-                self.assertFalse(updater._sha256_matches(path, "https://x/file.sha256"))
-
-    def test_fails_open_when_the_checksum_cannot_be_fetched(self):
-        # A flaky connection fetching the .sha256 sidecar must not turn into
-        # "this update can never apply" -- the checksum is a bonus corruption
-        # guard on top of HTTPS, not the only trust boundary.
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "file.bin"
-            path.write_bytes(b"hello world")
-            with patch.object(
-                updater.urllib.request, "urlopen", side_effect=OSError("offline")
-            ):
-                self.assertTrue(updater._sha256_matches(path, "https://x/file.sha256"))
 
 
 class UpdaterFlowTests(unittest.TestCase):
@@ -869,7 +826,6 @@ class UpdaterFlowTests(unittest.TestCase):
             "installer_url": "https://x/installer.exe",
             "installer_name": "installer-flow-test.exe",
             "installer_size": 5,
-            "sha256_url": None,
         }
         with (
             patch.object(updater, "_fetch_latest_release", return_value=info),
@@ -907,7 +863,6 @@ class UpdaterFlowTests(unittest.TestCase):
                 "installer_url": "x",
                 "installer_name": "x.exe",
                 "installer_size": None,
-                "sha256_url": None,
             }
 
         def on_up_to_date():
@@ -946,7 +901,6 @@ class UpdaterFlowTests(unittest.TestCase):
             "installer_url": "https://x/installer.exe",
             "installer_name": "installer-apply-test.exe",
             "installer_size": 5,
-            "sha256_url": None,
         }
         staged_path = Path(tempfile.gettempdir()) / "dictate-update" / info["installer_name"]
         with (

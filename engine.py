@@ -25,6 +25,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
+import gpu_runtime
+
 # Model downloads go through huggingface_hub (pulled in by faster_whisper).
 # Two sources of noise there, neither useful for a local offline tool:
 #   - The Hub server sends an "unauthenticated requests" nudge as an
@@ -284,6 +286,8 @@ class Engine:
         self._lock = threading.RLock()
         self._last_used = time.monotonic()
         self._state = UNLOADED
+        self._detail = ""
+        self._progress: Optional[float] = None
 
         self._stop = threading.Event()
         self._reaper = threading.Thread(target=self._idle_loop, daemon=True)
@@ -295,6 +299,8 @@ class Engine:
         self, state: str, detail: str = "", progress: Optional[float] = None
     ) -> None:
         self._state = state
+        self._detail = detail
+        self._progress = progress
         self._log_state(state, detail)
         self._on_state(state, detail, progress)
 
@@ -319,6 +325,13 @@ class Engine:
     @property
     def state(self) -> str:
         return self._state
+
+    @property
+    def last_status(self) -> tuple[str, str, Optional[float]]:
+        """The most recent (state, detail, progress) triple, for a UI that
+        polls reactively (settings_window.py's refresh_status()) rather than
+        wiring its own signal to every _set_state call."""
+        return (self._state, self._detail, self._progress)
 
     @property
     def active_device(self) -> str:
@@ -362,6 +375,12 @@ class Engine:
             size, device = wanted
             compute_type = "float16" if device == "cuda" else "int8"
             self._set_state(LOADING, f"{size} on {device.upper()}")
+            # device == "cuda" only happens once resolve_device() has already
+            # confirmed real GPU hardware via the system driver -- detection
+            # doesn't need our compute DLLs, only actual inference does. The
+            # only open question here is whether those DLLs are on disk.
+            if device == "cuda" and gpu_runtime.needs_download(gpu_available=True):
+                self._download_gpu_runtime()
             _register_cuda_dlls()
             self._download_with_progress(size, device)
             from faster_whisper import WhisperModel
@@ -382,6 +401,33 @@ class Engine:
             self._last_used = time.monotonic()
             self._set_state(READY, f"{wanted[0]} on {wanted[1].upper()}")
             return self._model
+
+    def _download_gpu_runtime(self) -> None:
+        """Fetch the CUDA compute DLLs a Core-only install doesn't ship with.
+
+        Only reached once resolve_device() has already confirmed real GPU
+        hardware -- see the call site's comment. A failed download just
+        leaves needs_download() true again for next time; the GPU-load
+        try/except a few lines below this in ensure_loaded() still catches
+        the resulting CTranslate2 failure and falls back to CPU either way,
+        so nothing here can turn into a hard failure.
+        """
+        last_frac = 0.0
+        last_emit = time.monotonic()
+
+        def on_bytes(n: int, total: int) -> None:
+            nonlocal last_frac, last_emit
+            if not total:
+                return
+            frac = min(1.0, n / total)
+            now = time.monotonic()
+            if frac < 1.0 and frac - last_frac < 0.01 and now - last_emit < 0.1:
+                return
+            last_frac, last_emit = frac, now
+            pct = int(frac * 100)
+            self._set_state(LOADING, f"GPU acceleration — downloading {pct}%", frac)
+
+        gpu_runtime.download_and_install(on_bytes)
 
     def _download_with_progress(self, size: str, device: str) -> None:
         """Report real percentage while a first-time model download runs.

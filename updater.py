@@ -19,6 +19,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -28,6 +29,14 @@ from version import VERSION
 
 REPO = "PLEXFX/dictate"
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+
+# Status states, reported through last_status for a UI that polls reactively
+# (settings_window.py's refresh_status(), mirroring engine.py's same pattern).
+IDLE = "idle"
+CHECKING = "checking"
+UP_TO_DATE = "up_to_date"
+DOWNLOADING = "downloading"
+READY = "ready"
 
 _API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 _USER_AGENT = "dictate-updater"
@@ -117,18 +126,57 @@ class Updater:
         self,
         on_ready: Optional[Callable[[str, Path], None]] = None,
         on_up_to_date: Optional[Callable[[], None]] = None,
+        on_status_change: Optional[Callable[[], None]] = None,
         current_version: str = VERSION,
         check_interval: float = CHECK_INTERVAL_SECONDS,
     ):
         self._on_ready = on_ready or (lambda version, path: None)
         self._on_up_to_date = on_up_to_date or (lambda: None)
+        self._on_status_change = on_status_change or (lambda: None)
         self._current_version = current_version
         self._check_interval = check_interval
+        self._status_state = IDLE
+        self._status_detail = ""
+        self._revert_timer: Optional[threading.Timer] = None
         self._stop = threading.Event()
         self._busy = threading.Lock()
         self._staged: Optional[tuple[str, Path]] = None
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+
+    @property
+    def last_status(self) -> tuple[str, str]:
+        """The most recent (state, detail) pair, for a UI that polls
+        reactively rather than wiring its own signal to every status change."""
+        return (self._status_state, self._status_detail)
+
+    def _set_status(
+        self, state: str, detail: str = "", *, revert_after: Optional[float] = None
+    ) -> None:
+        """Update status and notify. ``revert_after`` schedules a return to
+        IDLE that many seconds later -- used for one-shot confirmations
+        (UP_TO_DATE, READY) so a UI polling reactively (settings_window.py's
+        refresh_status()) gets a real window to observe and display the
+        state before it clears itself, without either side needing to track
+        "have I already shown this" -- reverting the source state is simpler
+        and race-free against Qt's async signal delivery than trying to
+        debounce on the display side.
+        """
+        if self._revert_timer is not None:
+            self._revert_timer.cancel()
+            self._revert_timer = None
+        self._status_state = state
+        self._status_detail = detail
+        self._on_status_change()
+        if revert_after is not None:
+            self._revert_timer = threading.Timer(revert_after, self._revert_to_idle)
+            self._revert_timer.daemon = True
+            self._revert_timer.start()
+
+    def _revert_to_idle(self) -> None:
+        self._status_state = IDLE
+        self._status_detail = ""
+        self._on_status_change()
 
     def _loop(self) -> None:
         self.check_now()
@@ -151,10 +199,20 @@ class Updater:
         ).start()
 
     def _check_and_download(self, silent: bool) -> None:
+        # CHECKING/UP_TO_DATE stay behind `not silent` -- the automatic 24h
+        # cadence finding nothing new shouldn't flash "Checking..." at a user
+        # who never asked to see it. A download that's actually happening
+        # (below) always reports, silent or not: it's real work in progress,
+        # not routine background chatter.
         try:
+            if not silent:
+                self._set_status(CHECKING, "Checking for updates…")
             info = _fetch_latest_release()
             if info is None or not is_newer(info["version"], self._current_version):
                 if not silent:
+                    self._set_status(
+                        UP_TO_DATE, "You're on the latest version", revert_after=3.0
+                    )
                     self._on_up_to_date()
                 return
             self._download_and_verify(info)
@@ -166,25 +224,47 @@ class Updater:
         tmp_dir.mkdir(exist_ok=True)
         dest = tmp_dir / info["installer_name"]
 
+        last_frac = 0.0
+        last_emit = time.monotonic()
+
         def on_progress(n: int, total: Optional[int]) -> None:
-            if total:
-                print(f"[dictate] update download: {int(100 * n / total)}%")
+            nonlocal last_frac, last_emit
+            if not total:
+                return
+            frac = min(1.0, n / total)
+            now = time.monotonic()
+            if frac < 1.0 and frac - last_frac < 0.01 and now - last_emit < 0.1:
+                return
+            last_frac, last_emit = frac, now
+            pct = int(frac * 100)
+            self._set_status(DOWNLOADING, f"Downloading update {info['version']} — {pct}%")
 
         try:
             _download(info["installer_url"], dest, on_progress)
         except Exception as exc:
             print(f"[dictate] update download failed: {exc}")
             dest.unlink(missing_ok=True)
+            self._set_status(IDLE, "")
             return
 
         expected = info.get("installer_size")
         if expected and dest.stat().st_size != expected:
             print("[dictate] update download incomplete, discarding")
             dest.unlink(missing_ok=True)
+            self._set_status(IDLE, "")
             return
 
         self._staged = (info["version"], dest)
         print(f"[dictate] update {info['version']} ready")
+        # Longer-lived than UP_TO_DATE: this is actionable, not just a
+        # confirmation, and the tray notification (main.py's showMessage)
+        # is the durable reminder if the user doesn't have Settings open --
+        # this just gives anyone who does a real chance to see it too.
+        self._set_status(
+            READY,
+            f"Update {info['version']} ready — click to restart and install",
+            revert_after=15.0,
+        )
         self._on_ready(info["version"], dest)
 
     def apply_staged(self) -> bool:
@@ -203,3 +283,5 @@ class Updater:
 
     def shutdown(self) -> None:
         self._stop.set()
+        if self._revert_timer is not None:
+            self._revert_timer.cancel()

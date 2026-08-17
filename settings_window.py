@@ -33,8 +33,10 @@ from PySide6.QtWidgets import (
 import audio as audio_mod
 import config
 import engine as engine_mod
+import gpu_runtime
 import hotkeys as hotkeys_mod
 import startup as startup_mod
+import updater as updater_mod
 from theme import system_is_dark
 from toggle import ToggleSwitch
 from version import VERSION
@@ -707,10 +709,16 @@ class SettingsWindow(QWidget):
     changed = Signal(object)  # emits the new Settings
     capture_active = Signal(bool)  # tells the global listener to stand down
 
-    def __init__(self, settings: config.Settings, engine: engine_mod.Engine):
+    def __init__(
+        self,
+        settings: config.Settings,
+        engine: engine_mod.Engine,
+        updater=None,
+    ):
         super().__init__(None)
         self._settings = settings
         self._engine = engine
+        self._updater = updater
         self._loading = True
         self._pending_reload = False
         self._has_cuda = engine_mod.cuda_available()
@@ -894,11 +902,14 @@ class SettingsWindow(QWidget):
             item = self.device_box.model().item(idx)
             if item is not None:
                 item.setEnabled(False)
-        device_row = _card(
-            "Processing",
-            "Automatic, GPU, or CPU. GPU is fastest but uses VRAM.",
-            self.device_box,
-        )
+        device_desc = "Automatic, GPU, or CPU. GPU is fastest but uses VRAM."
+        if gpu_runtime.needs_download(gpu_available=self._has_cuda):
+            device_desc = (
+                "Automatic, GPU, or CPU. Switching to GPU downloads the "
+                "acceleration files the first time (about 1.3 GB)."
+            )
+        device_row = _card("Processing", device_desc, self.device_box)
+        self.device_desc_label = device_row.findChild(QLabel, "desc")
 
         self.model_box = QComboBox()
         for value, _desc in config.MODELS:
@@ -956,6 +967,11 @@ class SettingsWindow(QWidget):
         self.privacy_btn.setObjectName("link")
         self.privacy_btn.clicked.connect(self._show_privacy)
         bottom_row.addWidget(self.privacy_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        self.update_btn = QPushButton("Check for updates")
+        self.update_btn.setObjectName("link")
+        self.update_btn.setVisible(self._updater is not None)
+        self.update_btn.clicked.connect(self._check_for_updates)
+        bottom_row.addWidget(self.update_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
         about = QLabel(f"Version {VERSION}")
         about.setProperty("role", "status")
         bottom_row.addWidget(about)
@@ -1038,10 +1054,36 @@ class SettingsWindow(QWidget):
     def _show_privacy(self) -> None:
         PrivacyDialog(self).exec()
 
+    def _check_for_updates(self) -> None:
+        if self._updater is not None:
+            self._updater.check_now(silent=False)
+
     def refresh_status(self) -> None:
-        """Finish model-change feedback without a permanent status badge."""
-        state = self._engine.state
+        """Finish model-change feedback without a permanent status badge.
+
+        Also the live surface for GPU-runtime and update download progress:
+        both flow through the same LOADING-with-progress/status-detail shape
+        as an ordinary model download, so this one status line covers all
+        three rather than needing a separate widget per download kind.
+        Updater.last_status reverts itself back to IDLE a few seconds after
+        a one-shot confirmation (UP_TO_DATE/READY) -- see updater.py's
+        _set_status -- so this can just poll it fresh each call with no
+        "have I already shown this" bookkeeping of its own.
+        """
+        if self._updater is not None:
+            u_state, u_detail = self._updater.last_status
+            self.update_btn.setEnabled(
+                u_state not in (updater_mod.CHECKING, updater_mod.DOWNLOADING)
+            )
+            if u_state != updater_mod.IDLE:
+                self.save_status.setText(u_detail)
+                return
+
+        state, detail, progress = self._engine.last_status
         if self._pending_reload:
+            if state == engine_mod.LOADING and progress is not None:
+                self.save_status.setText(f"Saved · {detail}")
+                return
             if state == engine_mod.READY:
                 self._pending_reload = False
                 self.save_status.setText("Saved")

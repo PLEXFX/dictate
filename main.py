@@ -110,6 +110,7 @@ class Bridge(QObject):
     command = Signal(str)  # a line typed into the console, already normalized
     update_ready = Signal(str, object)  # version, installer Path
     update_current = Signal()  # a manual check found nothing newer
+    update_status_changed = Signal()  # live status/progress text changed
 
 
 class App:
@@ -160,6 +161,7 @@ class App:
         self.bridge.command.connect(self._on_command)
         self.bridge.update_ready.connect(self._on_update_ready)
         self.bridge.update_current.connect(self._on_update_current)
+        self.bridge.update_status_changed.connect(self._on_update_status_changed)
 
         # Drives the waveform. Only runs while the mic is open.
         self.meter_timer = QTimer()
@@ -172,6 +174,7 @@ class App:
         self.updater = updater_mod.Updater(
             on_ready=self.bridge.update_ready.emit,
             on_up_to_date=self.bridge.update_current.emit,
+            on_status_change=self.bridge.update_status_changed.emit,
         )
 
         if not self.settings.sleep_enabled:
@@ -413,7 +416,7 @@ class App:
 
     def _show_settings(self) -> None:
         if self.settings_window is None:
-            self.settings_window = SettingsWindow(self.settings, self.engine)
+            self.settings_window = SettingsWindow(self.settings, self.engine, self.updater)
             self.settings_window.changed.connect(self._apply_settings)
             self.settings_window.capture_active.connect(self.hotkeys.set_capture_active)
         self.settings_window.show()
@@ -448,6 +451,10 @@ class App:
         self.tray.showMessage(
             "Dictate", "You're on the latest version.", QSystemTrayIcon.Information, 5000
         )
+
+    def _on_update_status_changed(self) -> None:
+        if self.settings_window:
+            self.settings_window.refresh_status()
 
     def _apply_pending_update(self) -> None:
         if self.updater.apply_staged():

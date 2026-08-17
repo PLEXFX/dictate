@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -19,6 +20,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import audio
 import config
+import gpu_runtime
 import hotkeys
 import inject
 import startup
@@ -205,6 +207,267 @@ class EngineProgressTests(unittest.TestCase):
 
         fractions = [p for p in states if p is not None]
         self.assertEqual(fractions, [0.999, 1.0])
+
+
+class EngineGpuDownloadTests(unittest.TestCase):
+    @staticmethod
+    def _bare_engine(device: str) -> "engine.Engine":
+        import engine
+
+        eng = engine.Engine.__new__(engine.Engine)
+        eng._settings = config.Settings(device=device, model_size="tiny.en")
+        eng._model = None
+        eng._loaded_key = None
+        eng._lock = threading.RLock()
+        eng._last_used = time.monotonic()
+        eng._state = engine.UNLOADED
+        eng._detail = ""
+        eng._progress = None
+        eng._on_state = lambda *a, **k: None
+        return eng
+
+    def test_downloads_gpu_runtime_when_cuda_selected_and_files_missing(self):
+        import engine
+
+        eng = self._bare_engine("cuda")
+        calls = []
+        with (
+            patch.object(engine, "resolve_device", return_value="cuda"),
+            patch.object(engine.gpu_runtime, "needs_download", return_value=True),
+            patch.object(eng, "_download_gpu_runtime", side_effect=lambda: calls.append(1)),
+            patch.object(engine, "_register_cuda_dlls"),
+            patch.object(eng, "_download_with_progress"),
+            patch("faster_whisper.WhisperModel", return_value=Mock()),
+        ):
+            eng.ensure_loaded()
+        self.assertEqual(calls, [1])
+
+    def test_skips_gpu_download_when_files_already_present(self):
+        import engine
+
+        eng = self._bare_engine("cuda")
+        calls = []
+        with (
+            patch.object(engine, "resolve_device", return_value="cuda"),
+            patch.object(engine.gpu_runtime, "needs_download", return_value=False),
+            patch.object(eng, "_download_gpu_runtime", side_effect=lambda: calls.append(1)),
+            patch.object(engine, "_register_cuda_dlls"),
+            patch.object(eng, "_download_with_progress"),
+            patch("faster_whisper.WhisperModel", return_value=Mock()),
+        ):
+            eng.ensure_loaded()
+        self.assertEqual(calls, [])
+
+    def test_skips_gpu_download_when_device_resolves_to_cpu(self):
+        import engine
+
+        eng = self._bare_engine("cpu")
+        calls = []
+        with (
+            patch.object(engine, "resolve_device", return_value="cpu"),
+            patch.object(
+                engine.gpu_runtime, "needs_download", side_effect=AssertionError
+            ),
+            patch.object(eng, "_download_gpu_runtime", side_effect=lambda: calls.append(1)),
+            patch.object(engine, "_register_cuda_dlls"),
+            patch.object(eng, "_download_with_progress"),
+            patch("faster_whisper.WhisperModel", return_value=Mock()),
+        ):
+            eng.ensure_loaded()
+        self.assertEqual(calls, [])
+
+
+def _fake_wheel_zip(path: Path, subdir: str, dll_names: list[str]) -> None:
+    with zipfile.ZipFile(path, "w") as zf:
+        for name in dll_names:
+            zf.writestr(f"nvidia/{subdir}/bin/{name}", b"fake-dll-bytes")
+        zf.writestr(f"nvidia/{subdir}/include/header.h", b"not-a-dll")
+
+
+class GpuRuntimeVersionTests(unittest.TestCase):
+    def test_version_tuple_parses_dotted_numbers(self):
+        self.assertEqual(gpu_runtime._version_tuple("12.9.86"), (12, 9, 86))
+        self.assertEqual(gpu_runtime._version_tuple("9.24.0.43"), (9, 24, 0, 43))
+
+    def test_latest_wheel_picks_highest_version_under_the_ceiling(self):
+        payload = json.dumps(
+            {
+                "releases": {
+                    "9.1.0": [
+                        {
+                            "filename": "pkg-9.1.0-py3-none-win_amd64.whl",
+                            "url": "https://x/9.1.0.whl",
+                            "size": 100,
+                        }
+                    ],
+                    "9.24.0.43": [
+                        {
+                            "filename": "pkg-9.24.0.43-py3-none-win_amd64.whl",
+                            "url": "https://x/9.24.whl",
+                            "size": 200,
+                        }
+                    ],
+                    "10.0.0": [
+                        {
+                            "filename": "pkg-10.0.0-py3-none-win_amd64.whl",
+                            "url": "https://x/10.0.whl",
+                            "size": 300,
+                        }
+                    ],
+                }
+            }
+        ).encode("utf-8")
+        with patch.object(
+            gpu_runtime.urllib.request, "urlopen", return_value=_fake_response(payload)
+        ):
+            result = gpu_runtime._latest_win_amd64_wheel("pkg", max_major=10)
+        self.assertEqual(result, ("https://x/9.24.whl", 200))
+
+    def test_latest_wheel_ignores_yanked_and_non_windows_files(self):
+        payload = json.dumps(
+            {
+                "releases": {
+                    "2.0.0": [
+                        {
+                            "filename": "pkg-2.0.0-py3-none-manylinux.whl",
+                            "url": "https://x/linux.whl",
+                            "size": 50,
+                        },
+                        {
+                            "filename": "pkg-2.0.0-py3-none-win_amd64.whl",
+                            "url": "https://x/yanked.whl",
+                            "size": 60,
+                            "yanked": True,
+                        },
+                    ],
+                    "1.0.0": [
+                        {
+                            "filename": "pkg-1.0.0-py3-none-win_amd64.whl",
+                            "url": "https://x/1.0.whl",
+                            "size": 70,
+                        }
+                    ],
+                }
+            }
+        ).encode("utf-8")
+        with patch.object(
+            gpu_runtime.urllib.request, "urlopen", return_value=_fake_response(payload)
+        ):
+            result = gpu_runtime._latest_win_amd64_wheel("pkg")
+        self.assertEqual(result, ("https://x/1.0.whl", 70))
+
+    def test_latest_wheel_returns_none_on_network_failure(self):
+        with patch.object(
+            gpu_runtime.urllib.request, "urlopen", side_effect=OSError("offline")
+        ):
+            self.assertIsNone(gpu_runtime._latest_win_amd64_wheel("pkg"))
+
+
+class GpuRuntimeStateTests(unittest.TestCase):
+    def test_not_frozen_never_needs_or_reports_installed(self):
+        self.assertFalse(gpu_runtime.is_installed())
+        self.assertFalse(gpu_runtime.needs_download(gpu_available=True))
+
+    def test_frozen_with_all_files_present_is_installed(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            for subdir in gpu_runtime._PACKAGE_SUBDIRS.values():
+                (base / subdir / "bin").mkdir(parents=True)
+            with (
+                patch.object(gpu_runtime.sys, "frozen", True, create=True),
+                patch.object(gpu_runtime, "runtime_dir", return_value=base),
+            ):
+                self.assertTrue(gpu_runtime.is_installed())
+                self.assertFalse(gpu_runtime.needs_download(gpu_available=True))
+                self.assertFalse(gpu_runtime.needs_download(gpu_available=False))
+
+    def test_frozen_with_missing_files_needs_download_only_with_gpu_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)  # empty -- nothing installed
+            with (
+                patch.object(gpu_runtime.sys, "frozen", True, create=True),
+                patch.object(gpu_runtime, "runtime_dir", return_value=base),
+            ):
+                self.assertFalse(gpu_runtime.is_installed())
+                self.assertTrue(gpu_runtime.needs_download(gpu_available=True))
+                self.assertFalse(gpu_runtime.needs_download(gpu_available=False))
+
+
+class GpuRuntimeInstallTests(unittest.TestCase):
+    def test_not_frozen_download_is_a_noop(self):
+        self.assertFalse(gpu_runtime.download_and_install())
+
+    def test_builds_the_full_tree_atomically(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "install" / "nvidia"
+
+            def fake_latest(package, max_major=None):
+                return (f"https://x/{package}.whl", 10)
+
+            def fake_download(url, dest, on_progress):
+                package = url.rsplit("/", 1)[-1].removesuffix(".whl")
+                subdir = gpu_runtime._PACKAGE_SUBDIRS[package]
+                _fake_wheel_zip(dest, subdir, [f"{subdir}64.dll"])
+                if on_progress:
+                    on_progress(10, 10)
+
+            progress_calls = []
+            with (
+                patch.object(gpu_runtime.sys, "frozen", True, create=True),
+                patch.object(gpu_runtime, "runtime_dir", return_value=target),
+                patch.object(
+                    gpu_runtime, "_latest_win_amd64_wheel", side_effect=fake_latest
+                ),
+                patch.object(gpu_runtime, "_download", side_effect=fake_download),
+            ):
+                result = gpu_runtime.download_and_install(
+                    lambda n, t: progress_calls.append((n, t))
+                )
+
+            self.assertTrue(result)
+            for subdir in gpu_runtime._PACKAGE_SUBDIRS.values():
+                self.assertTrue((target / subdir / "bin").is_dir())
+                # Only bin/* was extracted from each wheel -- confirms the
+                # zip-member filter actually narrows what lands on disk
+                # rather than unpacking the whole wheel.
+                self.assertFalse((target / subdir / "include").exists())
+            self.assertTrue(progress_calls)
+            self.assertEqual(progress_calls[-1], (30, 30))
+
+    def test_fails_cleanly_when_a_wheel_lookup_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "install" / "nvidia"
+            with (
+                patch.object(gpu_runtime.sys, "frozen", True, create=True),
+                patch.object(gpu_runtime, "runtime_dir", return_value=target),
+                patch.object(gpu_runtime, "_latest_win_amd64_wheel", return_value=None),
+            ):
+                result = gpu_runtime.download_and_install()
+        self.assertFalse(result)
+        self.assertFalse(target.exists())
+
+    def test_fails_cleanly_when_a_wheel_has_no_matching_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "install" / "nvidia"
+
+            def fake_latest(package, max_major=None):
+                return (f"https://x/{package}.whl", 10)
+
+            def fake_download_empty(url, dest, on_progress):
+                with zipfile.ZipFile(dest, "w") as zf:
+                    zf.writestr("unrelated/file.txt", b"nothing useful here")
+
+            with (
+                patch.object(gpu_runtime.sys, "frozen", True, create=True),
+                patch.object(gpu_runtime, "runtime_dir", return_value=target),
+                patch.object(
+                    gpu_runtime, "_latest_win_amd64_wheel", side_effect=fake_latest
+                ),
+                patch.object(gpu_runtime, "_download", side_effect=fake_download_empty),
+            ):
+                result = gpu_runtime.download_and_install()
+        self.assertFalse(result)
+        self.assertFalse(target.exists())
 
 
 class SettingsMigrationTests(unittest.TestCase):
@@ -598,6 +861,105 @@ class UiTests(unittest.TestCase):
         self.assertEqual(window._settings.device, "cuda")
         self.assertEqual(dummy.preload_calls, 1)
         window.close()
+
+    def test_device_row_explains_the_gpu_download_when_files_are_missing(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+            patch.object(settings_window.gpu_runtime, "needs_download", return_value=True),
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+        self.assertIn("downloads", window.device_desc_label.text().lower())
+        window.close()
+
+    def test_refresh_status_shows_live_progress_and_updater_state(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.LOADING
+            active_device = ""
+            last_status = (engine.LOADING, "GPU acceleration — downloading 42%", 0.42)
+
+            def preload(self):
+                pass
+
+        class DummyUpdater:
+            last_status = (updater.IDLE, "")
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            dummy_updater = DummyUpdater()
+            window = settings_window.SettingsWindow(
+                config.Settings(), DummyEngine(), dummy_updater
+            )
+            window._pending_reload = True
+
+            window.refresh_status()
+            self.assertIn("42%", window.save_status.text())
+
+            # Updater activity takes priority over the engine's own status,
+            # and disables the button while a check/download is in flight.
+            dummy_updater.last_status = (
+                updater.DOWNLOADING,
+                "Downloading update 0.1.0-beta.3 — 10%",
+            )
+            window.refresh_status()
+            self.assertIn("Downloading update", window.save_status.text())
+            self.assertFalse(window.update_btn.isEnabled())
+
+            dummy_updater.last_status = (updater.IDLE, "")
+            window.refresh_status()
+            self.assertTrue(window.update_btn.isEnabled())
+            self.assertIn("42%", window.save_status.text())
+        window.close()
+
+    def test_check_for_updates_button_hidden_without_an_updater(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+
+            def preload(self):
+                pass
+
+        class DummyUpdater:
+            last_status = (updater.IDLE, "")
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            no_updater = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+            with_updater = settings_window.SettingsWindow(
+                config.Settings(), DummyEngine(), DummyUpdater()
+            )
+        # isVisible() only reflects an explicit setVisible() call once the
+        # whole window has actually been shown -- without .show() every
+        # widget reports invisible regardless, which would pass this
+        # assertion for the wrong reason.
+        no_updater.show()
+        with_updater.show()
+        self.assertFalse(no_updater.update_btn.isVisible())
+        self.assertTrue(with_updater.update_btn.isVisible())
+        no_updater.close()
+        with_updater.close()
 
 
 class TalkKeyTests(unittest.TestCase):

@@ -18,6 +18,7 @@ makes it the one safe way in from the listener and worker threads.
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 import threading
 from dataclasses import replace
@@ -31,6 +32,7 @@ import audio as audio_mod
 import bar as bar_mod
 import config
 import engine as engine_mod
+import gpu_runtime
 import hotkeys as hotkeys_mod
 import inject
 import sounds as sounds_mod
@@ -38,10 +40,33 @@ import startup
 import updater as updater_mod
 from theme import ThemeWatcher
 from bar import Bar
-from settings_window import FirstRunDialog, SettingsWindow
+from settings_window import FirstRunDialog, SettingsWindow, UpdateCompleteDialog
+from version import VERSION
 
 APP_NAME = "Dictate"
 MUTEX_NAME = "Global\\DictateSingleInstance"
+
+# (name, description) pairs for the debug console's `help` output. A plain
+# list rather than a dict so the printed order matches the order below --
+# roughly "look something up" first, then actions, then the fake-notification
+# pair used only to eyeball the update UI without touching the network.
+CONSOLE_COMMANDS: list[tuple[str, str]] = [
+    ("status", "current engine state, active device, and auto-update setting"),
+    ("gpu", "GPU detection and whether acceleration files are installed"),
+    ("version", "the running Dictate version"),
+    ("vocab", "the saved 'Words I use' list and the settings file location"),
+    ("load model", "load the speech model now (alias: load)"),
+    ("unload model", "release the speech model from memory (alias: unload)"),
+    ("reload model", "reload after a settings change (alias: reload)"),
+    ("test sound", "play the mic-open and mic-close cues"),
+    ("settings", "open the Settings window"),
+    ("check update", "check GitHub for a new release right now"),
+    ("open data", "open the settings folder in File Explorer"),
+    ("update test", "simulate an update-ready notification (no network, no install)"),
+    ("update test current", "simulate an up-to-date notification"),
+    ("quit", "exit Dictate"),
+    ("help", "show this list (alias: ?)"),
+]
 # A frozen build's __file__ points inside the bundle, not a real sibling
 # directory containing icon.ico. sys._MEIPASS is PyInstaller's own answer to
 # "where did you put my data files" -- the onedir _internal folder here, a
@@ -111,6 +136,7 @@ class Bridge(QObject):
     update_ready = Signal(str, object)  # version, installer Path
     update_current = Signal()  # a manual check found nothing newer
     update_status_changed = Signal()  # live status/progress text changed
+    dictated = Signal(str)  # successfully inserted text, kept only in memory
 
 
 class App:
@@ -145,6 +171,14 @@ class App:
         self._dictation_active = False  # mic open or its captured audio is still processing
         self._ptt_preload_pending = False  # background warm-up started by a PTT press
         self._reload_pending = False  # set only by a Settings-triggered reload
+        self._last_dictation = ""
+        self._clipboard_restore = None
+        self._clipboard_restore_timer = QTimer()
+        self._clipboard_restore_timer.setSingleShot(True)
+        self._clipboard_restore_timer.timeout.connect(self._restore_recovery_clipboard)
+        self._update_notice = (
+            updater_mod.consume_update_notice(VERSION) if "--updated" in sys.argv else None
+        )
 
         self.hotkeys = hotkeys_mod.Hotkeys(
             self.settings,
@@ -162,6 +196,7 @@ class App:
         self.bridge.update_ready.connect(self._on_update_ready)
         self.bridge.update_current.connect(self._on_update_current)
         self.bridge.update_status_changed.connect(self._on_update_status_changed)
+        self.bridge.dictated.connect(self._remember_last_dictation)
 
         # Drives the waveform. Only runs while the mic is open.
         self.meter_timer = QTimer()
@@ -175,6 +210,7 @@ class App:
             on_ready=self.bridge.update_ready.emit,
             on_up_to_date=self.bridge.update_current.emit,
             on_status_change=self.bridge.update_status_changed.emit,
+            enabled=self.settings.auto_update_enabled,
         )
 
         if not self.settings.sleep_enabled:
@@ -184,6 +220,8 @@ class App:
             self.bar.show_bar()
         if not self.settings.onboarding_complete:
             QTimer.singleShot(0, self._show_first_run)
+        if self._update_notice is not None:
+            QTimer.singleShot(300, self._show_update_complete)
 
     # --- tray ---
 
@@ -211,6 +249,11 @@ class App:
         act_unload = QAction("Unload model", menu)
         act_unload.triggered.connect(self.engine.unload)
         menu.addAction(act_unload)
+
+        self.act_copy_last = QAction("Copy last dictation", menu)
+        self.act_copy_last.setEnabled(False)
+        self.act_copy_last.triggered.connect(self._copy_last_dictation)
+        menu.addAction(self.act_copy_last)
         menu.addSeparator()
 
         act_check_update = QAction("Check for updates", menu)
@@ -228,10 +271,6 @@ class App:
             if reason == QSystemTrayIcon.Trigger
             else None
         )
-        # The only balloon this app ever shows is an update notice, so any
-        # click on it can safely mean "apply the update" with no ambiguity
-        # about which notification was clicked.
-        self.tray.messageClicked.connect(self._apply_pending_update)
         self.tray.show()
 
     # --- console commands ---
@@ -239,15 +278,21 @@ class App:
     def _start_command_listener(self) -> None:
         """Let commands be typed into the console this app was launched from.
 
-        Only useful when a real console is attached (run-dictate.bat /
-        -debug.bat); the hidden startup launch has no one to type into it, so
-        the read just blocks forever on a daemon thread and does no harm.
+        Only useful when a real console is attached (run-dictate-debug.bat);
+        run-dictate.bat and the hidden startup launch have no console and no
+        one to type into it, so the read just blocks forever on a daemon
+        thread and does no harm.
         """
         try:
             if sys.stdin is None or not sys.stdin.readable():
                 return
         except Exception:
             return
+        try:
+            ctypes.windll.kernel32.SetConsoleTitleW(f"{APP_NAME} — debug console")
+        except Exception:
+            pass
+        print(f"[dictate] {APP_NAME} {VERSION} — type 'help' for commands")
         threading.Thread(target=self._command_loop, daemon=True).start()
 
     def _command_loop(self) -> None:
@@ -258,6 +303,12 @@ class App:
                     self.bridge.command.emit(text)
         except Exception:
             pass
+
+    def _print_help(self) -> None:
+        width = max(len(name) for name, _desc in CONSOLE_COMMANDS)
+        print(f"[dictate] {APP_NAME} {VERSION} commands:")
+        for name, desc in CONSOLE_COMMANDS:
+            print(f"    {name.ljust(width)}   {desc}")
 
     def _on_command(self, text: str) -> None:
         if text in ("reload", "reload model", "reload models"):
@@ -271,14 +322,64 @@ class App:
         elif text in ("unload", "unload model"):
             self.engine.unload()
         elif text == "status":
+            print(f"[dictate]   state         {self.engine.state}")
+            print(f"[dictate]   device        {self.engine.active_device or '(none)'}")
             print(
-                f"[dictate] state={self.engine.state} "
-                f"device={self.engine.active_device or '(none)'}"
+                f"[dictate]   auto-update   "
+                f"{'on' if self.settings.auto_update_enabled else 'off'}"
             )
+        elif text == "gpu":
+            detected = engine_mod.cuda_available()
+            print(f"[dictate]   GPU detected           {'yes' if detected else 'no'}")
+            print(
+                f"[dictate]   acceleration installed  "
+                f"{'yes' if gpu_runtime.is_installed() else 'no'}"
+            )
+        elif text == "version":
+            print(f"[dictate] {APP_NAME} {VERSION}")
+        elif text in ("vocab", "vocabulary"):
+            words = self.settings.vocabulary
+            if words:
+                print(f"[dictate] vocabulary ({len(words)}): {', '.join(words)}")
+            else:
+                print("[dictate] vocabulary: (empty)")
+            print(f"[dictate] settings file: {config.CONFIG_PATH}")
+        elif text in ("test sound", "sound test"):
+            print("[dictate] playing cues")
+            self.cues.play("start")
+            QTimer.singleShot(400, lambda: self.cues.play("stop"))
+        elif text == "settings":
+            self._show_settings()
+        elif text in ("check update", "check for updates"):
+            if not self.settings.auto_update_enabled:
+                print(
+                    "[dictate] update checks are turned off "
+                    "(Settings > Check for updates automatically)"
+                )
+            else:
+                print("[dictate] checking GitHub for a new release…")
+                self.updater.check_now(silent=False)
+        elif text in ("open data", "open settings folder", "open folder"):
+            try:
+                os.startfile(config.CONFIG_DIR)
+            except OSError as exc:
+                print(f"[dictate] could not open {config.CONFIG_DIR}: {exc}")
+        elif text == "update test":
+            # Fakes a "found a newer version" result without touching the
+            # network or waiting on the real 24h check cadence, so the
+            # ready-toast (text, colour, click-to-install) can be eyeballed
+            # on demand. Nothing is actually staged in the real Updater, so
+            # clicking the toast is a harmless no-op instead of trying to
+            # launch a nonexistent installer.
+            print("[dictate] simulating an update-ready notification")
+            self.bridge.update_ready.emit("9.9.9-test", Path("dictate-test-installer.exe"))
+        elif text == "update test current":
+            print("[dictate] simulating an up-to-date notification")
+            self.bridge.update_current.emit()
+        elif text == "quit":
+            self._quit()
         elif text in ("help", "?"):
-            print(
-                "[dictate] commands: reload model | load model | unload model | status | help"
-            )
+            self._print_help()
         else:
             print(f"[dictate] unknown command: {text!r} (try 'help')")
 
@@ -359,6 +460,7 @@ class App:
             self.hotkeys.suppress(False)
 
         preview = text if len(text) <= 18 else text[:17] + "…"
+        self.bridge.dictated.emit(text)
         self.bridge.finished.emit("done", preview)
 
     def _on_finished(self, state: str, detail: str) -> None:
@@ -419,15 +521,22 @@ class App:
             self.settings_window = SettingsWindow(self.settings, self.engine, self.updater)
             self.settings_window.changed.connect(self._apply_settings)
             self.settings_window.capture_active.connect(self.hotkeys.set_capture_active)
+            self.settings_window.restart_to_update.connect(self._apply_pending_update)
+            self.settings_window.margin_preview.connect(self.bar.preview_margin)
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
+
+    def _show_update_complete(self) -> None:
+        UpdateCompleteDialog(VERSION, self._update_notice or "").exec()
 
     def _apply_settings(self, settings: config.Settings) -> None:
         old = self.settings
         if (settings.model_size, settings.device) != (old.model_size, old.device):
             self._reload_pending = True
         self.settings = settings
+        if settings.auto_update_enabled != old.auto_update_enabled:
+            self.updater.set_enabled(settings.auto_update_enabled)
         self.mic.set_device(settings.input_device)
         self.engine.update_settings(settings)
         self.hotkeys.update_settings(settings)
@@ -437,20 +546,51 @@ class App:
             f"{APP_NAME} — hold {hotkeys_mod.format_combo(settings.ptt_key)} to talk"
         )
 
+    def _remember_last_dictation(self, text: str) -> None:
+        """Keep one result in RAM for recovery without creating a transcript log."""
+        self._last_dictation = text
+        self.act_copy_last.setEnabled(True)
+
+    def _copy_last_dictation(self) -> None:
+        """Offer one short-lived clipboard recovery copy from the tray menu."""
+        # Restarting the recovery window must preserve the *original*
+        # clipboard, not treat Dictate's first temporary copy as the new
+        # baseline. Restore it first when it is still ours; if the user copied
+        # something else, the callback correctly leaves that newer item alone.
+        if self._clipboard_restore_timer.isActive():
+            self._clipboard_restore_timer.stop()
+            self._restore_recovery_clipboard()
+        restore = inject.copy_temporarily(self._last_dictation)
+        if restore is None:
+            self.bar.set_state("error", "Couldn't safely protect your clipboard")
+            return
+        self._clipboard_restore = restore
+        self._clipboard_restore_timer.start(inject.TEMPORARY_COPY_SECONDS * 1000)
+        self.bar.notify(
+            "Last dictation copied",
+            tone="info",
+            duration_ms=inject.TEMPORARY_COPY_SECONDS * 1000,
+        )
+
+    def _restore_recovery_clipboard(self) -> None:
+        if self._clipboard_restore is not None:
+            self._clipboard_restore()
+            self._clipboard_restore = None
+
     # --- updates ---
 
     def _on_update_ready(self, version: str, installer_path) -> None:
-        self.tray.showMessage(
-            "Dictate update ready",
-            f"Version {version} is ready to install. Click to restart and update.",
-            QSystemTrayIcon.Information,
-            10000,
+        # Routed through the bar's own toast rather than a system tray
+        # balloon, so an update result reads as this app's one notification
+        # system instead of a second, differently-timed one bolted on.
+        self.bar.notify(
+            f"Update {version} ready — click to restart and install",
+            tone="info",
+            on_click=self._apply_pending_update,
         )
 
     def _on_update_current(self) -> None:
-        self.tray.showMessage(
-            "Dictate", "You're on the latest version.", QSystemTrayIcon.Information, 5000
-        )
+        self.bar.notify("You're on the latest version", tone="success")
 
     def _on_update_status_changed(self) -> None:
         if self.settings_window:

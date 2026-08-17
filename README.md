@@ -4,16 +4,22 @@ Hold a key anywhere in Windows, speak, release. The text appears in whatever
 you were typing in. Transcription runs on this machine — no account and no
 cloud transcription. Speech-model files may download the first time they are used.
 
-## What's new in v0.1.0-beta.2
+## What's new in v0.1.2-beta.2
 
-Dictate can now be installed as a normal Windows app — no Python required —
-with an optional GPU-acceleration add-on and a background updater that keeps
-it current. Skipped GPU acceleration at install time? Switching to GPU in
+Update checks are now optional — turn them off from a Settings toggle or an
+installer checkbox at setup, and Dictate never contacts GitHub. Running from
+source with `run-dictate.bat` no longer leaves a console window open behind
+the app; use `run-dictate-debug.bat` when you want to see it. Dictate can
+also be installed as a normal Windows app — no Python required — with an
+optional GPU-acceleration add-on and a background updater that keeps it
+current. Skipped GPU acceleration at install time? Switching to GPU in
 Settings now downloads it on the spot instead of silently staying on CPU. A
 silent or dead microphone and a slow first-time model download now both give
 clear feedback instead of looking stuck.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete version history.
+Read [PRIVACY.md](PRIVACY.md) for exactly what Dictate processes and what its
+optional downloads contact.
 
 A small Windows 11 flyout appears centred just above the taskbar while you
 talk. One hairline runs its width and never moves: in silence that is all you
@@ -34,21 +40,26 @@ Download the latest `Dictate-Setup-*.exe` from
 Python or setup needed. It's unsigned, so Windows SmartScreen will show an
 "unrecognized publisher" warning the first time; click **More info → Run
 anyway**. The installer offers an optional GPU-acceleration component for
-supported NVIDIA graphics cards; CPU transcription works either way, and
-Dictate checks for new versions in the background afterward.
+supported NVIDIA graphics cards, and a checkbox for whether Dictate should
+check GitHub for new versions in the background afterward — on by default,
+and also changeable later from Settings.
 
 ## Running it
 
-Double-click `run-dictate.bat`. It lives in the tray; there is no main window.
-The first launch explains the core controls and lets you choose a microphone.
+Double-click `run-dictate.bat`. It lives in the tray; there is no main window
+and no console window either. The first launch explains the core controls and
+lets you choose a microphone.
 
 - **Hold F9** — talk. Release and the text is pasted where your cursor is.
 - **Ctrl+Alt+D** — settings.
 - Tray icon — left click for settings, right click for a menu (load model now,
-  unload model, quit).
+  copy the last dictation, unload model, quit).
 
-Use `run-dictate-debug.bat` instead when something is wrong; it keeps a console
-open so errors are visible.
+Use `run-dictate-debug.bat` instead when something is wrong; it keeps a
+console open so `[dictate]` status lines and errors are visible, and you can
+type commands into it — `help` lists them (model loading, status, GPU and
+version info, a settings/update shortcut, and a couple that fake an update
+notification for testing without touching the network).
 
 ## Settings
 
@@ -61,6 +72,7 @@ app-data folder rather than beside the source code.
 | Microphone | Windows default or a specific available microphone |
 | Hold to talk | Click and press the key or mouse button to hold, default `f9`. Hold inputs together to record a combination such as `ctrl+mouse4`. An empty or unusable binding falls back to `f9`. |
 | Transcription mode | Everyday, Fast response, Best accuracy, or Max accuracy without model jargon |
+| Words I use | Local names, brands, and terms that help Dictate recognize uncommon words |
 | Sleep when idle / Sleep after | Release model memory after a clear slider-controlled delay |
 | Sounds | A short rising tone when the mic opens, a falling one when it starts transcribing |
 | Start with Windows | Launch Dictate silently when the current user signs in |
@@ -77,6 +89,17 @@ app-data folder rather than beside the source code.
 Dictate always pastes the result and adds one separating space. Those are
 consistent app behaviors rather than settings. Slider values show the default
 and offer a Reset control whenever they move away from it.
+
+The tray menu can copy the most recent dictation again. It keeps that one
+result in memory only; choosing it temporarily replaces the clipboard, then
+restores what was there after 5 seconds. If you copy anything in that window,
+Dictate leaves your newer clipboard item alone.
+
+The Dictate Update section at the bottom of Settings has its own toggle,
+"Check for updates automatically" — on by default, and also set at install
+time. Turning it off stops the daily background check and disables the
+manual "Check for updates" button; Dictate makes no GitHub request at all
+while it's off.
 
 The Privacy link at the bottom of Settings explains microphone use, local
 transcription, model downloads, clipboard behavior, and diagnostics in plain

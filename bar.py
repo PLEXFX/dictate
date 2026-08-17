@@ -79,6 +79,7 @@ from PySide6.QtCore import (
     QRectF,
     Qt,
     QTimer,
+    Signal,
 )
 from PySide6.QtGui import (
     QBrush,
@@ -324,6 +325,11 @@ class Bar(QWidget):
         self._state = "idle"
         self._detail = ""
         self._progress: float | None = None  # 0..1 once a download reports real bytes
+        self._notice_tone = "info"       # "info" or "success" -- picks the toast's dot colour
+        self._notice_duration_ms: int | None = None
+        self._toast_on_click = None      # optional callback for an actionable notice
+        self._linger_ms = settings.bar_linger_ms
+        self._preview_margin: int | None = None  # live override while dragging the Settings slider
 
         self._drawn = np.zeros(N_BARS, dtype=np.float32)
         self._vel = np.zeros(N_BARS, dtype=np.float32)
@@ -359,6 +365,7 @@ class Bar(QWidget):
         self.setFixedSize(WIDTH, HEIGHT)
 
         self._toast = Toast()
+        self._toast.clicked.connect(self._on_toast_clicked)
 
         # Everything about the entrance -- fade, scale and rise -- is driven
         # from this one value, so the three can never disagree.
@@ -410,8 +417,8 @@ class Bar(QWidget):
         self._sync_frame_rate(screen)
         area = screen.availableGeometry()
         x = area.center().x() - WIDTH // 2
-        y = (area.bottom() + 1
-             - max(0, self._settings.bar_margin) - PILL_H - SHADOW_PAD)
+        margin = self._preview_margin if self._preview_margin is not None else self._settings.bar_margin
+        y = area.bottom() + 1 - max(0, margin) - PILL_H - SHADOW_PAD
         self.move(x, y)
         self._toast.follow(self.pill_geometry())
 
@@ -431,9 +438,53 @@ class Bar(QWidget):
         self._settings = settings
         _CACHE.pop("accent", None)          # the user may have changed it
         self._accent = system_accent()
+        self._linger_ms = settings.bar_linger_ms
+        self._preview_margin = None    # the real value just landed; stop overriding it
         if settings.always_visible and self._state == "idle":
             self.show_bar()
         self.reposition()
+
+    def preview_margin(self, margin: int) -> None:
+        """Show the bar at a candidate "Bar position" value while the user
+        drags the Settings slider, so moving it is visible immediately
+        instead of only after the debounced autosave round-trips back
+        through update_settings().
+
+        Reuses the ordinary hide timer/auto-hide path rather than a separate
+        one, so the fade after 3 seconds of no further dragging is the exact
+        same animation -- same duration, same easing -- as the bar fading
+        away after "stay after finishing" elapses.
+        """
+        self._preview_margin = margin
+        self.reposition()
+        if self._state == "idle":
+            self.show_bar()
+        self._hide_timer.start(3000)
+
+    def notify(
+        self,
+        text: str,
+        tone: str = "info",
+        on_click=None,
+        duration_ms: int | None = None,
+    ) -> None:
+        """Show an informational toast above the bar, in the same style and
+        position as the error toast, instead of a Windows system tray
+        balloon -- so a manual "check for updates" reads as this app's own
+        notification system rather than a different one bolted on for just
+        that button.
+        """
+        self._notice_tone = tone
+        self._notice_duration_ms = duration_ms
+        self._toast_on_click = on_click
+        self._toast.setCursor(Qt.PointingHandCursor if on_click else Qt.ArrowCursor)
+        self.set_state("notice", text)
+
+    def _on_toast_clicked(self) -> None:
+        if self._toast_on_click is not None:
+            callback = self._toast_on_click
+            self._toast_on_click = None
+            callback()
 
     def set_state(
         self, state: str, detail: str = "", progress: float | None = None
@@ -495,14 +546,24 @@ class Bar(QWidget):
         elif state in ("transcribing", "loading"):
             self._hide_timer.stop()
             self.show_bar()
-        elif state in ("done", "empty", "error", "loaded"):
+        elif state in ("done", "empty", "error", "loaded", "notice"):
             self._burst = (1.0 - _CENTRE_D ** 1.5).astype(np.float32)
             self.show_bar()
-            self._hide_timer.start(2600 if state == "error" else 1500)
             if state == "error":
+                hide_after = 2600
+            elif state == "notice":
+                hide_after = self._notice_duration_ms or 3600
+            else:
+                hide_after = self._linger_ms
+            self._hide_timer.start(hide_after)
+            if state == "error":
+                self._toast_on_click = None
                 self._toast.show_message(
-                    detail or "Something isn't working", self.pill_geometry()
+                    detail or "Something isn't working", self.pill_geometry(), dot_color=ERROR
                 )
+            elif state == "notice":
+                dot = SUCCESS if self._notice_tone == "success" else self._accent
+                self._toast.show_message(detail, self.pill_geometry(), dot_color=dot)
         elif state == "idle":
             if self._settings.always_visible:
                 self.show_bar()             # keeps the clock alive for the morph
@@ -548,6 +609,11 @@ class Bar(QWidget):
             self._timer.start()
 
     def _auto_hide(self) -> None:
+        # Dismissed here, at the exact moment the bar itself starts leaving,
+        # rather than on its own independent timer -- both then run the same
+        # EXIT_MS/FLUENT_ACCELERATE fade, so a toast never lingers after the
+        # bar it is anchored to has already gone.
+        self._toast.dismiss()
         if self._settings.always_visible:
             self._apply_state("idle", "")
             return
@@ -687,7 +753,7 @@ class Bar(QWidget):
         if state == "error":
             pulse = 0.5 - 0.5 * math.cos(2.0 * math.pi * self._clock * ERROR_HZ)
             return np.full(N_BARS, 0.22 + 0.40 * pulse, dtype=np.float32)
-        if state in ("done", "empty", "loaded"):
+        if state in ("done", "empty", "loaded", "notice"):
             return self._burst
         return np.zeros(N_BARS, dtype=np.float32)
 
@@ -698,6 +764,8 @@ class Bar(QWidget):
             return ERROR
         if state in ("done", "loaded"):
             return SUCCESS
+        if state == "notice":
+            return SUCCESS if self._notice_tone == "success" else self._accent
         if state == "idle":
             return self._palette["idle"]
         return self._accent
@@ -886,9 +954,16 @@ def _lerp_color(a: QColor, b: QColor, t: float) -> QColor:
 
 
 class Toast(QWidget):
-    """A small Fluent alert glued above the bar for real failures -- no
-    microphone, a model that failed to load, and the like. The bar turning red
-    says *something* is wrong; this says *what*.
+    """A small Fluent alert glued above the bar -- a real failure (no
+    microphone, a model that failed to load), or an informational notice
+    (an update check result) that would otherwise have been a separate
+    Windows system tray balloon. The bar changing colour says *something*
+    happened; this says *what*.
+
+    Deliberately has no auto-dismiss timer of its own: whoever shows it also
+    owns a Bar hide timer, and calls dismiss() from that same callback, so
+    the toast's exit and the bar's exit are the same animation started at
+    the same instant rather than two clocks that can drift apart.
     """
 
     PAD = 12
@@ -896,6 +971,8 @@ class Toast(QWidget):
     HEIGHT = 38
     MAX_W = 320
     RADIUS = 8
+
+    clicked = Signal()
 
     def __init__(self):
         super().__init__(None)
@@ -911,6 +988,7 @@ class Toast(QWidget):
         self.setFixedSize(self.MAX_W, self.HEIGHT)
 
         self._text = ""
+        self._dot_color = ERROR
         self._dark = system_is_dark()
         self._font = QFont("Segoe UI Variable Text", 9)
         if not self._font.exactMatch():
@@ -919,16 +997,13 @@ class Toast(QWidget):
         self._opacity_anim = QPropertyAnimation(self, b"windowOpacity", self)
         self._slide_anim = QPropertyAnimation(self, b"pos", self)
 
-        self._hide_timer = QTimer(self)
-        self._hide_timer.setSingleShot(True)
-        self._hide_timer.timeout.connect(self.dismiss)
-
     def set_theme(self, dark: bool) -> None:
         self._dark = dark
         self.update()
 
-    def show_message(self, text: str, anchor_rect: QRect, duration_ms: int = 3200) -> None:
+    def show_message(self, text: str, anchor_rect: QRect, dot_color: QColor = ERROR) -> None:
         self._text = text
+        self._dot_color = dot_color
 
         metrics = QFontMetrics(self._font)
         w = max(160, min(self.MAX_W, metrics.horizontalAdvance(text) + self.PAD * 2 + 22))
@@ -952,7 +1027,9 @@ class Toast(QWidget):
             anim.start()
 
         self.update()
-        self._hide_timer.start(duration_ms)
+
+    def mousePressEvent(self, event) -> None:
+        self.clicked.emit()
 
     def follow(self, anchor_rect: QRect) -> None:
         """Keep glued to the bar if it moves while the toast is visible."""
@@ -998,7 +1075,7 @@ class Toast(QWidget):
 
         cy = self.height() / 2
         p.setPen(Qt.NoPen)
-        p.setBrush(ERROR)
+        p.setBrush(self._dot_color)
         p.drawEllipse(QRectF(self.PAD, cy - 4, 8, 8))
 
         p.setFont(self._font)

@@ -14,7 +14,9 @@ would otherwise freeze the bar mid-animation.
 
 from __future__ import annotations
 
+import ctypes
 import time
+from collections.abc import Callable
 
 import pyperclip
 from pynput import keyboard
@@ -25,6 +27,7 @@ _controller = keyboard.Controller()
 # reading it back. Too short and the paste lands empty.
 CLIPBOARD_SETTLE = 0.06
 PASTE_SETTLE = 0.18
+TEMPORARY_COPY_SECONDS = 5
 
 
 def _read_clipboard() -> tuple[bool, str]:
@@ -32,6 +35,58 @@ def _read_clipboard() -> tuple[bool, str]:
         return True, pyperclip.paste()
     except Exception:
         return False, ""
+
+
+def _clipboard_sequence() -> int | None:
+    """Return Windows' clipboard change counter, when it is available.
+
+    It lets a delayed restore tell the difference between Dictate's own copy
+    and the user copying something else in the meantime. A content comparison
+    is only a fallback: the user may deliberately copy the same words again.
+    """
+    try:
+        value = int(ctypes.windll.user32.GetClipboardSequenceNumber())
+        return value or None
+    except Exception:
+        return None
+
+
+def copy_temporarily(text: str) -> Callable[[], bool] | None:
+    """Copy ``text`` for a short recovery window without stealing clipboard data.
+
+    The returned callback restores the previous text *only* when the user has
+    not changed the clipboard since Dictate copied the recovery text. If the
+    old clipboard cannot be read safely, this declines to copy rather than
+    risking an image, file list, or another app's private clipboard payload.
+    """
+    if not text:
+        return None
+    previous_read, previous = _read_clipboard()
+    if not previous_read:
+        return None
+    try:
+        pyperclip.copy(text)
+    except Exception:
+        return None
+    own_sequence = _clipboard_sequence()
+
+    def restore() -> bool:
+        try:
+            if own_sequence is not None:
+                # Any change, including the user copying the same words, is
+                # theirs. Never restore over it.
+                if _clipboard_sequence() != own_sequence:
+                    return False
+            else:
+                readable, current = _read_clipboard()
+                if not readable or current != text:
+                    return False
+            pyperclip.copy(previous)
+            return True
+        except Exception:
+            return False
+
+    return restore
 
 
 def send(text: str, mode: str = "paste") -> None:

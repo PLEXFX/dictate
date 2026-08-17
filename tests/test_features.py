@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -107,6 +108,86 @@ class ClipboardTests(unittest.TestCase):
             inject.send("hello", "paste")
 
         self.assertEqual(copied, ["hello"])
+
+    def test_temporary_copy_restores_the_previous_clipboard_after_the_window(self):
+        copied: list[str] = []
+        with (
+            patch.object(inject.pyperclip, "paste", return_value="before"),
+            patch.object(inject.pyperclip, "copy", side_effect=copied.append),
+            patch.object(inject, "_clipboard_sequence", side_effect=[42, 42]),
+        ):
+            restore = inject.copy_temporarily("dictated words")
+            self.assertIsNotNone(restore)
+            self.assertTrue(restore())
+
+        self.assertEqual(copied, ["dictated words", "before"])
+
+    def test_temporary_copy_never_restores_over_a_new_user_clipboard_item(self):
+        copied: list[str] = []
+        with (
+            patch.object(inject.pyperclip, "paste", return_value="before"),
+            patch.object(inject.pyperclip, "copy", side_effect=copied.append),
+            patch.object(inject, "_clipboard_sequence", side_effect=[42, 43]),
+        ):
+            restore = inject.copy_temporarily("dictated words")
+            self.assertIsNotNone(restore)
+            self.assertFalse(restore())
+
+        self.assertEqual(copied, ["dictated words"])
+
+    def test_temporary_copy_refuses_to_touch_an_unreadable_clipboard(self):
+        with patch.object(inject.pyperclip, "paste", side_effect=RuntimeError("busy")):
+            self.assertIsNone(inject.copy_temporarily("dictated words"))
+
+
+class VocabularyTests(unittest.TestCase):
+    def test_vocabulary_is_cleaned_deduplicated_and_capped(self):
+        settings = config.Settings(
+            vocabulary=[" Northwind   Studio ", "northwind studio", "", 17] + [
+                f"term {n}" for n in range(150)
+            ]
+        ).clamped()
+
+        self.assertEqual(settings.vocabulary[0], "Northwind Studio")
+        self.assertEqual(sum(word.casefold() == "northwind studio" for word in settings.vocabulary), 1)
+        self.assertLessEqual(len(settings.vocabulary), config.MAX_VOCABULARY_WORDS)
+
+    def test_engine_sends_vocabulary_as_a_recognition_hint(self):
+        import engine
+
+        model = Mock()
+        model.transcribe.return_value = ([Mock(text=" Northwind Studio ")], Mock())
+        subject = engine.Engine.__new__(engine.Engine)
+        subject._lock = threading.RLock()
+        subject._settings = config.Settings(vocabulary=["Northwind Studio", "CTranslate2"])
+        subject._model = model
+        subject._loaded_key = ("small.en", "cpu")
+        subject._last_used = 0.0
+        subject.ensure_loaded = Mock(return_value=model)
+        subject._set_state = Mock()
+
+        self.assertEqual(subject.transcribe(np.ones(20, dtype=np.float32)), "Northwind Studio")
+        self.assertEqual(
+            model.transcribe.call_args.kwargs["initial_prompt"],
+            "Names and terms that may appear: Northwind Studio, CTranslate2.",
+        )
+
+    def test_engine_omits_the_hint_when_no_words_are_added(self):
+        import engine
+
+        model = Mock()
+        model.transcribe.return_value = ([Mock(text=" hello ")], Mock())
+        subject = engine.Engine.__new__(engine.Engine)
+        subject._lock = threading.RLock()
+        subject._settings = config.Settings()
+        subject._model = model
+        subject._loaded_key = ("small.en", "cpu")
+        subject._last_used = 0.0
+        subject.ensure_loaded = Mock(return_value=model)
+        subject._set_state = Mock()
+
+        subject.transcribe(np.ones(20, dtype=np.float32))
+        self.assertNotIn("initial_prompt", model.transcribe.call_args.kwargs)
 
 
 class MicrophoneTests(unittest.TestCase):
@@ -665,6 +746,77 @@ class PttWarmStartTests(unittest.TestCase):
         self.assertFalse(app._dictation_active)
 
 
+class ConsoleCommandTests(unittest.TestCase):
+    @staticmethod
+    def _app():
+        import main
+
+        app = main.App.__new__(main.App)
+        app.settings = config.Settings()
+        app.engine = Mock()
+        app.engine.state = "ready"
+        app.engine.active_device = "cpu"
+        app.updater = Mock()
+        app.cues = Mock()
+        app.hotkeys = Mock()
+        app.tray = Mock()
+        app.qt = Mock()
+        app.bridge = Mock()
+        app._reload_pending = False
+        app._show_settings = Mock()
+        return app, main
+
+    def test_status_and_gpu_and_version_print_without_error(self):
+        app, main = self._app()
+        with patch.object(main.engine_mod, "cuda_available", return_value=True), patch.object(
+            main.gpu_runtime, "is_installed", return_value=False
+        ):
+            app._on_command("status")
+            app._on_command("gpu")
+            app._on_command("version")
+        # Nothing here has an assertion beyond "did not raise" -- these are
+        # plain diagnostic prints, the same contract as the original single
+        # -line status/help output they replaced.
+
+    def test_check_update_respects_the_settings_toggle(self):
+        app, main = self._app()
+        app.settings.auto_update_enabled = False
+        app._on_command("check update")
+        app.updater.check_now.assert_not_called()
+
+        app.settings.auto_update_enabled = True
+        app._on_command("check update")
+        app.updater.check_now.assert_called_once_with(silent=False)
+
+    def test_settings_command_opens_the_settings_window(self):
+        app, _main = self._app()
+        app._on_command("settings")
+        app._show_settings.assert_called_once()
+
+    def test_quit_command_runs_the_normal_shutdown_path(self):
+        app, _main = self._app()
+        app._on_command("quit")
+        app.hotkeys.stop.assert_called_once()
+        app.engine.shutdown.assert_called_once()
+        app.updater.shutdown.assert_called_once()
+        app.tray.hide.assert_called_once()
+        app.qt.quit.assert_called_once()
+
+    def test_open_data_opens_the_settings_folder(self):
+        app, main = self._app()
+        with patch.object(main.os, "startfile") as startfile:
+            app._on_command("open data")
+        startfile.assert_called_once_with(config.CONFIG_DIR)
+
+    def test_help_lists_every_command_once(self):
+        app, main = self._app()
+        with patch("builtins.print") as mock_print:
+            app._on_command("help")
+        printed = "\n".join(call.args[0] for call in mock_print.call_args_list)
+        for name, _desc in main.CONSOLE_COMMANDS:
+            self.assertIn(name, printed)
+
+
 class StopListeningTests(unittest.TestCase):
     @staticmethod
     def _app():
@@ -718,6 +870,69 @@ class StopListeningTests(unittest.TestCase):
 
         app.bar.set_state.assert_called_once_with("transcribing")
         self.assertTrue(app._busy)
+
+
+class LastDictationTests(unittest.TestCase):
+    @staticmethod
+    def _app():
+        import main
+
+        app = main.App.__new__(main.App)
+        app._last_dictation = ""
+        app.act_copy_last = Mock()
+        app.bar = Mock()
+        app._clipboard_restore = None
+        app._clipboard_restore_timer = Mock()
+        app._clipboard_restore_timer.isActive.return_value = False
+        return app, main
+
+    def test_successful_dictation_enables_one_local_recovery_copy(self):
+        app, _main = self._app()
+
+        app._remember_last_dictation("hello there")
+
+        self.assertEqual(app._last_dictation, "hello there")
+        app.act_copy_last.setEnabled.assert_called_once_with(True)
+
+    def test_copy_last_schedules_a_five_second_restore(self):
+        app, main = self._app()
+        app._last_dictation = "hello there"
+        restore = Mock(return_value=True)
+        with patch.object(main.inject, "copy_temporarily", return_value=restore):
+            app._copy_last_dictation()
+
+        self.assertIs(app._clipboard_restore, restore)
+        app._clipboard_restore_timer.start.assert_called_once_with(
+            main.inject.TEMPORARY_COPY_SECONDS * 1000
+        )
+        app.bar.notify.assert_called_once_with(
+            "Last dictation copied",
+            tone="info",
+            duration_ms=main.inject.TEMPORARY_COPY_SECONDS * 1000,
+        )
+
+    def test_copy_last_restarts_without_losing_the_original_clipboard(self):
+        app, main = self._app()
+        previous_restore = Mock(return_value=True)
+        new_restore = Mock(return_value=True)
+        app._clipboard_restore = previous_restore
+        app._clipboard_restore_timer.isActive.return_value = True
+        with patch.object(main.inject, "copy_temporarily", return_value=new_restore):
+            app._copy_last_dictation()
+
+        app._clipboard_restore_timer.stop.assert_called_once()
+        previous_restore.assert_called_once()
+        self.assertIs(app._clipboard_restore, new_restore)
+
+    def test_copy_last_refuses_when_the_existing_clipboard_cannot_be_protected(self):
+        app, main = self._app()
+        app._last_dictation = "hello there"
+        with patch.object(main.inject, "copy_temporarily", return_value=None):
+            app._copy_last_dictation()
+
+        app.bar.set_state.assert_called_once_with(
+            "error", "Couldn't safely protect your clipboard"
+        )
 
 
 class UiTests(unittest.TestCase):
@@ -783,6 +998,14 @@ class UiTests(unittest.TestCase):
         privacy.close()
         first_run.close()
         window.close()
+
+    def test_words_i_use_dialog_keeps_one_clean_phrase_per_line(self):
+        import settings_window
+
+        dialog = settings_window.VocabularyDialog(["Northwind Studio", "CTranslate2"])
+        dialog.editor.setPlainText("Northwind   Studio\nnorthwind studio\nSpringfield")
+        self.assertEqual(dialog.vocabulary, ["Northwind Studio", "Springfield"])
+        dialog.close()
 
     def test_keybind_controls_record_mouse_and_keyboard_combinations(self):
         from PySide6.QtCore import QEvent, Qt
@@ -960,6 +1183,94 @@ class UiTests(unittest.TestCase):
         self.assertTrue(with_updater.update_btn.isVisible())
         no_updater.close()
         with_updater.close()
+
+    def test_auto_update_toggle_disables_check_button_and_saves(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+
+            def preload(self):
+                pass
+
+        class DummyUpdater:
+            last_status = (updater.IDLE, "")
+            has_staged_update = False
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+            patch.object(settings_window.config, "save") as save,
+        ):
+            window = settings_window.SettingsWindow(
+                config.Settings(), DummyEngine(), DummyUpdater()
+            )
+            window.show()
+
+            self.assertTrue(window.auto_update_check.isChecked())
+            self.assertTrue(window.update_btn.isEnabled())
+
+            window.auto_update_check.setChecked(False)
+            self.assertFalse(window.update_btn.isEnabled())
+            self.assertIn("Turned off", window.update_desc_label.text())
+            self.assertFalse(window._collect_settings().auto_update_enabled)
+
+            window._save_now()
+            self.assertFalse(window._settings.auto_update_enabled)
+            save.assert_called_once()
+        window.close()
+
+    def test_advanced_panel_animates_open_and_closed(self):
+        import bar as bar_mod
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+        window.show()
+
+        # Collapsed at construction: zero height, fully transparent, hidden.
+        self.assertEqual(window.advanced_panel.maximumHeight(), 0)
+        self.assertEqual(window._advanced_opacity.opacity(), 0.0)
+        self.assertFalse(window.advanced_panel.isVisible())
+
+        window.advanced_btn.setChecked(True)
+        self.assertTrue(window.advanced_panel.isVisible())
+        self.assertEqual(
+            window._advanced_height_anim.endValue(), window.advanced_panel.sizeHint().height()
+        )
+        self.assertEqual(window._advanced_fade_anim.endValue(), 1.0)
+        self.assertEqual(
+            window._advanced_height_anim.easingCurve().type(), bar_mod.FLUENT_DECELERATE.type()
+        )
+        self.assertEqual(window._advanced_height_anim.duration(), bar_mod.ENTER_MS)
+
+        window.advanced_btn.setChecked(False)
+        self.assertEqual(window._advanced_height_anim.endValue(), 0)
+        self.assertEqual(window._advanced_fade_anim.endValue(), 0.0)
+        self.assertEqual(
+            window._advanced_height_anim.easingCurve().type(), bar_mod.FLUENT_ACCELERATE.type()
+        )
+        self.assertEqual(window._advanced_height_anim.duration(), bar_mod.EXIT_MS)
+
+        # Finishing a collapse hides the panel again; finishing an expand must not.
+        window._on_advanced_anim_finished()
+        self.assertFalse(window.advanced_panel.isVisible())
+        window.close()
 
 
 class TalkKeyTests(unittest.TestCase):
@@ -1140,14 +1451,23 @@ class UpdaterVersionTests(unittest.TestCase):
 
 class UpdaterReleaseFetchTests(unittest.TestCase):
     def test_parses_the_installer_asset(self):
+        installer_url = (
+            "https://github.com/PLEXFX/dictate/releases/download/v0.1.0-beta.3/"
+            "Dictate-Setup-0.1.0-beta.3.exe"
+        )
         payload = json.dumps(
             {
                 "tag_name": "v0.1.0-beta.3",
                 "assets": [
                     {
                         "name": "Dictate-Setup-0.1.0-beta.3.exe",
-                        "browser_download_url": "https://x/installer.exe",
+                        "browser_download_url": installer_url,
                         "size": 12345,
+                    },
+                    {
+                        "name": "Dictate-Setup-0.1.0-beta.3.exe.sha256",
+                        "browser_download_url": f"{installer_url}.sha256",
+                        "size": 90,
                     },
                 ],
             }
@@ -1157,8 +1477,32 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
         ):
             info = updater._fetch_latest_release()
         self.assertEqual(info["version"], "0.1.0-beta.3")
-        self.assertEqual(info["installer_url"], "https://x/installer.exe")
+        self.assertEqual(info["installer_url"], installer_url)
         self.assertEqual(info["installer_size"], 12345)
+        self.assertEqual(info["checksum_url"], f"{installer_url}.sha256")
+
+    def test_rejects_an_asset_from_any_other_repository(self):
+        payload = json.dumps(
+            {
+                "tag_name": "v0.1.0-beta.3",
+                "assets": [
+                    {
+                        "name": "Dictate-Setup-0.1.0-beta.3.exe",
+                        "browser_download_url": "https://github.com/other/repo/releases/download/v0/x.exe",
+                        "size": 12345,
+                    },
+                    {
+                        "name": "Dictate-Setup-0.1.0-beta.3.exe.sha256",
+                        "browser_download_url": "https://github.com/other/repo/releases/download/v0/x.exe.sha256",
+                        "size": 90,
+                    },
+                ],
+            }
+        ).encode("utf-8")
+        with patch.object(
+            updater.urllib.request, "urlopen", return_value=_fake_response(payload)
+        ):
+            self.assertIsNone(updater._fetch_latest_release())
 
     def test_returns_none_without_an_installer_asset(self):
         payload = json.dumps({"tag_name": "v0.1.0-beta.3", "assets": []}).encode("utf-8")
@@ -1175,6 +1519,8 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
 
 
 class UpdaterFlowTests(unittest.TestCase):
+    SIGNER = "A" * 40
+
     def test_stages_a_newer_release_and_notifies_ready(self):
         ready = threading.Event()
         ready_args = []
@@ -1188,9 +1534,13 @@ class UpdaterFlowTests(unittest.TestCase):
             "installer_url": "https://x/installer.exe",
             "installer_name": "installer-flow-test.exe",
             "installer_size": 5,
+            "checksum_url": "https://x/installer.exe.sha256",
+            "release_notes": "A safer updater.",
         }
         with (
             patch.object(updater, "_fetch_latest_release", return_value=info),
+            patch.object(updater, "_fetch_expected_sha256", return_value=hashlib.sha256(b"12345").hexdigest()),
+            patch.object(updater, "_verify_authenticode", return_value=True),
             patch.object(
                 updater,
                 "_download",
@@ -1198,7 +1548,10 @@ class UpdaterFlowTests(unittest.TestCase):
             ),
         ):
             u = updater.Updater(
-                on_ready=on_ready, current_version="0.1.0-beta.2", check_interval=9999
+                on_ready=on_ready,
+                current_version="0.1.0-beta.2",
+                check_interval=9999,
+                trusted_signer_thumbprint=self.SIGNER,
             )
             try:
                 self.assertTrue(ready.wait(timeout=5))
@@ -1236,6 +1589,7 @@ class UpdaterFlowTests(unittest.TestCase):
                 on_up_to_date=on_up_to_date,
                 current_version="0.1.0-beta.2",
                 check_interval=9999,
+                trusted_signer_thumbprint=self.SIGNER,
             )
             try:
                 self.assertTrue(startup_checked.wait(timeout=5))
@@ -1249,7 +1603,11 @@ class UpdaterFlowTests(unittest.TestCase):
 
     def test_apply_staged_is_false_with_nothing_ready(self):
         with patch.object(updater, "_fetch_latest_release", return_value=None):
-            u = updater.Updater(current_version="0.1.0-beta.2", check_interval=9999)
+            u = updater.Updater(
+                current_version="0.1.0-beta.2",
+                check_interval=9999,
+                trusted_signer_thumbprint=self.SIGNER,
+            )
             try:
                 time.sleep(0.1)
                 self.assertFalse(u.apply_staged())
@@ -1263,10 +1621,13 @@ class UpdaterFlowTests(unittest.TestCase):
             "installer_url": "https://x/installer.exe",
             "installer_name": "installer-apply-test.exe",
             "installer_size": 5,
+            "checksum_url": "https://x/installer.exe.sha256",
+            "release_notes": "Improved update safety.",
         }
-        staged_path = Path(tempfile.gettempdir()) / "dictate-update" / info["installer_name"]
         with (
             patch.object(updater, "_fetch_latest_release", return_value=info),
+            patch.object(updater, "_fetch_expected_sha256", return_value=hashlib.sha256(b"12345").hexdigest()),
+            patch.object(updater, "_verify_authenticode", return_value=True),
             patch.object(
                 updater,
                 "_download",
@@ -1277,6 +1638,7 @@ class UpdaterFlowTests(unittest.TestCase):
                 on_ready=lambda v, p: ready.set(),
                 current_version="0.1.0-beta.2",
                 check_interval=9999,
+                trusted_signer_thumbprint=self.SIGNER,
             )
             try:
                 self.assertTrue(ready.wait(timeout=5))
@@ -1286,10 +1648,36 @@ class UpdaterFlowTests(unittest.TestCase):
                 popen.assert_called_once()
                 args = popen.call_args[0][0]
                 self.assertTrue(args[0].endswith(info["installer_name"]))
-                self.assertEqual(args[1], "/VERYSILENT")
+                self.assertEqual(args[1:], ["/SP-", "/VERYSILENT", "/NORESTART"])
             finally:
                 u.shutdown()
-                staged_path.unlink(missing_ok=True)
+
+
+    def test_disabled_updater_never_checks_until_re_enabled(self):
+        fetch_calls = threading.Event()
+
+        def fake_fetch():
+            fetch_calls.set()
+            return None
+
+        with patch.object(updater, "_fetch_latest_release", side_effect=fake_fetch):
+            u = updater.Updater(
+                current_version="0.1.0-beta.2",
+                check_interval=9999,
+                trusted_signer_thumbprint=self.SIGNER,
+                enabled=False,
+            )
+            try:
+                time.sleep(0.1)
+                self.assertFalse(fetch_calls.is_set())
+                u.check_now()  # a stray manual call must also stay a no-op
+                time.sleep(0.1)
+                self.assertFalse(fetch_calls.is_set())
+
+                u.set_enabled(True)
+                self.assertTrue(fetch_calls.wait(timeout=5))
+            finally:
+                u.shutdown()
 
 
 if __name__ == "__main__":

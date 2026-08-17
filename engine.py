@@ -514,15 +514,24 @@ class Engine:
             model = self.ensure_loaded()
             self._set_state(TRANSCRIBING, "")
             try:
-                segments, _info = model.transcribe(
-                    audio,
-                    language="en",
-                    beam_size=1,          # dictation is short and clean; greedy is
-                                          # noticeably faster and rarely worse here
-                    vad_filter=True,      # drop leading/trailing silence from the
-                                          # key press and release
-                    condition_on_previous_text=False,
-                )
+                options = {
+                    "language": "en",
+                    "beam_size": 1,      # dictation is short and clean; greedy is
+                                         # noticeably faster and rarely worse here
+                    "vad_filter": True,  # drop leading/trailing silence from the
+                                         # key press and release
+                    "condition_on_previous_text": False,
+                }
+                if self._settings.vocabulary:
+                    # Whisper treats this as a recognition hint, not a literal
+                    # replacement list. It helps uncommon names and product terms
+                    # without changing ordinary speech into a command language.
+                    options["initial_prompt"] = (
+                        "Names and terms that may appear: "
+                        + ", ".join(self._settings.vocabulary)
+                        + "."
+                    )
+                segments, _info = model.transcribe(audio, **options)
                 text = "".join(seg.text for seg in segments).strip()
             finally:
                 self._last_used = time.monotonic()

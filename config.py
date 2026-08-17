@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "dictate"
@@ -64,6 +64,32 @@ def transcription_mode_for(model_size: str, device: str) -> str:
 # window's fallback and the clamp below.
 DEFAULT_PTT_KEY = "f9"
 DEFAULT_SETTINGS_HOTKEY = "ctrl+alt+d"
+MAX_VOCABULARY_WORDS = 100
+MAX_VOCABULARY_WORD_LENGTH = 80
+
+
+def clean_vocabulary(words: object) -> list[str]:
+    """Keep a small, predictable local list of names and terms for Whisper.
+
+    The list is user-provided recognition context, not a text-replacement
+    system.  It is deliberately capped so a pasted document cannot become a
+    giant initial prompt or make the saved settings file unwieldy.
+    """
+    if not isinstance(words, list):
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for word in words:
+        if not isinstance(word, str):
+            continue
+        text = " ".join(word.split())[:MAX_VOCABULARY_WORD_LENGTH]
+        key = text.casefold()
+        if text and key not in seen:
+            cleaned.append(text)
+            seen.add(key)
+        if len(cleaned) == MAX_VOCABULARY_WORDS:
+            break
+    return cleaned
 
 
 def valid_combo(text: object) -> bool:
@@ -91,13 +117,18 @@ class Settings:
     input_device: str = ""                  # empty means the Windows default
     ptt_key: str = DEFAULT_PTT_KEY          # hold to talk
     settings_hotkey: str = DEFAULT_SETTINGS_HOTKEY   # open this window
+    vocabulary: list[str] = field(default_factory=list)
 
     # --- feedback ---
     sound_cues: bool = True       # short tones when the mic opens and closes
 
+    # --- updates ---
+    auto_update_enabled: bool = True  # periodically check GitHub for a new release
+
     # --- appearance ---
     always_visible: bool = False  # keep the bar on screen even when idle
     bar_margin: int = 8           # gap in px between the bar and the taskbar
+    bar_linger_ms: int = 750      # how long the bar stays after finishing before it fades
 
     # --- internal ---
     onboarding_complete: bool = False
@@ -120,11 +151,14 @@ class Settings:
             out.ptt_key = DEFAULT_PTT_KEY
         if not valid_combo(out.settings_hotkey):
             out.settings_hotkey = DEFAULT_SETTINGS_HOTKEY
+        out.vocabulary = clean_vocabulary(out.vocabulary)
         out.start_with_windows = bool(out.start_with_windows)
         out.sound_cues = bool(out.sound_cues)
+        out.auto_update_enabled = bool(out.auto_update_enabled)
         out.onboarding_complete = bool(out.onboarding_complete)
         out.sleep_after_minutes = min(max(float(out.sleep_after_minutes), 0.5), 240.0)
         out.bar_margin = min(max(int(out.bar_margin), 0), 400)
+        out.bar_linger_ms = min(max(int(out.bar_linger_ms), 400), 4000)
         return out
 
 

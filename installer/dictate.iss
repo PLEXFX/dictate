@@ -10,14 +10,14 @@
 ; automatically at runtime either way if it's ever missing or fails to load.
 ;
 ; Build with (from the installer\ folder):
-;   "C:\Users\trach\AppData\Local\Programs\Inno Setup 6\ISCC.exe" dictate.iss
+;   ISCC.exe dictate.iss
 ; after first producing dist\dictate\ via: uv run pyinstaller ..\dictate.spec
 ;
 ; Override the version at build time without editing this file:
 ;   ISCC.exe dictate.iss /DMyAppVersion=0.1.0-beta.3
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0-beta.2"
+  #define MyAppVersion "0.1.2-beta.2"
 #endif
 #define MyAppName "Dictate"
 #define MyAppPublisher "PLEXFX"
@@ -57,6 +57,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "core"; Description: "Dictate (required)"; Types: full compact custom; Flags: fixed
 Name: "gpu"; Description: "GPU acceleration (NVIDIA CUDA) - adds faster transcription on supported NVIDIA graphics cards. Not required - Dictate works on CPU without this."; Types: full
 
+[Tasks]
+Name: "autoupdate"; Description: "Automatically check GitHub for new versions of Dictate"
+
 [Files]
 Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Components: core; Flags: ignoreversion
 Source: "{#SourceDir}\_internal\*"; DestDir: "{app}\_internal"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "nvidia\*"
@@ -72,6 +75,35 @@ Name: "{group}\Uninstall Dictate"; Filename: "{uninstallexe}"
 ; against the installed exe path once running frozen, so a separate
 ; installer-side mechanism would only duplicate it.
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch Dictate"; Flags: nowait postinstall skipifsilent
+; A verified in-app update runs Setup silently.  Inno Setup skips the normal
+; post-install checkbox in that mode, so launch the new version explicitly
+; and mark it as updated so Dictate can show the release's What's New window.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--updated"; Flags: nowait skipifnotsilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_internal"
+
+[Code]
+// "Start with Windows" deliberately has no installer checkbox -- see the
+// [Run] comment above -- but the auto-update check is a one-time network
+// call at every launch rather than a per-session opt-in like startup, so
+// it gets an install-time choice too. This only ever seeds settings.json
+// with a single override key on a genuinely fresh install; config.py
+// already tolerates a partial settings file and fills in every other
+// default. An existing settings.json (reinstall, upgrade, or repair) is
+// never touched, so a user's own later choice in Settings always wins.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ConfigDir, ConfigFile: string;
+begin
+  if (CurStep = ssPostInstall) and (not WizardIsTaskSelected('autoupdate')) then
+  begin
+    ConfigDir := ExpandConstant('{userappdata}\dictate');
+    ConfigFile := ConfigDir + '\settings.json';
+    if not FileExists(ConfigFile) then
+    begin
+      ForceDirectories(ConfigDir);
+      SaveStringToFile(ConfigFile, '{"auto_update_enabled": false}', False);
+    end;
+  end;
+end;

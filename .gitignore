@@ -3,7 +3,6 @@ venv/
 __pycache__/
 *.pyc
 *.log
-uv.lock
 build/
 dist/
 

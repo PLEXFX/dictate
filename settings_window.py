@@ -14,15 +14,17 @@ from __future__ import annotations
 import ctypes
 from dataclasses import asdict, replace
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QPropertyAnimation, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -37,6 +39,7 @@ import gpu_runtime
 import hotkeys as hotkeys_mod
 import startup as startup_mod
 import updater as updater_mod
+from bar import ENTER_MS, EXIT_MS, FLUENT_ACCELERATE, FLUENT_DECELERATE
 from theme import system_is_dark
 from toggle import ToggleSwitch
 from version import VERSION
@@ -78,7 +81,7 @@ QFrame#settingsRow {
 }
 QFrame#settingsRow[last="true"] { border-bottom: none; }
 
-QComboBox, QLineEdit, QPushButton#keyCapture {
+QComboBox, QLineEdit, QPlainTextEdit, QPushButton#keyCapture {
     background: #333333;
     border: 1px solid #3D3D3D;
     border-bottom: 1px solid #545454;
@@ -89,8 +92,8 @@ QComboBox, QLineEdit, QPushButton#keyCapture {
     selection-background-color: #4CC2FF;
     selection-color: #000000;
 }
-QComboBox:hover, QLineEdit:hover, QPushButton#keyCapture:hover { background: #383838; }
-QComboBox:disabled, QLineEdit:disabled, QPushButton#keyCapture:disabled {
+QComboBox:hover, QLineEdit:hover, QPlainTextEdit:hover, QPushButton#keyCapture:hover { background: #383838; }
+QComboBox:disabled, QLineEdit:disabled, QPlainTextEdit:disabled, QPushButton#keyCapture:disabled {
     background: #2A2A2A; color: #6D6D6D; border-color: #333333;
 }
 QPushButton#keyCapture:focus { border-color: #4CC2FF; }
@@ -216,9 +219,9 @@ QFrame#hero { background: #FAFAFA; border: 1px solid #E0E0E0; border-radius: 8px
 QFrame#settingsGroup { background: #FFFFFF; border: 1px solid #E0E0E0; border-radius: 8px; }
 QFrame#settingsRow { background: transparent; border: none; border-bottom: 1px solid #E6E6E6; border-radius: 0px; }
 QFrame#settingsRow[last="true"] { border-bottom: none; }
-QComboBox, QLineEdit, QPushButton#keyCapture { background: #FFFFFF; border: 1px solid #C9C9C9; border-bottom: 1px solid #AFAFAF; border-radius: 4px; padding: 5px 10px; color: #1A1A1A; min-height: 18px; selection-background-color: #0078D4; selection-color: #FFFFFF; }
-QComboBox:hover, QLineEdit:hover, QPushButton#keyCapture:hover { background: #F8F8F8; }
-QComboBox:disabled, QLineEdit:disabled, QPushButton#keyCapture:disabled { background: #EEEEEE; color: #888888; border-color: #DDDDDD; }
+QComboBox, QLineEdit, QPlainTextEdit, QPushButton#keyCapture { background: #FFFFFF; border: 1px solid #C9C9C9; border-bottom: 1px solid #AFAFAF; border-radius: 4px; padding: 5px 10px; color: #1A1A1A; min-height: 18px; selection-background-color: #0078D4; selection-color: #FFFFFF; }
+QComboBox:hover, QLineEdit:hover, QPlainTextEdit:hover, QPushButton#keyCapture:hover { background: #F8F8F8; }
+QComboBox:disabled, QLineEdit:disabled, QPlainTextEdit:disabled, QPushButton#keyCapture:disabled { background: #EEEEEE; color: #888888; border-color: #DDDDDD; }
 QPushButton#keyCapture:focus { border-color: #0078D4; }
 QComboBox::drop-down { border: none; width: 22px; }
 QComboBox QAbstractItemView { background: #FFFFFF; border: 1px solid #C9C9C9; border-radius: 6px; color: #1A1A1A; selection-background-color: #E5F1FB; outline: none; padding: 4px; }
@@ -236,6 +239,18 @@ QSlider::handle:horizontal { background: qradialgradient(cx:0.5, cy:0.5, radius:
 QSlider::handle:horizontal:hover { background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5, stop:0 #0078D4, stop:0.70 #0078D4, stop:0.72 #FFFFFF, stop:1 #FFFFFF); }
 QScrollArea { border: none; background: #F3F3F3; } QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; } QScrollBar::handle:vertical { background: #A8A8A8; border-radius: 3px; min-height: 24px; } QScrollBar::handle:vertical:hover { background: #7E7E7E; } QScrollBar::add-line, QScrollBar::sub-line { height: 0; } QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 """
+
+
+# Cleaner display text for the Advanced tab's model picker. config.MODELS
+# keeps the raw faster-whisper size names (what engine.py actually loads);
+# these are only how the combo box shows them.
+MODEL_LABELS = {
+    "tiny.en": "Tiny",
+    "base.en": "Base",
+    "small.en": "Small",
+    "medium.en": "Medium",
+    "large-v3-turbo": "Large v3 Turbo",
+}
 
 
 def stylesheet(dark: bool | None = None) -> str:
@@ -301,6 +316,28 @@ def _info_card(title: str, desc: str) -> QFrame:
     layout = QVBoxLayout(frame)
     layout.setContentsMargins(14, 11, 14, 11)
     layout.setSpacing(3)
+    heading = QLabel(title)
+    heading.setProperty("role", "title")
+    layout.addWidget(heading)
+    body = QLabel(desc)
+    body.setProperty("role", "desc")
+    body.setWordWrap(True)
+    layout.addWidget(body)
+    return frame
+
+
+def _text_row(title: str, desc: str) -> QFrame:
+    """A read-only disclosure row -- title plus explanation, no control.
+
+    Meant to sit inside _settings_group() so a set of related facts reads as
+    one grouped list with hairline dividers, the same way the Windows
+    Settings app groups related items under one card instead of stacking a
+    separate floating box per fact.
+    """
+    frame = QFrame()
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(14, 10, 14, 10)
+    layout.setSpacing(2)
     heading = QLabel(title)
     heading.setProperty("role", "title")
     layout.addWidget(heading)
@@ -559,68 +596,231 @@ class PrivacyDialog(QDialog):
         self.setObjectName("root")
         self.setWindowTitle("Dictate privacy")
         self.setStyleSheet(stylesheet())
-        self.setMinimumSize(520, 620)
+        self.setMinimumSize(520, 460)
+        self.resize(560, 660)
         base = QFont("Segoe UI Variable Text", 9)
         self.setFont(base if base.exactMatch() else QFont("Segoe UI", 9))
 
-        col = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
+
+        page = QWidget()
+        page.setObjectName("root")
+        col = QVBoxLayout(page)
         col.setContentsMargins(22, 20, 22, 20)
         col.setSpacing(9)
+        scroll.setWidget(page)
+
         title = QLabel("Your voice stays on this PC")
         title.setProperty("role", "header")
         col.addWidget(title)
         intro = QLabel(
             "Dictate is a local tool with no account and no cloud transcription. "
-            "This page explains exactly what it uses."
+            "This page explains exactly what it uses and the few things that "
+            "leave this PC."
         )
         intro.setProperty("role", "desc")
         intro.setWordWrap(True)
         col.addWidget(intro)
         col.addSpacing(4)
+
+        local_header = QLabel("STAYS ON THIS PC")
+        local_header.setProperty("role", "section")
+        col.addWidget(local_header)
         col.addWidget(
-            _info_card(
-                "Microphone",
-                "The selected microphone opens only while you hold the talk key. "
-                "Audio is kept in memory long enough to transcribe it; Dictate does "
-                "not save voice recordings.",
+            _settings_group(
+                _text_row(
+                    "Microphone",
+                    "The selected microphone opens only while you hold the talk "
+                    "key. Audio is kept in memory long enough to transcribe it; "
+                    "Dictate does not save voice recordings.",
+                ),
+                _text_row(
+                    "Local transcription",
+                    "faster-whisper processes your audio on this computer. "
+                    "Dictate does not upload recordings or transcribed text to "
+                    "a transcription service.",
+                ),
+                _text_row(
+                    "Last dictation",
+                    "The most recent successful result is kept in memory only, "
+                    "never written to disk, so \"Copy last dictation\" in the "
+                    "tray menu can recover it. It's replaced the moment you "
+                    "dictate again, and cleared when Dictate closes.",
+                ),
+                _text_row(
+                    "Clipboard",
+                    "Dictate temporarily uses the Windows clipboard to insert "
+                    "the result, then restores the previous contents — "
+                    "including an empty clipboard. \"Copy last dictation\" "
+                    "works the same way: your prior clipboard returns after "
+                    "5 seconds unless you copy something new first.",
+                ),
+                _text_row(
+                    "Words I use",
+                    "Names, brands, or terms you add are saved to your local "
+                    "settings file and used only as local recognition hints "
+                    "for Whisper. They never leave this PC.",
+                ),
+                _text_row(
+                    "Your settings",
+                    "Preferences — device, hotkeys, recognition words, window "
+                    "layout — are saved as plain JSON at "
+                    "%APPDATA%\\dictate\\settings.json. Nothing here is "
+                    "tied to an account or synced anywhere.",
+                ),
+                _text_row(
+                    "Diagnostics",
+                    "The debug console reports status and errors, but it does "
+                    "not print the words you dictated.",
+                ),
             )
         )
+
+        network_header = QLabel("LEAVES THIS PC")
+        network_header.setProperty("role", "section")
+        col.addWidget(network_header)
         col.addWidget(
-            _info_card(
-                "Local transcription",
-                "faster-whisper processes your audio on this computer. Dictate does "
-                "not upload recordings or transcribed text to a transcription service.",
+            _settings_group(
+                _text_row(
+                    "Speech model downloads",
+                    "The first time you use a speech model, its files may "
+                    "download from Hugging Face. Your audio and words are "
+                    "never part of that request.",
+                ),
+                _text_row(
+                    "GPU acceleration files",
+                    "Switching Processing to GPU downloads NVIDIA's CUDA "
+                    "runtime files from PyPI the first time, if your PC has a "
+                    "supported GPU but is missing them. Again, no audio or "
+                    "text is part of that request.",
+                ),
+                _text_row(
+                    "Update checks",
+                    "Dictate asks GitHub's public release page once a day, or "
+                    "whenever you click \"Check for updates,\" whether a newer "
+                    "version exists. No account, hardware ID, or usage data is "
+                    "sent — the same plain request any visitor's browser "
+                    "would make. Turn off \"Check for updates automatically\" "
+                    "in Settings and Dictate never makes this request.",
+                ),
             )
         )
-        col.addWidget(
-            _info_card(
-                "Model downloads",
-                "When a speech model is used for the first time, its model files may "
-                "download from Hugging Face. Your audio and words are not part of that request.",
-            )
-        )
-        col.addWidget(
-            _info_card(
-                "Clipboard",
-                "Dictate temporarily uses the Windows text clipboard to insert the "
-                "result, then restores the previous text — including an empty clipboard.",
-            )
-        )
-        col.addWidget(
-            _info_card(
-                "Diagnostics",
-                "The debug console reports status and errors, but it does not print "
-                "the words you dictated.",
-            )
-        )
+
         col.addStretch(1)
         close_btn = QPushButton("Close")
         close_btn.setObjectName("secondary")
         close_btn.clicked.connect(self.accept)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(close_btn)
+        col.addLayout(button_row)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        apply_native_chrome(int(self.winId()))
+
+
+class UpdateCompleteDialog(QDialog):
+    """A small, native-looking receipt after Dictate restarts updated."""
+
+    def __init__(self, version: str, notes: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("root")
+        self.setWindowTitle("What's new in Dictate")
+        self.setStyleSheet(stylesheet())
+        self.setMinimumSize(500, 340)
+        self.resize(540, 390)
+        base = QFont("Segoe UI Variable Text", 9)
+        self.setFont(base if base.exactMatch() else QFont("Segoe UI", 9))
+
+        col = QVBoxLayout(self)
+        col.setContentsMargins(24, 22, 24, 22)
+        col.setSpacing(10)
+        title = QLabel("Dictate was updated")
+        title.setProperty("role", "header")
+        col.addWidget(title)
+        version_label = QLabel(f"Version {version} is ready to use.")
+        version_label.setProperty("role", "desc")
+        col.addWidget(version_label)
+        heading = QLabel("WHAT'S NEW")
+        heading.setProperty("role", "section")
+        col.addWidget(heading)
+        body = QPlainTextEdit()
+        body.setReadOnly(True)
+        body.setPlainText(notes.strip() or "Dictate has the latest improvements and fixes.")
+        body.setMinimumHeight(150)
+        col.addWidget(body, 1)
         row = QHBoxLayout()
         row.addStretch(1)
-        row.addWidget(close_btn)
+        done = QPushButton("Done")
+        done.setObjectName("apply")
+        done.clicked.connect(self.accept)
+        row.addWidget(done)
         col.addLayout(row)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        apply_native_chrome(int(self.winId()))
+
+
+class VocabularyDialog(QDialog):
+    """A deliberately small editor for Whisper recognition hints."""
+
+    def __init__(self, words: list[str], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("root")
+        self.setWindowTitle("Words I use")
+        self.setStyleSheet(stylesheet())
+        self.setMinimumSize(500, 360)
+        self.resize(540, 390)
+        base = QFont("Segoe UI Variable Text", 9)
+        self.setFont(base if base.exactMatch() else QFont("Segoe UI", 9))
+
+        col = QVBoxLayout(self)
+        col.setContentsMargins(24, 22, 24, 22)
+        col.setSpacing(10)
+        title = QLabel("Words I use")
+        title.setProperty("role", "header")
+        col.addWidget(title)
+        intro = QLabel(
+            "Add names, brands, places, or technical terms one per line. "
+            "Dictate uses them only as local recognition hints."
+        )
+        intro.setProperty("role", "desc")
+        intro.setWordWrap(True)
+        col.addWidget(intro)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setPlaceholderText("Northwind Studio\nCTranslate2\nSpringfield")
+        self.editor.setPlainText("\n".join(words))
+        self.editor.setMaximumBlockCount(config.MAX_VOCABULARY_WORDS)
+        col.addWidget(self.editor, 1)
+
+        note = QLabel(f"Up to {config.MAX_VOCABULARY_WORDS} words or short phrases.")
+        note.setProperty("role", "status")
+        col.addWidget(note)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.setObjectName("secondary")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        save = QPushButton("Save")
+        save.setObjectName("apply")
+        save.clicked.connect(self.accept)
+        buttons.addWidget(save)
+        col.addLayout(buttons)
+
+    @property
+    def vocabulary(self) -> list[str]:
+        return config.clean_vocabulary(self.editor.toPlainText().splitlines())
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -708,6 +908,8 @@ class FirstRunDialog(QDialog):
 class SettingsWindow(QWidget):
     changed = Signal(object)  # emits the new Settings
     capture_active = Signal(bool)  # tells the global listener to stand down
+    margin_preview = Signal(int)  # live "Bar position" value while the slider is being dragged
+    restart_to_update = Signal()  # App owns the actual shutdown/handoff
 
     def __init__(
         self,
@@ -717,6 +919,7 @@ class SettingsWindow(QWidget):
     ):
         super().__init__(None)
         self._settings = settings
+        self._vocabulary = list(settings.vocabulary)
         self._engine = engine
         self._updater = updater
         self._loading = True
@@ -826,6 +1029,17 @@ class SettingsWindow(QWidget):
         )
         self.mode_desc_label = mode_row.findChild(QLabel, "desc")
 
+        self.vocabulary_btn = QPushButton()
+        self.vocabulary_btn.setObjectName("secondary")
+        self.vocabulary_btn.setFixedWidth(120)
+        self.vocabulary_btn.clicked.connect(self._edit_vocabulary)
+        self._update_vocabulary_button()
+        vocabulary_row = _card(
+            "Words I use",
+            "Names, brands, and terms Dictate should recognize more reliably.",
+            self.vocabulary_btn,
+        )
+
         self.sleep_check = ToggleSwitch(self._settings.sleep_enabled)
         self.sleep_check.toggled.connect(self._queue_save)
         sleep_row = _card(
@@ -835,7 +1049,7 @@ class SettingsWindow(QWidget):
         )
 
         self.sleep_slider = ValueSlider(
-            [1, 5, 10, 15, 30, 60],
+            [1, 2, 3, 5, 7, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240],
             int(self._settings.sleep_after_minutes),
             10,
             " min",
@@ -868,6 +1082,7 @@ class SettingsWindow(QWidget):
                 mic_row,
                 ptt_row,
                 mode_row,
+                vocabulary_row,
                 sleep_row,
                 sleep_after_row,
                 sound_row,
@@ -913,7 +1128,7 @@ class SettingsWindow(QWidget):
 
         self.model_box = QComboBox()
         for value, _desc in config.MODELS:
-            self.model_box.addItem(value, value)
+            self.model_box.addItem(MODEL_LABELS.get(value, value), value)
         self.model_box.setFixedWidth(150)
         self.model_box.currentIndexChanged.connect(self._on_model_changed)
         self.model_card = _card("Speech model", "Model details", self.model_box)
@@ -943,22 +1158,75 @@ class SettingsWindow(QWidget):
         )
 
         self.margin_slider = ValueSlider(
-            [0, 4, 8, 12, 16, 24, 32, 48],
+            [0, 2, 4, 6, 8, 10, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96],
             self._settings.bar_margin,
             8,
             " px",
         )
         self.margin_slider.valueChanged.connect(self._queue_save)
+        self.margin_slider.valueChanged.connect(self.margin_preview.emit)
         margin_row = _card(
             "Bar position",
             "Gap between the activity bar and the taskbar; 8 px is the default.",
             self.margin_slider,
         )
+
+        self.linger_slider = ValueSlider(
+            [500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 4000],
+            int(self._settings.bar_linger_ms),
+            750,
+            " ms",
+        )
+        self.linger_slider.valueChanged.connect(self._queue_save)
+        linger_row = _card(
+            "Stay after finishing",
+            "How long the bar stays on screen after dictation finishes, "
+            "before it fades away.",
+            self.linger_slider,
+        )
         advanced_col.addWidget(
-            _settings_group(hotkey_row, visible_row, margin_row)
+            _settings_group(hotkey_row, visible_row, margin_row, linger_row)
         )
         self.advanced_panel.setVisible(False)
+        self.advanced_panel.setMaximumHeight(0)
+        self._advanced_opacity = QGraphicsOpacityEffect(self.advanced_panel)
+        self._advanced_opacity.setOpacity(0.0)
+        self.advanced_panel.setGraphicsEffect(self._advanced_opacity)
+        self._advanced_height_anim = QPropertyAnimation(
+            self.advanced_panel, b"maximumHeight", self
+        )
+        self._advanced_fade_anim = QPropertyAnimation(
+            self._advanced_opacity, b"opacity", self
+        )
+        self._advanced_height_anim.finished.connect(self._on_advanced_anim_finished)
         col.addWidget(self.advanced_panel)
+
+        # Windows puts Windows Update at the end of Settings navigation. This
+        # single-page app has no navigation rail, so its equivalent is the
+        # final primary section -- prominent, never hidden in a footer.
+        updates_header = QLabel("DICTATE UPDATE")
+        updates_header.setProperty("role", "section")
+        col.addWidget(updates_header)
+        self.auto_update_check = ToggleSwitch(self._settings.auto_update_enabled)
+        self.auto_update_check.toggled.connect(self._queue_save)
+        auto_update_row = _card(
+            "Check for updates automatically",
+            "Dictate periodically checks its official GitHub release for a "
+            "new signed version. Turn this off and Dictate never contacts "
+            "GitHub about updates.",
+            self.auto_update_check,
+        )
+        self.update_btn = QPushButton("Check for updates")
+        self.update_btn.setObjectName("apply")
+        self.update_btn.setVisible(self._updater is not None)
+        self.update_btn.clicked.connect(self._check_for_updates)
+        update_row = _card(
+            "You're up to date",
+            "Dictate checks only its official GitHub release for a signed update.",
+            self.update_btn,
+        )
+        self.update_desc_label = update_row.findChild(QLabel, "desc")
+        col.addWidget(_settings_group(auto_update_row, update_row))
 
         col.addStretch(1)
 
@@ -967,11 +1235,6 @@ class SettingsWindow(QWidget):
         self.privacy_btn.setObjectName("link")
         self.privacy_btn.clicked.connect(self._show_privacy)
         bottom_row.addWidget(self.privacy_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        self.update_btn = QPushButton("Check for updates")
-        self.update_btn.setObjectName("link")
-        self.update_btn.setVisible(self._updater is not None)
-        self.update_btn.clicked.connect(self._check_for_updates)
-        bottom_row.addWidget(self.update_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
         about = QLabel(f"Version {VERSION}")
         about.setProperty("role", "status")
         bottom_row.addWidget(about)
@@ -1045,18 +1308,73 @@ class SettingsWindow(QWidget):
                 descriptions.get(self.mode_box.currentData(), descriptions["balanced"])
             )
 
+    def _update_vocabulary_button(self) -> None:
+        count = len(self._vocabulary)
+        self.vocabulary_btn.setText("Add words" if count == 0 else f"Edit ({count})")
+
+    def _edit_vocabulary(self) -> None:
+        dialog = VocabularyDialog(self._vocabulary, self)
+        if dialog.exec():
+            words = dialog.vocabulary
+            if words != self._vocabulary:
+                self._vocabulary = words
+                self._update_vocabulary_button()
+                self._queue_save()
+
     def _toggle_advanced(self, open_: bool) -> None:
-        self.advanced_panel.setVisible(open_)
+        """Grow/shrink the Advanced panel with a fade, the same Fluent
+        point-to-point motion (entrances decelerate, exits accelerate) the
+        floating bar already uses for its own reveals -- reusing bar.py's
+        ENTER_MS/EXIT_MS/FLUENT_DECELERATE/FLUENT_ACCELERATE rather than
+        inventing separate timing for this window.
+        """
         self.advanced_btn.setText(
             "⌄  Advanced settings" if open_ else "›  Advanced settings"
         )
+        self._advanced_height_anim.stop()
+        self._advanced_fade_anim.stop()
+
+        if open_:
+            self.advanced_panel.setVisible(True)
+            target_height = self.advanced_panel.sizeHint().height()
+            self._advanced_height_anim.setDuration(ENTER_MS)
+            self._advanced_height_anim.setEasingCurve(FLUENT_DECELERATE)
+            self._advanced_height_anim.setStartValue(self.advanced_panel.height())
+            self._advanced_height_anim.setEndValue(target_height)
+            self._advanced_fade_anim.setDuration(ENTER_MS)
+            self._advanced_fade_anim.setEasingCurve(FLUENT_DECELERATE)
+            self._advanced_fade_anim.setStartValue(self._advanced_opacity.opacity())
+            self._advanced_fade_anim.setEndValue(1.0)
+        else:
+            self._advanced_height_anim.setDuration(EXIT_MS)
+            self._advanced_height_anim.setEasingCurve(FLUENT_ACCELERATE)
+            self._advanced_height_anim.setStartValue(self.advanced_panel.height())
+            self._advanced_height_anim.setEndValue(0)
+            self._advanced_fade_anim.setDuration(EXIT_MS)
+            self._advanced_fade_anim.setEasingCurve(FLUENT_ACCELERATE)
+            self._advanced_fade_anim.setStartValue(self._advanced_opacity.opacity())
+            self._advanced_fade_anim.setEndValue(0.0)
+
+        self._advanced_height_anim.start()
+        self._advanced_fade_anim.start()
+
+    def _on_advanced_anim_finished(self) -> None:
+        # Only actually hide once collapsed -- an expand's "finished" fires
+        # too, and hiding then would undo the animation it just played.
+        if not self.advanced_btn.isChecked():
+            self.advanced_panel.setVisible(False)
 
     def _show_privacy(self) -> None:
         PrivacyDialog(self).exec()
 
     def _check_for_updates(self) -> None:
         if self._updater is not None:
-            self._updater.check_now(silent=False)
+            if not self.auto_update_check.isChecked():
+                return
+            if self._updater.has_staged_update:
+                self.restart_to_update.emit()
+            else:
+                self._updater.check_now(silent=False)
 
     def refresh_status(self) -> None:
         """Finish model-change feedback without a permanent status badge.
@@ -1068,16 +1386,39 @@ class SettingsWindow(QWidget):
         Updater.last_status reverts itself back to IDLE a few seconds after
         a one-shot confirmation (UP_TO_DATE/READY) -- see updater.py's
         _set_status -- so this can just poll it fresh each call with no
-        "have I already shown this" bookkeeping of its own.
+        "have I already shown this" bookkeeping of its own. READY remains
+        visible until the person chooses Restart now.
         """
         if self._updater is not None:
+            auto_update_on = self.auto_update_check.isChecked()
             u_state, u_detail = self._updater.last_status
             self.update_btn.setEnabled(
-                u_state not in (updater_mod.CHECKING, updater_mod.DOWNLOADING)
+                auto_update_on
+                and u_state not in (updater_mod.CHECKING, updater_mod.DOWNLOADING, updater_mod.INSTALLING)
             )
+            if u_state == updater_mod.READY:
+                self.update_btn.setText("Restart now")
+            elif u_state == updater_mod.INSTALLING:
+                self.update_btn.setText("Restarting…")
+            elif u_state in (updater_mod.CHECKING, updater_mod.DOWNLOADING):
+                self.update_btn.setText("Checking…" if u_state == updater_mod.CHECKING else "Downloading…")
+            else:
+                self.update_btn.setText("Check for updates")
             if u_state != updater_mod.IDLE:
                 self.save_status.setText(u_detail)
+                if self.update_desc_label is not None:
+                    self.update_desc_label.setText(u_detail)
                 return
+
+            if self.update_desc_label is not None:
+                if auto_update_on:
+                    self.update_desc_label.setText(
+                        "Dictate checks only its official GitHub release for a signed update."
+                    )
+                else:
+                    self.update_desc_label.setText(
+                        "Turned off — Dictate won't check GitHub for new releases."
+                    )
 
         state, detail, progress = self._engine.last_status
         if self._pending_reload:
@@ -1105,9 +1446,12 @@ class SettingsWindow(QWidget):
             sleep_after_minutes=self.sleep_slider.value(),
             ptt_key=self.ptt_edit.binding() or config.DEFAULT_PTT_KEY,
             settings_hotkey=self.hotkey_edit.binding() or "ctrl+alt+d",
+            vocabulary=self._vocabulary,
             always_visible=self.visible_check.isChecked(),
             bar_margin=self.margin_slider.value(),
+            bar_linger_ms=self.linger_slider.value(),
             start_with_windows=self.startup_check.isChecked(),
+            auto_update_enabled=self.auto_update_check.isChecked(),
         ).clamped()
 
     def _queue_save(self, *_args) -> None:
@@ -1115,6 +1459,8 @@ class SettingsWindow(QWidget):
         if self._loading:
             return
         self.sleep_slider.setEnabled(self.sleep_check.isChecked())
+        if self._updater is not None:
+            self.refresh_status()
         self.save_status.setText("Saving…")
         self._save_timer.start()
 
@@ -1168,9 +1514,13 @@ class SettingsWindow(QWidget):
         _fill_microphone_box(self.mic_box, s.input_device)
         self.ptt_edit.setBinding(s.ptt_key)
         self.hotkey_edit.setBinding(s.settings_hotkey)
+        self._vocabulary = list(s.vocabulary)
+        self._update_vocabulary_button()
         self.visible_check.setChecked(s.always_visible)
         self.margin_slider.setValue(s.bar_margin)
+        self.linger_slider.setValue(s.bar_linger_ms)
         self.startup_check.setChecked(s.start_with_windows)
+        self.auto_update_check.setChecked(s.auto_update_enabled)
         self._sync_mode_from_advanced()
         self._loading = False
 

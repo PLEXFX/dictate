@@ -2523,29 +2523,38 @@ class UpdaterVersionTests(unittest.TestCase):
         self.assertFalse(updater.is_newer("garbage", "0.0.1-beta.1"))
 
 
+def _release(tag: str, assets: list, *, draft: bool = False) -> dict:
+    entry = {"tag_name": tag, "assets": assets}
+    if draft:
+        entry["draft"] = True
+    return entry
+
+
+def _installer_assets(tag: str) -> tuple[list, str]:
+    version = tag.lstrip("vV")
+    installer_url = (
+        f"https://github.com/PLEXFX/dictate/releases/download/{tag}/"
+        f"Dictate-Setup-{version}.exe"
+    )
+    assets = [
+        {
+            "name": f"Dictate-Setup-{version}.exe",
+            "browser_download_url": installer_url,
+            "size": 12345,
+        },
+        {
+            "name": f"Dictate-Setup-{version}.exe.sha256",
+            "browser_download_url": f"{installer_url}.sha256",
+            "size": 90,
+        },
+    ]
+    return assets, installer_url
+
+
 class UpdaterReleaseFetchTests(unittest.TestCase):
     def test_parses_the_installer_asset(self):
-        installer_url = (
-            "https://github.com/PLEXFX/dictate/releases/download/v0.1.0-beta.3/"
-            "Dictate-Setup-0.1.0-beta.3.exe"
-        )
-        payload = json.dumps(
-            {
-                "tag_name": "v0.1.0-beta.3",
-                "assets": [
-                    {
-                        "name": "Dictate-Setup-0.1.0-beta.3.exe",
-                        "browser_download_url": installer_url,
-                        "size": 12345,
-                    },
-                    {
-                        "name": "Dictate-Setup-0.1.0-beta.3.exe.sha256",
-                        "browser_download_url": f"{installer_url}.sha256",
-                        "size": 90,
-                    },
-                ],
-            }
-        ).encode("utf-8")
+        assets, installer_url = _installer_assets("v0.1.0-beta.3")
+        payload = json.dumps([_release("v0.1.0-beta.3", assets)]).encode("utf-8")
         with patch.object(
             updater.urllib.request, "urlopen", return_value=_fake_response(payload)
         ):
@@ -2555,23 +2564,69 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
         self.assertEqual(info["installer_size"], 12345)
         self.assertEqual(info["checksum_url"], f"{installer_url}.sha256")
 
+    def test_picks_the_highest_version_regardless_of_list_order(self):
+        # The real endpoint used, /releases, does not promise any particular
+        # order -- this must not just trust entry [0].
+        old_assets, _ = _installer_assets("v0.1.0-beta.2")
+        new_assets, new_url = _installer_assets("v0.2.0-beta.2")
+        payload = json.dumps(
+            [_release("v0.1.0-beta.2", old_assets), _release("v0.2.0-beta.2", new_assets)]
+        ).encode("utf-8")
+        with patch.object(
+            updater.urllib.request, "urlopen", return_value=_fake_response(payload)
+        ):
+            info = updater._fetch_latest_release()
+        self.assertEqual(info["version"], "0.2.0-beta.2")
+        self.assertEqual(info["installer_url"], new_url)
+
+    def test_ignores_prerelease_flag(self):
+        # This is the actual bug: GitHub's /releases/latest endpoint hides
+        # anything flagged prerelease, and every Dictate release is one.
+        # /releases (this fetch) must not apply that same filtering itself.
+        assets, installer_url = _installer_assets("v0.2.0-beta.2")
+        entry = _release("v0.2.0-beta.2", assets)
+        entry["prerelease"] = True
+        payload = json.dumps([entry]).encode("utf-8")
+        with patch.object(
+            updater.urllib.request, "urlopen", return_value=_fake_response(payload)
+        ):
+            info = updater._fetch_latest_release()
+        self.assertEqual(info["installer_url"], installer_url)
+
+    def test_skips_draft_releases(self):
+        draft_assets, _ = _installer_assets("v9.9.9-beta.1")
+        real_assets, real_url = _installer_assets("v0.2.0-beta.2")
+        payload = json.dumps(
+            [
+                _release("v9.9.9-beta.1", draft_assets, draft=True),
+                _release("v0.2.0-beta.2", real_assets),
+            ]
+        ).encode("utf-8")
+        with patch.object(
+            updater.urllib.request, "urlopen", return_value=_fake_response(payload)
+        ):
+            info = updater._fetch_latest_release()
+        self.assertEqual(info["installer_url"], real_url)
+
     def test_rejects_an_asset_from_any_other_repository(self):
         payload = json.dumps(
-            {
-                "tag_name": "v0.1.0-beta.3",
-                "assets": [
-                    {
-                        "name": "Dictate-Setup-0.1.0-beta.3.exe",
-                        "browser_download_url": "https://github.com/other/repo/releases/download/v0/x.exe",
-                        "size": 12345,
-                    },
-                    {
-                        "name": "Dictate-Setup-0.1.0-beta.3.exe.sha256",
-                        "browser_download_url": "https://github.com/other/repo/releases/download/v0/x.exe.sha256",
-                        "size": 90,
-                    },
-                ],
-            }
+            [
+                _release(
+                    "v0.1.0-beta.3",
+                    [
+                        {
+                            "name": "Dictate-Setup-0.1.0-beta.3.exe",
+                            "browser_download_url": "https://github.com/other/repo/releases/download/v0/x.exe",
+                            "size": 12345,
+                        },
+                        {
+                            "name": "Dictate-Setup-0.1.0-beta.3.exe.sha256",
+                            "browser_download_url": "https://github.com/other/repo/releases/download/v0/x.exe.sha256",
+                            "size": 90,
+                        },
+                    ],
+                )
+            ]
         ).encode("utf-8")
         with patch.object(
             updater.urllib.request, "urlopen", return_value=_fake_response(payload)
@@ -2579,7 +2634,14 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
             self.assertIsNone(updater._fetch_latest_release())
 
     def test_returns_none_without_an_installer_asset(self):
-        payload = json.dumps({"tag_name": "v0.1.0-beta.3", "assets": []}).encode("utf-8")
+        payload = json.dumps([_release("v0.1.0-beta.3", [])]).encode("utf-8")
+        with patch.object(
+            updater.urllib.request, "urlopen", return_value=_fake_response(payload)
+        ):
+            self.assertIsNone(updater._fetch_latest_release())
+
+    def test_returns_none_when_every_tag_is_unparseable(self):
+        payload = json.dumps([_release("not-a-version", [])]).encode("utf-8")
         with patch.object(
             updater.urllib.request, "urlopen", return_value=_fake_response(payload)
         ):

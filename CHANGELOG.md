@@ -7,6 +7,19 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1-beta.1] - 2026-08-17
+
+### Fixed
+
+- Update checking actually works now. It never has before: GitHub's
+  "latest release" endpoint excludes prereleases, and every Dictate release
+  so far has been a beta, so that check has 404'd silently since the first
+  one and always reported "you're on the latest version" no matter what was
+  actually out. It also required a checksum sidecar file that no release had
+  ever included, which would have kept blocking it even once the first
+  problem was fixed. Update checks now look at the full release list and a
+  checksum sidecar is published with every release going forward.
+
 ## [0.2.0-beta.2] - 2026-08-17
 
 ### Added

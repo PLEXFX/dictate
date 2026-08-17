@@ -52,7 +52,16 @@ READY = "ready"
 INSTALLING = "installing"
 ERROR = "error"
 
-_API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
+# Deliberately NOT GitHub's /releases/latest endpoint: that endpoint only
+# ever returns the newest release that is *not* flagged prerelease, and
+# every Dictate release published so far -- including this one -- is a beta
+# with the prerelease flag set. Against this repo, /releases/latest 404s
+# every time, which looked to _fetch_latest_release like "offline" and made
+# every update check since the first beta silently report "up to date."
+# /releases (the list endpoint) includes prereleases, so this fetches that
+# list and picks the entry with the numerically highest version itself,
+# rather than trusting the list's order.
+_API_RELEASES = f"https://api.github.com/repos/{REPO}/releases?per_page=10"
 _RELEASE_PREFIX = f"/{REPO}/releases/download/"
 _USER_AGENT = "dictate-updater"
 _REQUEST_TIMEOUT = 10
@@ -107,19 +116,45 @@ def _release_asset_url(asset: object) -> Optional[str]:
     return url
 
 
+def _pick_latest(releases: object) -> Optional[dict]:
+    """Highest-parsed-version, non-draft entry in a /releases list response.
+
+    Picked by version rather than by list position or ``created_at`` so a
+    release published out of order (a hotfix, a re-run) can never be
+    shadowed by something merely newer on the clock.
+    """
+    if not isinstance(releases, list):
+        return None
+    best: Optional[dict] = None
+    best_key = (0, 0, 0, 0, 0)
+    for entry in releases:
+        if not isinstance(entry, dict) or entry.get("draft"):
+            continue
+        candidate = str(entry.get("tag_name", "")).strip().lstrip("vV")
+        key = parse_version(candidate)
+        if key > best_key:
+            best_key = key
+            best = entry
+    return best
+
+
 def _fetch_latest_release() -> Optional[dict]:
     """The latest GitHub release, or None on any failure -- offline, rate
     limited, malformed response, whatever. An update check must never be
     the thing that breaks a launch.
     """
     req = urllib.request.Request(
-        _API_LATEST,
+        _API_RELEASES,
         headers={"User-Agent": _USER_AGENT, "Accept": "application/vnd.github+json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            releases = json.loads(resp.read().decode("utf-8"))
     except Exception:
+        return None
+
+    data = _pick_latest(releases)
+    if data is None:
         return None
 
     version = str(data.get("tag_name", "")).strip().lstrip("vV")

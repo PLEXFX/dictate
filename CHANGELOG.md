@@ -17,6 +17,11 @@ and [Semantic Versioning](https://semver.org/).
 - A background updater that checks for new releases on launch and every
   24 hours, downloads and verifies them, and asks before installing —
   Dictate never restarts or updates itself without a click.
+- Switching to GPU in Settings after a Core-only install now downloads the
+  acceleration files automatically instead of silently staying on CPU, with
+  live progress on both the activity bar and the Settings status line.
+- A "Check for updates" button in Settings, alongside the existing tray
+  menu action.
 
 ### Fixed
 

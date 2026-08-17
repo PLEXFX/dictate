@@ -8,8 +8,10 @@ cloud transcription. Speech-model files may download the first time they are use
 
 Dictate can now be installed as a normal Windows app — no Python required —
 with an optional GPU-acceleration add-on and a background updater that keeps
-it current. A silent or dead microphone and a slow first-time model download
-now both give clear feedback instead of looking stuck.
+it current. Skipped GPU acceleration at install time? Switching to GPU in
+Settings now downloads it on the spot instead of silently staying on CPU. A
+silent or dead microphone and a slow first-time model download now both give
+clear feedback instead of looking stuck.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete version history.
 
@@ -67,7 +69,7 @@ app-data folder rather than beside the source code.
 
 | Setting | What it does |
 | --- | --- |
-| Processing | CPU, GPU, or automatic |
+| Processing | CPU, GPU, or automatic. If installed without GPU support, switching to GPU downloads the acceleration files first (about 1.3 GB from PyPI). |
 | Speech model | `tiny.en` through `large-v3-turbo`; `small.en` is the default |
 | Open settings | Click and press a keyboard or mouse combination, default `ctrl+alt+d` |
 | Always show activity bar / Bar position | Control when and where the bar appears |
@@ -152,6 +154,7 @@ quitting gives that back. On CPU, sleep really does return everything.
 | `sounds.py` | The two synthesised cues and their playback |
 | `config.py` | Settings defaults, load, save, and clamping |
 | `updater.py` | Background GitHub Releases check, download, and verification |
+| `gpu_runtime.py` | On-demand CUDA compute DLL download from PyPI for an installed build |
 
 Three threads matter: the Qt UI thread, pynput's listener thread, and a
 short-lived worker per utterance. Every hop between them goes through the

@@ -4,13 +4,14 @@ Hold a key anywhere in Windows, speak, release. The text appears in whatever
 you were typing in. Transcription runs on this machine — no account and no
 cloud transcription. Speech-model files may download the first time they are used.
 
-## What's new in v1.0.2-beta.1
+## What's new in v1.0.3-beta.1
 
-GPU acceleration now downloads automatically in the background — at launch
-if chosen during install, or the moment you pick it in Settings — with a
-live progress row and a "Download now" option for anyone who skipped it.
-Dictation stays fully usable on CPU while it downloads. The Settings window
-also now supports Windows' own Acrylic transparency effect.
+Fresh setup now opens Settings and prepares **Small English** on CPU in the
+background, with clear progress whether or not you start talking first.
+Downloads & installs stays compact until it has real work to show, then opens
+smoothly with model, GPU, or update progress. Setup can also install optional
+NVIDIA acceleration with a real percentage; later GPU setup remains a clear,
+manual choice in Settings.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete version history.
 Read [PRIVACY.md](PRIVACY.md) for exactly what Dictate processes and what its
@@ -37,14 +38,13 @@ Download the latest `Dictate-Setup-*.exe` from
 Python or setup needed. It's unsigned, so Windows SmartScreen will show an
 "unrecognized publisher" warning the first time; click **More info → Run
 anyway**. If Setup detects a supported NVIDIA graphics card, it offers a
-checkbox to enable GPU acceleration — the actual files download on demand
-the first time Dictate needs them rather than being bundled into the
-installer, so machines without a card never download them at all. There's
-also a checkbox for whether Dictate should check GitHub for new versions in
-the background afterward — on by default, and also changeable later from
-Settings. Uninstalling removes your settings along with the program, so a
-later reinstall starts completely fresh rather than picking up an old
-configuration.
+checkbox to enable GPU acceleration — Setup then downloads those optional
+files with a real progress bar, while machines without a card never download
+them at all. If you skip it, GPU setup stays a clear manual **Download now**
+choice in Settings. There's also a checkbox for whether Dictate should check
+GitHub for new versions in the background afterward — on by default, and also
+changeable later from Settings. When you uninstall, Dictate asks whether to
+keep your downloaded models, GPU files, and settings for a later reinstall.
 
 ## Running it
 
@@ -183,9 +183,9 @@ against 4-second sentences.
 Idle, with the model asleep and the bar hidden, the app sits at **71 MB of RAM
 and no VRAM at all**. The bar costs about 0.2 ms per frame — about 1% of one core
 at 60 Hz and 2% at 144 Hz, and only while it is actually on screen: an idle
-bar stops its clock and costs nothing. The shadow and the acrylic grain are
-rendered once per display scale factor and cached, and a capsule sitting flush
-in the hairline is skipped rather than drawn, so silence is close to free.
+bar stops its clock and costs nothing. Its shadow is rendered once per display
+scale factor and cached, and a capsule sitting flush in the hairline is
+skipped rather than drawn, so silence is close to free.
 
 **CPU is the default, deliberately.** It never touches the GPU, and 0.9 s for a
 sentence is below the threshold where you would sit waiting. Switch to GPU if

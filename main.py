@@ -40,7 +40,7 @@ import inject
 import sounds as sounds_mod
 import startup
 import updater as updater_mod
-from theme import ThemeWatcher
+from theme import ThemeWatcher, resolve_dark
 from bar import Bar
 from settings_window import FirstRunDialog, SettingsWindow, UpdateCompleteDialog
 from version import VERSION
@@ -50,6 +50,11 @@ MUTEX_NAME = "Global\\DictateSingleInstance"
 # A second launch attempt sets this; the running instance polls it rather
 # than running a message-pump listener for a second, unrelated purpose.
 RUNNING_NOTICE_EVENT = "Global\\DictateShowRunningNotice"
+# The updater splash creates this manual-reset event before the silent
+# installer starts. The freshly updated app signals it only after its visible
+# "What's new" window has had a chance to render, which keeps the splash on
+# screen through the otherwise blank handoff between two executables.
+UPDATED_WINDOW_READY_EVENT = "Global\\DictateUpdatedWindowReady"
 
 # Longest a locked (tap-started) recording runs before Dictate stops it and
 # transcribes what it has. A hold is bounded by the user's finger; a lock is
@@ -129,6 +134,19 @@ def _signal_running_notice() -> None:
     """
     try:
         handle = ctypes.windll.kernel32.CreateEventW(None, True, False, RUNNING_NOTICE_EVENT)
+        if handle:
+            ctypes.windll.kernel32.SetEvent(handle)
+            ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+
+
+def _signal_updated_window_ready() -> None:
+    """Tell a running update splash that the new Dictate window is visible."""
+    try:
+        handle = ctypes.windll.kernel32.CreateEventW(
+            None, True, False, UPDATED_WINDOW_READY_EVENT
+        )
         if handle:
             ctypes.windll.kernel32.SetEvent(handle)
             ctypes.windll.kernel32.CloseHandle(handle)
@@ -258,14 +276,16 @@ class App:
         self.preview_engine = engine_mod.PreviewEngine(self.settings)
         self.bar = Bar(self.settings)
         self.theme_watcher.changed.connect(self._on_theme_changed)
-        self.theme_watcher.transparency_changed.connect(self._on_transparency_changed)
         self.cues = sounds_mod.Cues(self.settings.sound_cues)
         self.settings_window: SettingsWindow | None = None
+        self._apply_appearance()
         self._busy = False
         self._dictation_active = False  # mic open or its captured audio is still processing
         self._ptt_preload_pending = False  # background warm-up started by a PTT press
         self._start_cue_at = 0.0  # when the "start" cue began, so "lock" can wait it out
         self._reload_pending = False  # set only by a Settings-triggered reload
+        self._gpu_download_showing = False  # bar is currently reflecting a GPU download
+        self._update_showing = False  # bar is currently reflecting update check/download/install
         self._last_dictation = ""
         self._undo_target = None  # window the last paste landed in
         self._undo_at = 0.0
@@ -279,8 +299,9 @@ class App:
         self._clipboard_restore_timer = QTimer()
         self._clipboard_restore_timer.setSingleShot(True)
         self._clipboard_restore_timer.timeout.connect(self._restore_recovery_clipboard)
+        self._updated_restart = "--updated" in sys.argv
         self._update_notice = (
-            updater_mod.consume_update_notice(VERSION) if "--updated" in sys.argv else None
+            updater_mod.consume_update_notice(VERSION) if self._updated_restart else None
         )
         # A successful update never comes back to delete its own ~1 GB
         # temp download once it hands off to the installer -- do it here
@@ -368,22 +389,12 @@ class App:
 
         if not self.settings.sleep_enabled:
             self.engine.preload()
-        elif self.settings.device in ("cuda", "auto"):
-            # Sleep is on, so the model itself stays lazily loaded, but a
-            # GPU preference already chosen -- by a prior Settings visit, or
-            # the installer's own "gpuaccel" task seeding a fresh install --
-            # shouldn't wait for a first dictation to discover the one-time
-            # ~1.3 GB runtime download is needed. Start it the moment Dictate
-            # launches, which for a fresh install is also the moment Setup's
-            # own "Finish" launches the app. A no-op when the files are
-            # already on disk or there's no real GPU.
-            self.engine.start_gpu_download()
         if self.settings.always_visible:
             self.bar.set_state("idle")
             self.bar.show_bar()
         if not self.settings.onboarding_complete:
             QTimer.singleShot(0, self._show_first_run)
-        elif self._update_notice is not None:
+        elif self._updated_restart:
             QTimer.singleShot(300, self._show_update_complete)
         else:
             # Skipped on first run (the welcome dialog already greets them)
@@ -395,19 +406,18 @@ class App:
 
     # --- tray ---
 
-    def _on_theme_changed(self, dark: bool) -> None:
+    def _apply_appearance(self) -> None:
+        """Apply Dictate's System/Light/Dark choice."""
+        watcher = getattr(self, "theme_watcher", None)
+        system_dark = watcher.dark if watcher is not None else None
+        dark = resolve_dark(self.settings.theme_mode, system_dark)
         self.bar.set_theme(dark)
         if self.settings_window is not None and self.settings_window.isVisible():
-            self.settings_window.set_theme(dark)
+            self.settings_window.set_theme(system_dark or False)
 
-    def _on_transparency_changed(self, _transparent: bool) -> None:
-        # The bar keeps its own hand-painted translucent surface regardless
-        # of this OS toggle (see theme.colors()) -- only Settings' real,
-        # OS-framed window gets a true DWM Acrylic backdrop. set_theme()
-        # re-reads transparency_enabled() itself, so passing the current
-        # dark state through is enough to pick up the new state too.
-        if self.settings_window is not None and self.settings_window.isVisible():
-            self.settings_window.set_theme(self.theme_watcher.dark)
+    def _on_theme_changed(self, _dark: bool) -> None:
+        if self.settings.theme_mode == "system":
+            self._apply_appearance()
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self.icon)
@@ -824,6 +834,13 @@ class App:
         ).clamped()
         config.save(completed)
         self._apply_settings(completed)
+        # A fresh install should begin the default model download right after
+        # setup, not make the first actual dictation discover it. The engine
+        # works on its own thread and reports real byte progress to both the
+        # Settings page and the activity-bar notification.
+        self._reload_pending = True
+        self._show_settings()
+        self.engine.preload()
 
     def _on_engine_state(
         self, state: str, detail: str, progress: float | None = None
@@ -838,7 +855,17 @@ class App:
             # A PTT-triggered warm-up happens while the mic is already
             # recording. The listening waveform is the honest status then;
             # replacing it with a loading indicator would imply capture paused.
-            if not (self._dictation_active or self._ptt_preload_pending):
+            # A real first-time model download is more important than the
+            # listening waveform: it explains why transcription cannot finish
+            # yet, and its live percentage is the feedback a fresh user needs.
+            if progress is not None:
+                if self._dictation_active:
+                    percent = f" {int(progress * 100)}%" if progress is not None else ""
+                    detail = f"Recording continues — speech model downloading{percent}"
+                self.bar.set_state("loading", detail, progress)
+            elif not (
+                self._dictation_active or self._ptt_preload_pending
+            ):
                 self.bar.set_state("loading", detail, progress)
         elif state == engine_mod.READY:
             if self._ptt_preload_pending:
@@ -854,13 +881,27 @@ class App:
         if self.settings_window:
             self.settings_window.refresh_status()
 
-    def _on_gpu_status(self, _downloading: bool, _progress: float | None) -> None:
-        """A background GPU-runtime download reported progress. This never
-        touches the bar -- a dictation on CPU is fully usable while this
-        runs, so the only place it's worth showing live is Settings' own
-        dedicated GPU row, if that window happens to be open."""
+    def _on_gpu_status(self, downloading: bool, progress: float | None) -> None:
+        """A background GPU-runtime download reported progress.
+
+        Shown on the bar itself (Thomas's own ask) via the same loading
+        sweep/fill the model-loading flow already uses, labeled so it never
+        reads as a stuck dictation -- a real dictation always wins, same
+        guard `_on_engine_state` already uses for its own LOADING branch.
+        Also mirrored to Settings' own dedicated GPU row when that window
+        is open.
+        """
         if self.settings_window:
             self.settings_window.refresh_status()
+        if self._dictation_active or self._ptt_preload_pending:
+            return
+        if downloading:
+            self._gpu_download_showing = True
+            pct = f" {int(progress * 100)}%" if progress is not None else ""
+            self.bar.set_state("loading", f"Downloading GPU acceleration…{pct}", progress)
+        elif self._gpu_download_showing:
+            self._gpu_download_showing = False
+            self.bar.set_state("loaded", "GPU acceleration ready")
 
     def _show_settings(self) -> None:
         if self.settings_window is None:
@@ -873,7 +914,9 @@ class App:
         self.settings_window.activateWindow()
 
     def _show_update_complete(self) -> None:
-        UpdateCompleteDialog(VERSION, self._update_notice or "").exec()
+        dialog = UpdateCompleteDialog(VERSION, self._update_notice or "")
+        dialog.presented.connect(_signal_updated_window_ready)
+        dialog.exec()
 
     # --- open/already-running notices ---
 
@@ -918,6 +961,7 @@ class App:
         if (settings.model_size, settings.device) != (old.model_size, old.device):
             self._reload_pending = True
         self.settings = settings
+        self._apply_appearance()
         if settings.auto_update_enabled != old.auto_update_enabled:
             self.updater.set_enabled(settings.auto_update_enabled)
             self.act_check_update.setEnabled(settings.auto_update_enabled)
@@ -1081,7 +1125,9 @@ class App:
 
     def _launch_update_splash(self, installer_pid: int) -> None:
         """Best-effort: a native progress window bridging the silent-install
-        gap (see update_splash.py). Only meaningful for a frozen build --
+        gap (see update_splash.py). The splash waits for the named
+        UPDATED_WINDOW_READY_EVENT, which the new app signals only after its
+        update window has rendered. Only meaningful for a frozen build --
         dev mode has no dictate-updater.exe to launch -- and a failure here
         must never block the actual update, which is already verified and
         already launched by this point.
@@ -1104,8 +1150,33 @@ class App:
         self._notify("You're up to date.", tone="success")
 
     def _on_update_status_changed(self) -> None:
+        """Live update-check/download/install status, mirrored onto the bar
+        (Thomas's own ask) as the same loading sweep/fill everything else
+        uses. Only ever shows the *busy* states here -- CHECKING/
+        DOWNLOADING/INSTALLING. Every terminal state already has its own
+        dedicated callback that shows the right toast (_on_update_current,
+        _on_update_error, _on_update_available), each wired to its own
+        Updater callback and firing independently of this one; duplicating
+        that here would just race the same bar state twice for one event.
+        This only needs to start the busy indicator and know when to stop,
+        not narrate how it ended. CHECKING never fires here for the silent
+        24h background cadence -- updater.py itself only sets that status
+        for a manual check (button, tray, console), so this never surfaces
+        a background check nobody asked to see.
+        """
         if self.settings_window:
             self.settings_window.refresh_status()
+        if self._dictation_active or self._ptt_preload_pending:
+            return
+        state, detail, progress = self.updater.last_status
+        busy = (updater_mod.CHECKING, updater_mod.DOWNLOADING, updater_mod.INSTALLING)
+        if state in busy:
+            self._update_showing = True
+            self.bar.set_state(
+                "loading", detail, progress if state == updater_mod.DOWNLOADING else None
+            )
+        elif self._update_showing:
+            self._update_showing = False
 
     def _quit(self) -> None:
         self.hotkeys.stop()

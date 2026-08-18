@@ -15,7 +15,18 @@ import ctypes
 import os
 from dataclasses import asdict, replace
 
-from PySide6.QtCore import Property, Qt, QPropertyAnimation, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QAbstractAnimation,
+    Property,
+    Qt,
+    QParallelAnimationGroup,
+    QPropertyAnimation,
+    QSequentialAnimationGroup,
+    QSize,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QComboBox,
@@ -43,7 +54,7 @@ import hotkeys as hotkeys_mod
 import startup as startup_mod
 import updater as updater_mod
 from bar import ENTER_MS, EXIT_MS, FLUENT_ACCELERATE, FLUENT_DECELERATE
-from theme import system_is_dark, transparency_enabled
+from theme import resolve_dark, system_is_dark
 from toggle import ToggleSwitch
 from version import VERSION
 
@@ -130,6 +141,26 @@ QPushButton#secondary {
     padding: 6px 18px;
 }
 QPushButton#secondary:hover { background: #3B3B3B; }
+QPushButton#downloadOverview {
+    background: #2B2B2B;
+    border: 1px solid #383838;
+    border-radius: 8px;
+    padding: 0px;
+    text-align: left;
+}
+QPushButton#downloadOverview:hover { background: #323232; border-color: #484848; }
+QPushButton#downloadOverview:pressed { background: #262626; }
+QFrame#downloadOverviewStatus {
+    background: #777777;
+    border: none;
+    border-radius: 4px;
+}
+QFrame#downloadOverviewStatus[active="true"] { background: #4CC2FF; }
+QLabel#downloadOverviewTitle { color: #F4F4F4; font-size: 8pt; font-weight: 600; background: transparent; }
+QLabel#downloadOverviewDetail { color: #AFAFAF; font-size: 8pt; background: transparent; }
+QLabel#downloadOverviewChevron { color: #9A9A9A; font-size: 14pt; font-weight: 400; background: transparent; }
+QProgressBar#downloadOverviewProgress { background: #484848; border: none; border-radius: 1px; min-height: 3px; max-height: 3px; }
+QProgressBar#downloadOverviewProgress::chunk { background: #4CC2FF; border-radius: 1px; }
 QPushButton#link {
     background: transparent;
     color: #4CC2FF;
@@ -264,6 +295,16 @@ QPushButton#apply { background: #0078D4; color: #FFFFFF; border: none; border-ra
 QPushButton#apply:hover { background: #006CBE; } QPushButton#apply:pressed { background: #005A9E; } QPushButton#apply:disabled { background: #DADADA; color: #888888; }
 QPushButton#secondary { background: #FFFFFF; color: #1A1A1A; border: 1px solid #C9C9C9; border-radius: 4px; padding: 6px 18px; }
 QPushButton#secondary:hover { background: #F3F3F3; }
+QPushButton#downloadOverview { background: #FAFAFA; border: 1px solid #E0E0E0; border-radius: 8px; padding: 0px; text-align: left; }
+QPushButton#downloadOverview:hover { background: #F5F5F5; border-color: #D0D0D0; }
+QPushButton#downloadOverview:pressed { background: #EEEEEE; }
+QFrame#downloadOverviewStatus { background: #8A8A8A; border: none; border-radius: 4px; }
+QFrame#downloadOverviewStatus[active="true"] { background: #0078D4; }
+QLabel#downloadOverviewTitle { color: #1A1A1A; font-size: 8pt; font-weight: 600; background: transparent; }
+QLabel#downloadOverviewDetail { color: #616161; font-size: 8pt; background: transparent; }
+QLabel#downloadOverviewChevron { color: #6D6D6D; font-size: 14pt; font-weight: 400; background: transparent; }
+QProgressBar#downloadOverviewProgress { background: #D6D6D6; border: none; border-radius: 1px; min-height: 3px; max-height: 3px; }
+QProgressBar#downloadOverviewProgress::chunk { background: #0078D4; border-radius: 1px; }
 QPushButton#link, QPushButton#sliderReset { background: transparent; color: #0067B8; border: none; padding: 5px 2px; }
 QPushButton#link:hover, QPushButton#sliderReset:hover { color: #004C87; text-decoration: underline; }
 QPushButton#expander { background: #FFFFFF; border: 1px solid #E0E0E0; border-radius: 8px; text-align: left; }
@@ -295,41 +336,17 @@ MODEL_LABELS = {
 }
 
 
-# A translucent #root doesn't touch any card, header, or control -- those
-# keep their own near-opaque backgrounds from DARK_STYLE/LIGHT_STYLE above,
-# same as the real Windows 11 Settings app: Mica/Acrylic blurs the gaps
-# between cards, not the cards themselves. Appended after the base
-# stylesheet so it overrides just the one #root rule.
-_TRANSPARENT_ROOT_OVERRIDE = "\nQWidget#root { background: transparent; }\n"
-
-
-def stylesheet(dark: bool | None = None, transparent: bool | None = None) -> str:
-    base = DARK_STYLE if (system_is_dark() if dark is None else dark) else LIGHT_STYLE
-    if transparency_enabled() if transparent is None else transparent:
-        return base + _TRANSPARENT_ROOT_OVERRIDE
-    return base
+def stylesheet(dark: bool | None = None) -> str:
+    dark = system_is_dark() if dark is None else dark
+    return DARK_STYLE if dark else LIGHT_STYLE
 
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
-DWMWA_SYSTEMBACKDROP_TYPE = 38
 DWMWCP_ROUND = 2
-DWMSBT_NONE = 1
-DWMSBT_TRANSIENTWINDOW = 3  # Acrylic -- the public enum has no plain "glass"
 
 
-def apply_native_chrome(
-    hwnd: int, dark: bool | None = None, transparent: bool | None = None
-) -> None:
-    """Dark title bar, rounded corners, and (when Windows' own "Transparency
-    effects" setting is on) an Acrylic system backdrop on a normal window.
-
-    These are the same DWM attributes the shell uses. Silently ignored on
-    builds that predate them (DWMWA_SYSTEMBACKDROP_TYPE needs Windows 11), so
-    no version check is needed -- DwmSetWindowAttribute just fails and the
-    window keeps its solid QSS-painted background from stylesheet() instead,
-    exactly the "fall back to standard light or dark mode" Windows itself
-    does when a caller asks for a backdrop it can't provide.
-    """
+def apply_native_chrome(hwnd: int, dark: bool | None = None) -> None:
+    """Apply a dark title bar and rounded corners to a solid Qt window."""
     try:
         dwm = ctypes.windll.dwmapi
         dark = ctypes.c_int(int(system_is_dark() if dark is None else dark))
@@ -339,11 +356,6 @@ def apply_native_chrome(
         corner = ctypes.c_int(DWMWCP_ROUND)
         dwm.DwmSetWindowAttribute(
             hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(corner), ctypes.sizeof(corner)
-        )
-        want_transparent = transparency_enabled() if transparent is None else transparent
-        backdrop = ctypes.c_int(DWMSBT_TRANSIENTWINDOW if want_transparent else DWMSBT_NONE)
-        dwm.DwmSetWindowAttribute(
-            hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(backdrop), ctypes.sizeof(backdrop)
         )
     except Exception:
         pass
@@ -966,8 +978,14 @@ class PrivacyPage(QWidget):
 class UpdateCompleteDialog(QDialog):
     """A small, native-looking receipt after Dictate restarts updated."""
 
+    # Emitted after the dialog has entered the event loop and had a chance to
+    # paint. main.py uses this to release the standalone update splash only
+    # once a person can actually see the newly updated app.
+    presented = Signal()
+
     def __init__(self, version: str, notes: str, parent: QWidget | None = None):
         super().__init__(parent)
+        self._presented = False
         self.setObjectName("root")
         self.setWindowTitle("What's new in Dictate")
         self.setStyleSheet(stylesheet())
@@ -1004,6 +1022,17 @@ class UpdateCompleteDialog(QDialog):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         apply_native_chrome(int(self.winId()))
+        QTimer.singleShot(50, self._emit_presented)
+
+    def _emit_presented(self) -> None:
+        # showEvent proves the dialog was made visible. Still release the
+        # splash if someone closes it unusually quickly during this short
+        # post-paint delay; otherwise the updater could remain up until its
+        # safety timeout despite the new app having already rendered.
+        if self._presented:
+            return
+        self._presented = True
+        self.presented.emit()
 
 
 class VocabularyDialog(QDialog):
@@ -1163,6 +1192,7 @@ class SettingsWindow(QWidget):
         self._loading = True
         self._pending_reload = False
         self._has_cuda = engine_mod.cuda_available()
+        self._system_dark = system_is_dark()
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(250)
@@ -1174,7 +1204,7 @@ class SettingsWindow(QWidget):
 
         self.setObjectName("root")
         self.setWindowTitle("Dictate settings")
-        self.setAttribute(Qt.WA_TranslucentBackground, transparency_enabled())
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setStyleSheet(stylesheet())
         self.setMinimumSize(620, 520)
         self.resize(660, 560)
@@ -1182,31 +1212,249 @@ class SettingsWindow(QWidget):
         self.setFont(base if base.exactMatch() else QFont("Segoe UI", 9))
 
         self._build()
-        self._paint_chevron(system_is_dark())
+        self._apply_appearance()
         # winId() forces the native handle into existence, which is what
-        # apply_native_chrome() needs -- previously this window's first open
-        # had no dark title bar or rounded corners at all, only gaining them
-        # after set_theme() ran once from a live Windows theme change. Not
-        # something this pass set out to fix, but the same gap would have
-        # silently swallowed the new Acrylic backdrop below too.
-        apply_native_chrome(int(self.winId()))
+        # apply_native_chrome() needs for the initial dark title bar and
+        # rounded corners rather than waiting for a later Windows theme change.
         self._loading = False
 
-    def set_theme(self, dark: bool) -> None:
-        """Refresh an already-open Settings window after Windows changes
-        theme OR its separate "Transparency effects" setting -- both are
-        cheap to recompute together, so one refresh call covers either."""
-        transparent = transparency_enabled()
-        self.setAttribute(Qt.WA_TranslucentBackground, transparent)
-        self.setStyleSheet(stylesheet(dark, transparent))
-        apply_native_chrome(int(self.winId()), dark, transparent)
+    def _selected_dark(self) -> bool:
+        theme_mode = (
+            self.theme_box.currentData() if hasattr(self, "theme_box") else self._settings.theme_mode
+        )
+        return resolve_dark(theme_mode, self._system_dark)
+
+    def _apply_appearance(self) -> None:
+        """Render the current settings choice immediately, before it saves."""
+        dark = self._selected_dark()
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setStyleSheet(stylesheet(dark))
+        apply_native_chrome(int(self.winId()), dark)
         self._paint_chevron(dark)
+
+    def set_theme(self, system_dark: bool) -> None:
+        """Apply a Windows change, respecting any local appearance override."""
+        self._system_dark = system_dark
+        self._apply_appearance()
 
     def _paint_chevron(self, dark: bool) -> None:
         """The chevron is painted, not styled, so it needs the theme by hand."""
         self.advanced_btn.chevron.set_color(
             QColor("#D8D8D8") if dark else QColor("#1A1A1A")
         )
+
+    # --- compact download overview -----------------------------------
+
+    def _refresh_download_overview(self) -> None:
+        """Keep the compact header honest without duplicating full progress UI.
+
+        The detailed controls stay in their natural Settings sections. This
+        header only answers "what is downloading right now?" and remembers
+        the most useful destination for its one-click animated jump.
+        """
+        active: list[tuple[str, str, float | None]] = []
+        state, _detail, progress = self._engine.last_status
+        if state == engine_mod.LOADING:
+            detail = (
+                f"{config.model_display_name(self._settings.model_size)} · {int(progress * 100)}%"
+                if progress is not None
+                else f"Preparing {config.model_display_name(self._settings.model_size)}"
+            )
+            active.append(
+                (
+                    "model",
+                    detail,
+                    progress,
+                )
+            )
+
+        downloading_gpu, gpu_progress = getattr(self._engine, "gpu_status", (False, None))
+        if downloading_gpu:
+            detail = (
+                f"GPU acceleration · {int(gpu_progress * 100)}%"
+                if gpu_progress is not None
+                else "GPU acceleration · Working"
+            )
+            active.append(("gpu", detail, gpu_progress))
+
+        ready_action: tuple[str, str] | None = None
+        if self._updater is not None:
+            update_state, _update_detail, update_progress = self._updater.last_status
+            if update_state in (
+                updater_mod.CHECKING,
+                updater_mod.DOWNLOADING,
+                updater_mod.INSTALLING,
+            ):
+                if update_state == updater_mod.DOWNLOADING and update_progress is not None:
+                    text = f"Dictate update · {int(update_progress * 100)}%"
+                elif update_state == updater_mod.DOWNLOADING:
+                    text = "Downloading update"
+                elif update_state == updater_mod.CHECKING:
+                    text = "Checking for updates"
+                else:
+                    text = "Installing update"
+                active.append(("update", text, update_progress))
+            elif update_state == updater_mod.AVAILABLE:
+                ready_action = ("update", "Update ready to install")
+
+        if active:
+            # Active transfer work owns the header. A ready update is still
+            # available below, but it never hides a download that is moving.
+            active.sort(key=lambda entry: {"update": 0, "model": 1, "gpu": 2}[entry[0]])
+            self._download_focus, text, selected_progress = active[0]
+            extra = f" · +{len(active) - 1}" if len(active) > 1 else ""
+            self._set_download_overview_presentation(
+                "active", "Downloads & installs", text + extra, selected_progress
+            )
+            return
+
+        if ready_action is not None:
+            self._download_focus, title = ready_action
+            self._set_download_overview_presentation("ready", title)
+            return
+
+        if self._has_cuda and gpu_runtime.needs_download(gpu_available=True):
+            self._download_focus = "gpu"
+            self._set_download_overview_presentation("ready", "GPU acceleration ready")
+        else:
+            self._download_focus = "update"
+            self._set_download_overview_presentation("idle", "Downloads")
+
+    def _set_download_overview_active(self, active: bool) -> None:
+        """Set the status color and a gentle pulse for active work only."""
+        if self.download_overview_status.property("active") != active:
+            self.download_overview_status.setProperty("active", active)
+            style = self.download_overview_status.style()
+            style.unpolish(self.download_overview_status)
+            style.polish(self.download_overview_status)
+        if active:
+            self._download_overview_status_effect.setOpacity(1.0)
+            if self._download_overview_pulse.state() != QAbstractAnimation.State.Running:
+                self._download_overview_pulse.start()
+        else:
+            self._download_overview_pulse.stop()
+            self._download_overview_status_effect.setOpacity(1.0)
+
+    def _set_download_overview_presentation(
+        self,
+        mode: str,
+        title: str,
+        detail: str = "",
+        progress: float | None = None,
+    ) -> None:
+        """Switch between the quiet idle pill and the active download card."""
+        previous_mode = self._download_overview_mode
+        self._download_overview_mode = mode
+        active = mode == "active"
+        self.download_overview_title.setText(title)
+        self._set_download_overview_active(active)
+
+        if active:
+            self.download_overview_detail.setText(detail)
+            if progress is None:
+                self.download_overview_progress.setRange(0, 0)
+            else:
+                self.download_overview_progress.setRange(0, 100)
+                self.download_overview_progress.setValue(int(progress * 100))
+            self.download_overview_progress.setVisible(True)
+            if previous_mode != "active":
+                self._download_overview_hide_details_after_fade = False
+                self.download_overview_details.setVisible(True)
+                self._download_overview_details_effect.setOpacity(0.0)
+                self._download_overview_details_fade.stop()
+                self._download_overview_details_fade.setStartValue(0.0)
+                self._download_overview_details_fade.setEndValue(1.0)
+                self._download_overview_details_fade.setDuration(150)
+                self._download_overview_details_fade.setEasingCurve(FLUENT_DECELERATE)
+                self._download_overview_details_fade.start()
+        elif previous_mode == "active":
+            # Fade the extra information away before the card contracts; that
+            # feels like a Windows status control settling, not disappearing.
+            self._download_overview_hide_details_after_fade = True
+            self._download_overview_details_fade.stop()
+            self._download_overview_details_fade.setStartValue(
+                self._download_overview_details_effect.opacity()
+            )
+            self._download_overview_details_fade.setEndValue(0.0)
+            self._download_overview_details_fade.setDuration(100)
+            self._download_overview_details_fade.setEasingCurve(FLUENT_ACCELERATE)
+            self._download_overview_details_fade.start()
+        else:
+            self.download_overview_details.setVisible(False)
+
+        sizes = {
+            "idle": QSize(142, 36),
+            "ready": QSize(212, 36),
+            "active": QSize(236, 64),
+        }
+        target = sizes[mode]
+        if previous_mode != mode:
+            if previous_mode == "active" and not active:
+                QTimer.singleShot(105, lambda: self._animate_download_overview_size(mode, target))
+            else:
+                self._animate_download_overview_size(mode, target)
+
+    def _finish_download_overview_details_fade(self) -> None:
+        if self._download_overview_hide_details_after_fade:
+            self.download_overview_details.setVisible(False)
+            self.download_overview_progress.setVisible(False)
+
+    def _animate_download_overview_size(self, mode: str, target: QSize) -> None:
+        """Animate the header control between its idle and active footprints."""
+        if self._download_overview_mode != mode:
+            return
+        current = self.download_overview.size()
+        if current == target:
+            self.download_overview.setFixedSize(target)
+            return
+        self._download_overview_size_target = target
+        self._download_overview_size_anim.stop()
+        self._download_overview_size_anim.clear()
+        self.download_overview.setMinimumSize(current)
+        self.download_overview.setMaximumSize(current)
+        for property_name in (b"minimumSize", b"maximumSize"):
+            animation = QPropertyAnimation(self.download_overview, property_name, self)
+            animation.setStartValue(current)
+            animation.setEndValue(target)
+            animation.setDuration(180)
+            animation.setEasingCurve(FLUENT_DECELERATE)
+            self._download_overview_size_anim.addAnimation(animation)
+        self._download_overview_size_anim.start()
+
+    def _finish_download_overview_size_animation(self) -> None:
+        self.download_overview.setFixedSize(self._download_overview_size_target)
+
+    def _scroll_to_widget(self, widget: QWidget) -> None:
+        """Glide the Settings viewport to a detailed download control."""
+        # A queued pass lets an expanding Advanced panel settle its layout
+        # before its child's y coordinate and the scrollbar maximum are read.
+        def start() -> None:
+            bar = self._scroll.verticalScrollBar()
+            top = widget.mapTo(self._scroll.widget(), widget.rect().topLeft()).y() - 12
+            end = max(bar.minimum(), min(bar.maximum(), top))
+            self._download_scroll_anim.stop()
+            self._download_scroll_anim.setStartValue(bar.value())
+            self._download_scroll_anim.setEndValue(end)
+            self._download_scroll_anim.setDuration(320)
+            self._download_scroll_anim.setEasingCurve(FLUENT_DECELERATE)
+            self._download_scroll_anim.start()
+
+        QTimer.singleShot(0, start)
+
+    def _open_download_overview(self) -> None:
+        """Open the relevant detailed section from the header overview."""
+        focus = self._download_focus
+        if focus == "model":
+            self._scroll_to_widget(self.model_download_row)
+            return
+        if focus == "gpu":
+            if not self.advanced_btn.isChecked():
+                self.advanced_btn.setChecked(True)
+                QTimer.singleShot(ENTER_MS + 30, lambda: self._scroll_to_widget(self.gpu_download_row))
+            else:
+                self._scroll_to_widget(self.gpu_download_row)
+            return
+        self._scroll_to_widget(self.updates_group)
 
     # --- construction ---
 
@@ -1224,6 +1472,10 @@ class SettingsWindow(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._pages.addWidget(scroll)
+        self._scroll = scroll
+        self._download_scroll_anim = QPropertyAnimation(
+            scroll.verticalScrollBar(), b"value", self
+        )
 
         self._privacy_page = PrivacyPage()
         self._privacy_page.back.connect(lambda: self._pages.setCurrentWidget(scroll))
@@ -1250,6 +1502,90 @@ class SettingsWindow(QWidget):
         app_desc.setProperty("role", "desc")
         hero_copy.addWidget(app_desc)
         hero_row.addLayout(hero_copy, 1)
+
+        # One compact readout at the top is faster to scan than hunting down
+        # three separate places for a speech-model, GPU, or app-update task.
+        self._download_focus = "update"
+        self._download_overview_mode = "idle"
+        self.download_overview = QPushButton()
+        self.download_overview.setObjectName("downloadOverview")
+        self.download_overview.setCursor(Qt.PointingHandCursor)
+        self.download_overview.setFixedSize(142, 36)
+        self.download_overview.setToolTip(
+            "See the current download or installation and jump to its Settings control."
+        )
+        self._download_overview_size_target = QSize(142, 36)
+        self._download_overview_size_anim = QParallelAnimationGroup(self)
+        self._download_overview_size_anim.finished.connect(
+            self._finish_download_overview_size_animation
+        )
+
+        download_copy = QHBoxLayout(self.download_overview)
+        download_copy.setContentsMargins(12, 7, 10, 7)
+        download_copy.setSpacing(9)
+        self.download_overview_status = QFrame()
+        self.download_overview_status.setObjectName("downloadOverviewStatus")
+        self.download_overview_status.setProperty("active", False)
+        self.download_overview_status.setFixedSize(8, 8)
+        self.download_overview_status.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._download_overview_status_effect = QGraphicsOpacityEffect(
+            self.download_overview_status
+        )
+        self._download_overview_status_effect.setOpacity(1.0)
+        self.download_overview_status.setGraphicsEffect(self._download_overview_status_effect)
+        self._download_overview_pulse = QSequentialAnimationGroup(self)
+        for start, end, easing in (
+            (0.48, 1.0, FLUENT_DECELERATE),
+            (1.0, 0.48, FLUENT_ACCELERATE),
+        ):
+            pulse = QPropertyAnimation(self._download_overview_status_effect, b"opacity", self)
+            pulse.setStartValue(start)
+            pulse.setEndValue(end)
+            pulse.setDuration(720)
+            pulse.setEasingCurve(easing)
+            self._download_overview_pulse.addAnimation(pulse)
+        self._download_overview_pulse.setLoopCount(-1)
+        download_copy.addWidget(self.download_overview_status, 0, Qt.AlignVCenter)
+        overview_copy = QVBoxLayout()
+        overview_copy.setContentsMargins(0, 0, 0, 0)
+        overview_copy.setSpacing(0)
+        self.download_overview_title = QLabel("Downloads")
+        self.download_overview_title.setObjectName("downloadOverviewTitle")
+        self.download_overview_title.setAttribute(Qt.WA_TransparentForMouseEvents)
+        overview_copy.addWidget(self.download_overview_title)
+        self.download_overview_details = QWidget()
+        details_copy = QVBoxLayout(self.download_overview_details)
+        details_copy.setContentsMargins(0, 0, 0, 0)
+        details_copy.setSpacing(4)
+        self.download_overview_detail = QLabel("Checking download status…")
+        self.download_overview_detail.setObjectName("downloadOverviewDetail")
+        self.download_overview_detail.setAttribute(Qt.WA_TransparentForMouseEvents)
+        details_copy.addWidget(self.download_overview_detail)
+        self.download_overview_progress = _native_progress_bar()
+        self.download_overview_progress.setObjectName("downloadOverviewProgress")
+        self.download_overview_progress.setFixedHeight(3)
+        details_copy.addWidget(self.download_overview_progress)
+        self.download_overview_details.setVisible(False)
+        self._download_overview_details_effect = QGraphicsOpacityEffect(
+            self.download_overview_details
+        )
+        self._download_overview_details_effect.setOpacity(1.0)
+        self.download_overview_details.setGraphicsEffect(self._download_overview_details_effect)
+        self._download_overview_hide_details_after_fade = False
+        self._download_overview_details_fade = QPropertyAnimation(
+            self._download_overview_details_effect, b"opacity", self
+        )
+        self._download_overview_details_fade.finished.connect(
+            self._finish_download_overview_details_fade
+        )
+        overview_copy.addWidget(self.download_overview_details)
+        download_copy.addLayout(overview_copy, 1)
+        overview_chevron = QLabel("›")
+        overview_chevron.setObjectName("downloadOverviewChevron")
+        overview_chevron.setAttribute(Qt.WA_TransparentForMouseEvents)
+        download_copy.addWidget(overview_chevron, 0, Qt.AlignVCenter)
+        self.download_overview.clicked.connect(self._open_download_overview)
+        hero_row.addWidget(self.download_overview, 0, Qt.AlignVCenter)
         col.addWidget(hero)
 
         col.addSpacing(3)
@@ -1311,15 +1647,6 @@ class SettingsWindow(QWidget):
         custom_item = self.mode_box.model().item(self.mode_box.findData("custom"))
         if custom_item is not None:
             custom_item.setEnabled(False)
-        if not self._has_cuda:
-            for value, tooltip in (
-                ("faster", "Fast response needs an NVIDIA CUDA GPU."),
-                ("max", "Max accuracy needs an NVIDIA CUDA GPU."),
-            ):
-                item = self.mode_box.model().item(self.mode_box.findData(value))
-                if item is not None:
-                    item.setEnabled(False)
-                    item.setToolTip(tooltip)
         self.mode_box.setFixedWidth(200)
         self.mode_box.currentIndexChanged.connect(self._on_mode_changed)
         mode_row = _card(
@@ -1328,6 +1655,18 @@ class SettingsWindow(QWidget):
             self.mode_box,
         )
         self.mode_desc_label = mode_row.findChild(QLabel, "desc")
+
+        # This row appears for the first local download as well as an
+        # intentional model change. It sits in Essentials so a new user sees
+        # the real percentage immediately, without hunting in Advanced.
+        self.model_download_progress = _native_progress_bar()
+        self.model_download_row = _card(
+            "Speech model download",
+            "Preparing Dictate's local speech model…",
+            self.model_download_progress,
+        )
+        self.model_download_desc_label = self.model_download_row.findChild(QLabel, "desc")
+        self.model_download_row.setVisible(False)
 
         self.vocabulary_btn = QPushButton()
         self.vocabulary_btn.setObjectName("secondary")
@@ -1377,21 +1716,21 @@ class SettingsWindow(QWidget):
             "Keep Dictate ready without opening it manually.",
             self.startup_check,
         )
-        col.addWidget(
-            _settings_group(
-                mic_row,
-                ptt_row,
-                self.tap_lock_row,
-                live_preview_row,
-                enhanced_preview_row,
-                mode_row,
-                vocabulary_row,
-                sleep_row,
-                sleep_after_row,
-                sound_row,
-                startup_row,
-            )
+        self.essentials_group = _settings_group(
+            mic_row,
+            ptt_row,
+            self.tap_lock_row,
+            live_preview_row,
+            enhanced_preview_row,
+            mode_row,
+            self.model_download_row,
+            vocabulary_row,
+            sleep_row,
+            sleep_after_row,
+            sound_row,
+            startup_row,
         )
+        col.addWidget(self.essentials_group)
 
         self.advanced_btn = ExpanderHeader("Advanced settings")
         self.advanced_btn.toggled.connect(self._toggle_advanced)
@@ -1413,29 +1752,21 @@ class SettingsWindow(QWidget):
             )
         self.device_box.setFixedWidth(150)
         self.device_box.currentIndexChanged.connect(self._on_advanced_model_changed)
-        if not self._has_cuda:
-            idx = self.device_box.findData("cuda")
-            item = self.device_box.model().item(idx)
-            if item is not None:
-                item.setEnabled(False)
+        self._update_gpu_choices()
         device_desc = "Automatic, GPU, or CPU. GPU is fastest but uses VRAM."
         if gpu_runtime.needs_download(gpu_available=self._has_cuda):
             device_desc = (
-                "Automatic, GPU, or CPU. Switching to GPU downloads the "
-                "acceleration files the first time (about 1.3 GB)."
+                "Automatic stays on CPU until GPU acceleration is installed. "
+                "Download now downloads the files (about 1.3 GB)."
             )
         device_row = _card("Processing", device_desc, self.device_box)
         self.device_desc_label = device_row.findChild(QLabel, "desc")
 
         # A dedicated call-to-action for GPU acceleration, separate from the
-        # Processing dropdown above: for someone who skipped the installer's
-        # GPU task and never touches Processing at all, this is the only way
-        # to fetch the files ahead of time instead of discovering the
-        # download mid-dictation. Selecting GPU in the dropdown above starts
-        # the same download automatically (see _maybe_start_gpu_download) --
-        # this button exists for people who want the files without switching
-        # yet. Hidden once the files are already on disk or there's no real
-        # GPU to accelerate with.
+        # Processing dropdown above: if the GPU files were skipped during
+        # installation, GPU-only choices stay greyed out until this explicit
+        # download finishes. That prevents a first dictation from unexpectedly
+        # starting a 1.3 GB download or pretending it is already on GPU.
         self.gpu_download_btn = QPushButton("Download now")
         self.gpu_download_btn.clicked.connect(self._start_gpu_download_clicked)
         self.gpu_download_row = _card(
@@ -1565,6 +1896,23 @@ class SettingsWindow(QWidget):
         )
         col.addWidget(_settings_group(system_notifications_row))
 
+        appearance_header = QLabel("APPEARANCE")
+        appearance_header.setProperty("role", "section")
+        col.addWidget(appearance_header)
+        self.theme_box = QComboBox()
+        self.theme_box.addItem("Use Windows setting", "system")
+        self.theme_box.addItem("Light", "light")
+        self.theme_box.addItem("Dark", "dark")
+        self.theme_box.setFixedWidth(190)
+        self.theme_box.currentIndexChanged.connect(self._on_appearance_changed)
+        theme_row = _card(
+            "Color mode",
+            "Follow Windows, or keep Dictate light or dark.",
+            self.theme_box,
+        )
+
+        col.addWidget(_settings_group(theme_row))
+
         # Windows puts Windows Update at the end of Settings navigation. This
         # single-page app has no navigation rail, so its equivalent is the
         # final primary section -- prominent, never hidden in a footer.
@@ -1592,9 +1940,10 @@ class SettingsWindow(QWidget):
         )
         self.update_desc_label = update_row.findChild(QLabel, "desc")
         self.update_progress = _native_progress_bar()
-        col.addWidget(
-            _settings_group(auto_update_row, update_row, _progress_row(self.update_progress))
+        self.updates_group = _settings_group(
+            auto_update_row, update_row, _progress_row(self.update_progress)
         )
+        col.addWidget(self.updates_group)
 
         col.addStretch(1)
 
@@ -1625,7 +1974,7 @@ class SettingsWindow(QWidget):
         col.addLayout(bottom_row)
         self._load_widgets(self._settings)
         self._update_gpu_download_visibility()
-        self._maybe_start_gpu_download()
+        self._update_gpu_download_visibility()
 
     # --- behaviour ---
 
@@ -1648,7 +1997,6 @@ class SettingsWindow(QWidget):
             return
         self._sync_mode_from_advanced()
         self._queue_save()
-        self._maybe_start_gpu_download()
 
     def _on_mode_changed(self, *_args) -> None:
         if self._loading:
@@ -1667,7 +2015,6 @@ class SettingsWindow(QWidget):
             self.model_desc_label.setText(self._model_desc())
         self._update_mode_desc()
         self._queue_save()
-        self._maybe_start_gpu_download()
 
     def _sync_mode_from_advanced(self) -> None:
         mode = config.transcription_mode_for(
@@ -1691,24 +2038,22 @@ class SettingsWindow(QWidget):
                 descriptions.get(self.mode_box.currentData(), descriptions["balanced"])
             )
 
-    def _maybe_start_gpu_download(self) -> None:
-        """Kick off the GPU-runtime download the moment a choice needs it,
-        rather than waiting for a dictation to discover that lazily.
-
-        Safe to call anytime, including at window construction (an install-
-        time "gpuaccel" task seeds device=cuda before Settings has ever been
-        opened) -- Engine.start_gpu_download() is itself a no-op unless
-        there's a real GPU and the files are actually missing. Reached via
-        getattr rather than a direct call so a test double or older Engine
-        stub without the method just no-ops instead of crashing the slot.
-        """
-        start = getattr(self._engine, "start_gpu_download", None)
-        if start is not None and self._has_cuda and self.device_box.currentData() in (
-            "cuda",
-            "auto",
-        ):
-            start()
-        self._update_gpu_download_visibility()
+    def _update_gpu_choices(self) -> None:
+        """Keep GPU-only choices unavailable until their runtime is present."""
+        ready = self._has_cuda and not gpu_runtime.needs_download(gpu_available=True)
+        device_item = self.device_box.model().item(self.device_box.findData("cuda"))
+        if device_item is not None:
+            device_item.setEnabled(ready)
+            device_item.setToolTip(
+                "" if ready else "Install GPU acceleration first to use this option."
+            )
+        for value in ("faster", "max"):
+            item = self.mode_box.model().item(self.mode_box.findData(value))
+            if item is not None:
+                item.setEnabled(ready)
+                item.setToolTip(
+                    "" if ready else "Install GPU acceleration first to use this mode."
+                )
 
     def _start_gpu_download_clicked(self) -> None:
         self.gpu_download_btn.setEnabled(False)
@@ -1734,6 +2079,7 @@ class SettingsWindow(QWidget):
             return
         downloading, progress = getattr(self._engine, "gpu_status", (False, None))
         needs = gpu_runtime.needs_download(gpu_available=True)
+        self._update_gpu_choices()
         visible = needs or downloading
         self.gpu_download_row.setVisible(visible)
         self.gpu_download_progress_row.setVisible(visible)
@@ -1864,6 +2210,7 @@ class SettingsWindow(QWidget):
         "have I already shown this" bookkeeping of its own. AVAILABLE
         remains visible until the person clicks "Download & install".
         """
+        self._refresh_download_overview()
         if self._updater is not None:
             auto_update_on = self.auto_update_check.isChecked()
             u_state, u_detail, u_progress = self._updater.last_status
@@ -1913,14 +2260,25 @@ class SettingsWindow(QWidget):
         self._refresh_gpu_download_status()
 
         state, detail, progress = self._engine.last_status
+        # This also covers Dictate's first-run background download. It is not
+        # a Settings-triggered reload yet, but the person should see exactly
+        # the same real percentage if they open Settings while it is running.
+        busy = state == engine_mod.LOADING and progress is not None
+        self.model_download_row.setVisible(busy)
+        self.reload_progress.setVisible(busy)
+        if busy:
+            self.reload_progress.setRange(0, 100)
+            self.reload_progress.setValue(int(progress * 100))
+            self.model_download_progress.setRange(0, 100)
+            self.model_download_progress.setValue(int(progress * 100))
+            if self.model_download_desc_label is not None:
+                self.model_download_desc_label.setText(detail)
+            self.save_status.setText(detail)
+            return
+
+        self.model_download_row.setVisible(False)
+
         if self._pending_reload:
-            busy = state == engine_mod.LOADING and progress is not None
-            self.reload_progress.setVisible(busy)
-            if busy:
-                self.reload_progress.setRange(0, 100)
-                self.reload_progress.setValue(int(progress * 100))
-                self.save_status.setText(f"Saved · {detail}")
-                return
             if state == engine_mod.READY:
                 self._pending_reload = False
                 self.reload_progress.setVisible(False)
@@ -1964,6 +2322,12 @@ class SettingsWindow(QWidget):
             self.live_preview_check.isChecked()
         )
 
+    def _on_appearance_changed(self, *_args) -> None:
+        if self._loading:
+            return
+        self._apply_appearance()
+        self._queue_save()
+
     def _collect_settings(self) -> config.Settings:
         return replace(
             self._settings,
@@ -1985,6 +2349,7 @@ class SettingsWindow(QWidget):
             start_with_windows=self.startup_check.isChecked(),
             auto_update_enabled=self.auto_update_check.isChecked(),
             system_notifications_enabled=self.system_notifications_check.isChecked(),
+            theme_mode=self.theme_box.currentData(),
         ).clamped()
 
     def _queue_save(self, *_args) -> None:
@@ -2060,12 +2425,13 @@ class SettingsWindow(QWidget):
         self.startup_check.setChecked(s.start_with_windows)
         self.auto_update_check.setChecked(s.auto_update_enabled)
         self.system_notifications_check.setChecked(s.system_notifications_enabled)
+        self.theme_box.setCurrentIndex(max(0, self.theme_box.findData(s.theme_mode)))
         self._sync_mode_from_advanced()
         self._loading = False
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        apply_native_chrome(int(self.winId()))
+        self._apply_appearance()
         _fill_microphone_box(self.mic_box, self._settings.input_device)
         self.refresh_status()
 

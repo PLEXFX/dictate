@@ -23,8 +23,10 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -66,6 +68,16 @@ def is_installed() -> bool:
         return False
     base = runtime_dir()
     return all((base / subdir / "bin").is_dir() for subdir in _PACKAGE_SUBDIRS.values())
+
+
+def ready_for_cuda() -> bool:
+    """True when this build has the CUDA DLLs needed for inference.
+
+    Development uses the project's installed Python packages directly. A
+    packaged Dictate install instead needs the optional runtime files in its
+    own ``_internal\\nvidia`` folder before presenting GPU as usable.
+    """
+    return not getattr(sys, "frozen", False) or is_installed()
 
 
 def needs_download(*, gpu_available: bool) -> bool:
@@ -129,6 +141,16 @@ def download_and_install(
     just means needs_download() stays true and the caller's existing
     CPU-fallback path (engine.py's GPU-load try/except) handles the rest.
 
+    All three packages download AND extract concurrently on their own
+    thread, each one's extraction starting the moment its own download
+    finishes rather than waiting for the other two -- three HTTP
+    connections at once instead of one at a time, and a wheel already in
+    hand isn't left sitting idle on disk while a sibling is still
+    downloading. ``on_progress`` still reports one combined (bytes-so-far,
+    total-bytes) pair across all three, thread-safely summed, so a caller
+    (engine.py's own throttled callback) sees one smooth number regardless
+    of which package's chunk just landed.
+
     Builds the full nvidia/ tree in a temp directory first and only then
     swaps it into place with one move, so an interrupted download or a
     process killed partway through never leaves is_installed() seeing a
@@ -147,7 +169,15 @@ def download_and_install(
         wheels.append((package, url, size))
 
     total = sum(size for _p, _u, size in wheels)
-    completed = 0
+    progress_lock = threading.Lock()
+    done_by_package = {package: 0 for package, _url, _size in wheels}
+
+    def report() -> None:
+        if on_progress is None or not total:
+            return
+        with progress_lock:
+            done = sum(done_by_package.values())
+        on_progress(done, total)
 
     try:
         with tempfile.TemporaryDirectory(prefix="dictate-gpu-") as tmp:
@@ -155,16 +185,18 @@ def download_and_install(
             extract_root = tmp_path / "nvidia"
             extract_root.mkdir()
 
-            for package, url, size in wheels:
+            def fetch_and_extract(package: str, url: str, size: int) -> None:
                 wheel_path = tmp_path / f"{package}.whl"
-                base = completed
 
                 def on_chunk(n: int, _total: Optional[int]) -> None:
-                    if on_progress is not None and total:
-                        on_progress(base + n, total)
+                    with progress_lock:
+                        done_by_package[package] = n
+                    report()
 
                 _download(url, wheel_path, on_chunk)
-                completed += size
+                with progress_lock:
+                    done_by_package[package] = size
+                report()
 
                 subdir = _PACKAGE_SUBDIRS[package]
                 prefix = f"nvidia/{subdir}/bin/"
@@ -173,9 +205,17 @@ def download_and_install(
                         m for m in zf.namelist() if m.startswith(prefix) and not m.endswith("/")
                     ]
                     if not members:
-                        return False
+                        raise RuntimeError(f"wheel for {package} had no files under {prefix}")
                     zf.extractall(tmp_path, members)
                 wheel_path.unlink(missing_ok=True)
+
+            with ThreadPoolExecutor(max_workers=len(wheels)) as executor:
+                futures = [
+                    executor.submit(fetch_and_extract, package, url, size)
+                    for package, url, size in wheels
+                ]
+                for future in as_completed(futures):
+                    future.result()  # re-raises here if that worker failed
 
             target = runtime_dir()
             target.parent.mkdir(parents=True, exist_ok=True)

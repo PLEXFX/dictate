@@ -67,13 +67,13 @@ FADE_IN_MS = 200
 FADE_OUT_MS = 150
 
 POLL_INTERVAL_MS = 300
-GRACE_POLL_SECONDS = 8.0
 FAILURE_HOLD_SECONDS = 2.0
 SAFETY_TIMEOUT_SECONDS = 90.0
+UPDATE_READY_EVENT = "Global\\DictateUpdatedWindowReady"
+_WAIT_OBJECT_0 = 0
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
-_TH32CS_SNAPPROCESS = 0x00000002
 
 
 # --- pure decision logic -----------------------------------------------
@@ -90,26 +90,24 @@ def decide_next_action(
     *,
     exit_code: Optional[int],
     elapsed_seconds: float,
-    grace_elapsed_seconds: float,
-    dictate_seen_running: bool,
+    updated_window_ready: bool,
 ) -> str:
     """The splash's whole state machine, as one pure function.
 
     ``exit_code`` is None while the installer is still running, or if its
-    process handle could never be opened in the first place -- both treated
-    as "don't know yet" rather than a failure, since dictate.exe actually
-    coming back up is a strong enough real signal on its own either way.
-    A nonzero exit code is Setup's own failure/cancel contract and always
-    wins immediately. The safety ceiling always wins over everything, so
-    this can never wait forever.
+    process handle could never be opened in the first place. A nonzero exit
+    code is Setup's own failure/cancel contract and always wins immediately.
+    A successful installer is deliberately *not* enough to close: Dictate
+    signals ``updated_window_ready`` only after its update window is visible.
+    That removes the blank gap that arose when merely seeing dictate.exe start
+    was treated as proof that the replacement UI was on screen. The safety
+    ceiling still wins over everything, so this can never wait forever.
     """
     if elapsed_seconds >= SAFETY_TIMEOUT_SECONDS:
         return CLOSE
     if exit_code is not None and exit_code != 0:
         return RELAUNCH_AND_CLOSE
-    if dictate_seen_running:
-        return CLOSE
-    if exit_code == 0 and grace_elapsed_seconds >= GRACE_POLL_SECONDS:
+    if updated_window_ready:
         return CLOSE
     return SUCCESS_GRACE if exit_code == 0 else WAITING
 
@@ -127,21 +125,6 @@ def relaunch_target_path(splash_exe_path: Path) -> Path:
 _kernel32 = ctypes.windll.kernel32 if hasattr(ctypes, "windll") else None
 
 
-class _PROCESSENTRY32(ctypes.Structure):
-    _fields_ = [
-        ("dwSize", ctypes.c_uint32),
-        ("cntUsage", ctypes.c_uint32),
-        ("th32ProcessID", ctypes.c_uint32),
-        ("th32DefaultHeapID", ctypes.c_void_p),
-        ("th32ModuleID", ctypes.c_uint32),
-        ("cntThreads", ctypes.c_uint32),
-        ("th32ParentProcessID", ctypes.c_uint32),
-        ("pcPriClassBase", ctypes.c_long),
-        ("dwFlags", ctypes.c_uint32),
-        ("szExeFile", ctypes.c_char * 260),
-    ]
-
-
 def _open_process(pid: int):
     handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     return handle or None
@@ -157,23 +140,27 @@ def poll_exit_code(handle) -> Optional[int]:
     return code.value
 
 
-def is_process_running(image_name: str) -> bool:
-    snapshot = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
-    if not snapshot or snapshot == -1:
+def _create_update_ready_event():
+    """Create/reset the handoff event before the installer can relaunch us."""
+    if _kernel32 is None:
+        return None
+    try:
+        handle = _kernel32.CreateEventW(None, True, False, UPDATE_READY_EVENT)
+        if handle:
+            _kernel32.ResetEvent(handle)
+        return handle or None
+    except Exception:
+        return None
+
+
+def _update_window_ready(handle) -> bool:
+    """Non-blocking read of the freshly updated app's rendered-window signal."""
+    if handle is None or _kernel32 is None:
         return False
     try:
-        entry = _PROCESSENTRY32()
-        entry.dwSize = ctypes.sizeof(_PROCESSENTRY32)
-        if not _kernel32.Process32First(snapshot, ctypes.byref(entry)):
-            return False
-        target = image_name.lower()
-        while True:
-            if entry.szExeFile.decode("mbcs", errors="ignore").lower() == target:
-                return True
-            if not _kernel32.Process32Next(snapshot, ctypes.byref(entry)):
-                return False
-    finally:
-        _kernel32.CloseHandle(snapshot)
+        return _kernel32.WaitForSingleObject(handle, 0) == _WAIT_OBJECT_0
+    except Exception:
+        return False
 
 
 # ITaskbarList3 (shobjidl.h) -- the interface behind the moving progress
@@ -286,7 +273,7 @@ class SplashWindow(QWidget):
         self._handle = _open_process(installer_pid)
         self._exit_code: Optional[int] = None
         self._start = time.monotonic()
-        self._grace_start: Optional[float] = None
+        self._ready_event = _create_update_ready_event()
         self._done = False
         self._taskbar: Optional[_TaskbarProgress] = None
 
@@ -381,17 +368,14 @@ class SplashWindow(QWidget):
                 self._exit_code = code
                 print(f"[dictate-updater] installer exited with code {code}")
                 if code == 0:
-                    self._grace_start = time.monotonic()
+                    self._title.setText("Starting the updated Dictate…")
 
-        dictate_seen = is_process_running("dictate.exe")
         elapsed = time.monotonic() - self._start
-        grace_elapsed = (time.monotonic() - self._grace_start) if self._grace_start else 0.0
 
         action = decide_next_action(
             exit_code=self._exit_code,
             elapsed_seconds=elapsed,
-            grace_elapsed_seconds=grace_elapsed,
-            dictate_seen_running=dictate_seen,
+            updated_window_ready=_update_window_ready(self._ready_event),
         )
         if action in (WAITING, SUCCESS_GRACE):
             return
@@ -404,7 +388,7 @@ class SplashWindow(QWidget):
             if elapsed >= SAFETY_TIMEOUT_SECONDS:
                 print("[dictate-updater] safety timeout reached -- closing")
             else:
-                print("[dictate-updater] Dictate is back -- closing")
+                print("[dictate-updater] updated Dictate window is visible -- closing")
             self._start_fade_out()
 
     def _handle_failure(self) -> None:
@@ -428,6 +412,9 @@ class SplashWindow(QWidget):
         if self._handle is not None:
             _kernel32.CloseHandle(self._handle)
             self._handle = None
+        if self._ready_event is not None:
+            _kernel32.CloseHandle(self._ready_event)
+            self._ready_event = None
         self._fade_to(0.0, FADE_OUT_MS, FLUENT_ACCELERATE, on_finished=self.close)
 
 

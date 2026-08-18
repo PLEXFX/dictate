@@ -38,6 +38,22 @@ MODELS = [
     ("large-v3-turbo", "~1.9 GB, most accurate, GPU recommended"),
 ]
 
+# Technical model identifiers are for faster-whisper; every person-facing
+# surface should use the compact names below instead of exposing identifiers
+# like ``small.en`` or ``large-v3-turbo``.
+MODEL_DISPLAY_NAMES = {
+    "tiny.en": "Tiny English",
+    "base.en": "Base English",
+    "small.en": "Small English",
+    "medium.en": "Medium English",
+    "large-v3-turbo": "Large v3 Turbo",
+}
+
+
+def model_display_name(model_size: str) -> str:
+    """Return a concise human-facing name for a faster-whisper model."""
+    return MODEL_DISPLAY_NAMES.get(model_size, model_size)
+
 DEVICES = [
     ("auto", "Use the GPU when it is available"),
     ("cuda", "GPU (NVIDIA) -- fastest, holds VRAM while loaded"),
@@ -146,6 +162,7 @@ class Settings:
     system_notifications_enabled: bool = False
 
     # --- appearance ---
+    theme_mode: str = "system"  # system | light | dark
     always_visible: bool = False  # keep the bar on screen even when idle
     bar_margin: int = 8           # gap in px between the bar and the taskbar
     bar_linger_ms: int = 750      # how long the bar stays after finishing before it fades
@@ -179,6 +196,8 @@ class Settings:
         out.enhanced_preview_enabled = bool(out.enhanced_preview_enabled)
         out.auto_update_enabled = bool(out.auto_update_enabled)
         out.system_notifications_enabled = bool(out.system_notifications_enabled)
+        if out.theme_mode not in {"system", "light", "dark"}:
+            out.theme_mode = "system"
         out.onboarding_complete = bool(out.onboarding_complete)
         out.sleep_after_minutes = min(max(float(out.sleep_after_minutes), 0.5), 240.0)
         out.bar_margin = min(max(int(out.bar_margin), 0), 400)

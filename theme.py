@@ -21,34 +21,23 @@ def system_is_dark() -> bool:
         return True
 
 
-def transparency_enabled() -> bool:
-    """Windows Settings > Personalization > Colors > "Transparency effects".
-
-    Same key family as system_is_dark(); missing/unreadable falls back to
-    False (solid light/dark) rather than guessing a translucent window onto
-    a system that never asked for one.
-    """
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-        ) as key:
-            enabled, _ = winreg.QueryValueEx(key, "EnableTransparency")
-        return bool(enabled)
-    except OSError:
+def resolve_dark(mode: str, system_dark: bool | None = None) -> bool:
+    """Apply Dictate's System/Light/Dark choice to the current OS state."""
+    if mode == "light":
         return False
+    if mode == "dark":
+        return True
+    return system_is_dark() if system_dark is None else system_dark
 
 
 class ThemeWatcher(QObject):
     """Poll the Windows setting lightly so an open app follows changes too."""
 
     changed = Signal(bool)
-    transparency_changed = Signal(bool)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._dark = system_is_dark()
-        self._transparent = transparency_enabled()
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._check)
@@ -58,26 +47,16 @@ class ThemeWatcher(QObject):
     def dark(self) -> bool:
         return self._dark
 
-    @property
-    def transparent(self) -> bool:
-        return self._transparent
-
     def _check(self) -> None:
         dark = system_is_dark()
         if dark != self._dark:
             self._dark = dark
             self.changed.emit(dark)
-        transparent = transparency_enabled()
-        if transparent != self._transparent:
-            self._transparent = transparent
-            self.transparency_changed.emit(transparent)
-
-
 def colors(dark: bool) -> dict[str, QColor]:
     """Paint palette for hand-drawn controls and the compact activity surfaces."""
     if dark:
         return {
-            "surface": QColor(44, 44, 44, 246), "stroke": QColor(255, 255, 255, 18),
+            "surface": QColor(44, 44, 44), "stroke": QColor(255, 255, 255, 18),
             "track": QColor(255, 255, 255, 38), "idle": QColor(255, 255, 255, 78),
             "text": QColor(255, 255, 255, 235), "shadow": QColor(0, 0, 0, 150),
             "off_border": QColor(158, 158, 158), "off_border_hover": QColor(200, 200, 200),
@@ -85,7 +64,7 @@ def colors(dark: bool) -> dict[str, QColor]:
             "thumb_off": QColor(206, 206, 206), "disabled": QColor(84, 84, 84),
         }
     return {
-        "surface": QColor(249, 249, 249, 248), "stroke": QColor(0, 0, 0, 20),
+        "surface": QColor(249, 249, 249), "stroke": QColor(0, 0, 0, 20),
         "track": QColor(0, 0, 0, 38), "idle": QColor(0, 0, 0, 92),
         "text": QColor(0, 0, 0, 225), "shadow": QColor(0, 0, 0, 55),
         "off_border": QColor(105, 105, 105), "off_border_hover": QColor(65, 65, 65),

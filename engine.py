@@ -49,6 +49,11 @@ READY = "ready"
 TRANSCRIBING = "transcribing"
 ERROR = "error"
 
+
+def _model_status_name(size: str, device: str) -> str:
+    """Compact user-facing model/device text for bars and Settings."""
+    return f"{config.model_display_name(size)} · {device.upper()}"
+
 # Enhanced live preview deliberately uses a separate, smaller CPU model.  It
 # can keep producing provisional text while the user's final model is busy,
 # without changing the model or device chosen for the text that gets pasted.
@@ -157,14 +162,15 @@ def cuda_available() -> bool:
 def resolve_device(preference: str) -> str:
     """Turn a settings value into a device CTranslate2 will accept.
 
-    'auto' means "GPU if there is one". An explicit 'cuda' still falls back to
-    CPU rather than crashing, because a driver update or a second app holding
-    the GPU shouldn't take dictation offline entirely.
+    'auto' means "GPU if there is one and Dictate's GPU runtime is installed".
+    An explicit 'cuda' still falls back to CPU rather than crashing, because a
+    driver update, a missing optional runtime, or a second app holding the GPU
+    shouldn't take dictation offline entirely.
     """
     if preference == "cpu":
         return "cpu"
     if preference in ("cuda", "auto"):
-        return "cuda" if cuda_available() else "cpu"
+        return "cuda" if cuda_available() and gpu_runtime.ready_for_cuda() else "cpu"
     return "cpu"
 
 
@@ -296,6 +302,11 @@ class Engine:
         self._model = None
         self._loaded_key: tuple[str, str] | None = None  # (model_size, device)
         self._lock = threading.RLock()
+        # First-run setup, the tray's "Load model now" action, and a talk-key
+        # press can all request the same warm-up. Keep one worker per active
+        # load instead of queueing identical threads behind the model lock.
+        self._preload_guard = threading.Lock()
+        self._preload_thread: Optional[threading.Thread] = None
         self._last_used = time.monotonic()
 
         # GPU-runtime download state, tracked independently of the model's own
@@ -388,9 +399,22 @@ class Engine:
 
     # --- model lifecycle ---
 
-    def preload(self) -> None:
-        """Load the model ahead of first use, off the UI thread."""
-        threading.Thread(target=self._safe_ensure_loaded, daemon=True).start()
+    def preload(self) -> bool:
+        """Load the model ahead of first use, off the UI thread.
+
+        Returns ``True`` only for the call that started a worker. Repeated
+        callers share the active warm-up, which avoids a pile of duplicate
+        threads when a person opens Settings and presses the talk key while
+        the default model is downloading.
+        """
+        with self._preload_guard:
+            if self._preload_thread is not None and self._preload_thread.is_alive():
+                return False
+            self._preload_thread = threading.Thread(
+                target=self._safe_ensure_loaded, daemon=True
+            )
+            self._preload_thread.start()
+            return True
 
     def _safe_ensure_loaded(self) -> None:
         try:
@@ -407,21 +431,8 @@ class Engine:
                 self._unload_locked()
 
             size, device = wanted
-            # device == "cuda" only happens once resolve_device() has already
-            # confirmed real GPU hardware via the system driver -- detection
-            # doesn't need our compute DLLs, only actual inference does. The
-            # only open question here is whether those DLLs are on disk.
-            if device == "cuda" and gpu_runtime.needs_download(gpu_available=True):
-                # Don't make this dictation wait out a ~1.3 GB download. Start
-                # it on its own detached thread and load CPU for now --
-                # _invalidate_for_gpu_ready() drops this CPU model once the
-                # download finishes, so the next ensure_loaded() call picks up
-                # CUDA instead of silently staying on CPU forever.
-                self._ensure_gpu_download_started()
-                device = "cpu"
-
             compute_type = "float16" if device == "cuda" else "int8"
-            self._set_state(LOADING, f"{size} on {device.upper()}")
+            self._set_state(LOADING, f"Preparing {_model_status_name(size, device)}")
             _register_cuda_dlls()
             self._download_with_progress(size, device)
             from faster_whisper import WhisperModel
@@ -437,7 +448,10 @@ class Engine:
                 # A GPU load can fail after detection succeeded (VRAM already
                 # spoken for, driver mismatch). Falling back beats failing.
                 if device != "cpu":
-                    self._set_state(LOADING, f"{size} on CPU (GPU load failed)")
+                    self._set_state(
+                        LOADING,
+                        f"Preparing {config.model_display_name(size)} · CPU (GPU unavailable)",
+                    )
                     self._model = WhisperModel(
                         size,
                         device="cpu",
@@ -452,7 +466,10 @@ class Engine:
 
             self._loaded_key = wanted
             self._last_used = time.monotonic()
-            self._set_state(READY, f"{wanted[0]} on {wanted[1].upper()}")
+            self._set_state(
+                READY,
+                f"{_model_status_name(wanted[0], wanted[1])} ready",
+            )
             return self._model
 
     def start_gpu_download(self) -> bool:
@@ -498,16 +515,23 @@ class Engine:
         """
         last_frac = 0.0
         last_emit = time.monotonic()
+        # gpu_runtime.download_and_install() now fetches all three packages
+        # concurrently, each on its own thread -- this callback can fire
+        # from any of them at once, so the throttle's own read-modify-write
+        # of last_frac/last_emit needs a lock it didn't need back when
+        # everything called in from one thread in sequence.
+        throttle_lock = threading.Lock()
 
         def on_bytes(n: int, total: int) -> None:
             nonlocal last_frac, last_emit
             if not total:
                 return
             frac = min(1.0, n / total)
-            now = time.monotonic()
-            if frac < 1.0 and frac - last_frac < 0.01 and now - last_emit < 0.1:
-                return
-            last_frac, last_emit = frac, now
+            with throttle_lock:
+                now = time.monotonic()
+                if frac < 1.0 and frac - last_frac < 0.01 and now - last_emit < 0.1:
+                    return
+                last_frac, last_emit = frac, now
             self._gpu_progress = frac
             self._on_gpu_status(True, frac)
 
@@ -572,7 +596,9 @@ class Engine:
             last_frac, last_emit = frac, now
             pct = int(frac * 100)
             self._set_state(
-                LOADING, f"{size} on {device.upper()} — downloading {pct}%", frac
+                LOADING,
+                f"Downloading {config.model_display_name(size)} · {device.upper()} · {pct}%",
+                frac,
             )
 
         _predownload_with_progress(size, on_bytes)
@@ -682,7 +708,10 @@ class Engine:
             finally:
                 self._last_used = time.monotonic()
                 if self._model is not None:
-                    self._set_state(READY, f"{self._loaded_key[0]} on {self._loaded_key[1].upper()}")
+                    self._set_state(
+                        READY,
+                        f"{_model_status_name(*self._loaded_key)} ready",
+                    )
             return text
 
 

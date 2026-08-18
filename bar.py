@@ -1,19 +1,16 @@
 """The floating bar: a small Windows 11 flyout centred above the taskbar.
 
-Drawn by hand rather than assembled from widgets. A DWM system backdrop
-(Mica/Acrylic) fights Qt's own translucency on a frameless tool window and the
-result is inconsistent, so this paints the Fluent material directly -- tint
-plus the fine noise that makes Acrylic read as a surface rather than a flat
-rectangle, an 8px flyout radius, a 1px light stroke, and an ambient shadow so
-the bar sits *above* the taskbar instead of on the wallpaper.
+Drawn by hand rather than assembled from widgets. A solid Fluent surface keeps
+the compact flyout legible in both light and dark mode, with an 8px radius, a
+1px light stroke, and an ambient shadow so the bar sits *above* the taskbar.
 
 Fluent gets its polish from material and geometry, not from lighting. There is
 no glow anywhere in this file on purpose: bloom is Apple's vocabulary, and it
 is what made an earlier version of this bar look like a media player.
 
-Everything is sized in logical pixels and the two cached bitmaps -- the
-shadow and the acrylic grain -- are rebuilt per device pixel ratio, so the bar
-is as crisp at 150% on a 4K panel as at 100% on a 1080p one.
+Everything is sized in logical pixels and the cached shadow is rebuilt per
+device pixel ratio, so the bar is as crisp at 150% on a 4K panel as at 100% on
+a 1080p one.
 
 **One instrument, three signals.** A single hairline runs the width of the
 bar and never moves. Twenty-one slim capsules grow out of it, so silence is an
@@ -94,7 +91,11 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtWidgets import QApplication, QWidget
-from theme import colors, system_is_dark
+from theme import (
+    colors,
+    resolve_dark,
+    system_is_dark,
+)
 
 # Fluent dark-theme surface values, matching a Windows 11 flyout.
 SURFACE = QColor(44, 44, 44, 246)
@@ -282,7 +283,7 @@ def system_accent(dark: bool = True) -> QColor:
     return accent
 
 
-# --- painted Acrylic --------------------------------------------------------
+# --- cached shadow ----------------------------------------------------------
 
 def _box_blur(a: np.ndarray, radius: int, axis: int) -> np.ndarray:
     k = 2 * radius + 1
@@ -293,32 +294,6 @@ def _box_blur(a: np.ndarray, radius: int, axis: int) -> np.ndarray:
     n = a.shape[axis]
     return (np.take(c, range(k, k + n), axis=axis)
             - np.take(c, range(0, n), axis=axis)) / k
-
-
-def _noise_tile(dpr: float, dark: bool = True) -> QPixmap:
-    """The fine grain in Fluent's Acrylic. Static and tiled, so it costs one
-    texture fill per frame rather than any per-pixel work.
-
-    Built at the display's device pixel ratio: the grain wants to be about one
-    *device* pixel, so on a 150% display a 1x tile would be stretched and turn
-    into visible mush rather than texture.
-    """
-    key = ("noise", round(dpr, 3), dark)
-    if key in _CACHE:
-        return _CACHE[key]
-    size = max(16, int(round(64 * dpr)))
-    rng = np.random.default_rng(7)          # fixed, so the grain never crawls
-    alpha = rng.integers(0, 11, (size, size)).astype(np.uint8)
-    buf = np.zeros((size, size, 4), dtype=np.uint8)
-    # Premultiplied light/dark grain keeps Acrylic neutral in either system mode.
-    for channel in range(3):
-        buf[..., channel] = alpha if dark else 0
-    buf[..., 3] = alpha
-    img = QImage(buf.tobytes(), size, size, QImage.Format_ARGB32_Premultiplied)
-    pixmap = QPixmap.fromImage(img.copy())
-    pixmap.setDevicePixelRatio(dpr)
-    _CACHE[key] = pixmap
-    return pixmap
 
 
 def _surface_path(
@@ -424,7 +399,7 @@ class Bar(QWidget):
     def __init__(self, settings):
         super().__init__(None)
         self._settings = settings
-        self._dark = system_is_dark()
+        self._dark = resolve_dark(settings.theme_mode)
         self._palette = colors(self._dark)
         self._state = "idle"
         self._detail = ""
@@ -505,7 +480,7 @@ class Bar(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setFixedSize(WIDTH, HEIGHT)
 
-        self._toast = Toast()
+        self._toast = Toast(self._dark)
         self._toast.clicked.connect(self._on_toast_clicked)
 
         # Everything about the entrance -- fade, scale and rise -- is driven
@@ -526,7 +501,7 @@ class Bar(QWidget):
         self._dwell_timer.timeout.connect(self._flush_pending)
 
     def set_theme(self, dark: bool) -> None:
-        """Apply the current Windows theme without interrupting dictation."""
+        """Apply the resolved light/dark appearance without interrupting dictation."""
         if dark == self._dark:
             return
         self._dark = dark
@@ -644,19 +619,25 @@ class Bar(QWidget):
         a short complete animation instead of a flicker.
 
         ``progress`` is only meaningful for "loading": a 0..1 fraction once a
-        first-time model download reports real bytes, switching the track
-        from the indeterminate sweep to a fill. Left ``None`` for an ordinary
-        cached load, which stays on the sweep.
+        first-time model download, a GPU-runtime download, or an update
+        download reports real bytes, switching the track from the
+        indeterminate sweep to a fill. Left ``None`` for an ordinary cached
+        load, which stays on the sweep.
         """
-        # A first-time speech-model download has two honest pieces of feedback:
-        # the bar becomes a real progress fill, while the attached label says
-        # why it is on screen. Cached loads keep the quieter sweep alone.
+        # A download in progress has two honest pieces of feedback: the bar
+        # becomes a real progress fill, while the attached label says why
+        # it's on screen -- and, since ``detail`` already carries a live
+        # percentage from the caller, keeps that label current on every
+        # call rather than freezing it at whatever it said the moment the
+        # toast first appeared. Cached loads (progress is None) keep the
+        # quieter sweep alone, no label.
         if state == "loading" and progress is not None:
+            label = detail or "Downloading…"
             if not self._loading_notice_active:
                 self._loading_notice_active = True
-                self._toast.show_message(
-                    "Downloading model…", self.pill_geometry(), dot_color=self._accent
-                )
+                self._toast.show_message(label, self.pill_geometry(), dot_color=self._accent)
+            else:
+                self._toast.update_text(label, self.pill_geometry())
         elif self._loading_notice_active:
             self._loading_notice_active = False
             self._toast.dismiss()
@@ -1171,8 +1152,8 @@ class Bar(QWidget):
         p.scale(scale, scale)
         p.translate(-cx, -cy)
 
-        # Both cached bitmaps are built for this display's scale factor, so
-        # the bar is as crisp at 150% on a 4K panel as at 100% on a 1080p one.
+        # The cached shadow is built for this display's scale factor, so the
+        # bar is as crisp at 150% on a 4K panel as at 100% on a 1080p one.
         dpr = self.devicePixelRatioF()
 
         p.setOpacity(self._reveal)
@@ -1191,7 +1172,6 @@ class Bar(QWidget):
         path = QPainterPath()
         path.addRoundedRect(pill, RADIUS, RADIUS)
         p.fillPath(path, self._palette["surface"])
-        p.fillPath(path, QBrush(_noise_tile(dpr, self._dark)))   # the grain in Acrylic
 
         # One external hairline around the union.  Drawing the two rounded
         # rectangles separately left a horizontal border through their join.
@@ -1245,11 +1225,13 @@ class Bar(QWidget):
         base_opacity = self._reveal
         p.setOpacity(base_opacity)
         # The card is intentionally only a tonal step away from the bar: dark
-        # mode uses a slightly blacker surface, light mode a slightly whiter
-        # one, matching Windows Settings groups without creating a new colour.
-        surface = QColor(35, 35, 35, 248) if self._dark else QColor(255, 255, 255, 250)
+        # mode uses a slightly blacker solid surface, light mode a slightly
+        # whiter one, matching Windows Settings groups without a new colour.
+        if self._dark:
+            surface = QColor(35, 35, 35)
+        else:
+            surface = QColor(255, 255, 255)
         p.fillPath(path, surface)
-        p.fillPath(path, QBrush(_noise_tile(dpr, self._dark)))
         # The shared outline is painted after the pill, around the union of
         # both shapes.  There is intentionally no card-only border here.
 
@@ -1549,7 +1531,7 @@ class Toast(QWidget):
 
     clicked = Signal()
 
-    def __init__(self):
+    def __init__(self, dark: bool | None = None) -> None:
         super().__init__(None)
         self.setWindowFlags(
             Qt.FramelessWindowHint
@@ -1564,7 +1546,7 @@ class Toast(QWidget):
 
         self._text = ""
         self._dot_color = ERROR
-        self._dark = system_is_dark()
+        self._dark = system_is_dark() if dark is None else dark
         self._font = QFont("Segoe UI Variable Text", 9)
         if not self._font.exactMatch():
             self._font = QFont("Segoe UI", 9)
@@ -1576,10 +1558,7 @@ class Toast(QWidget):
         self._dark = dark
         self.update()
 
-    def show_message(self, text: str, anchor_rect: QRect, dot_color: QColor = ERROR) -> None:
-        self._text = text
-        self._dot_color = dot_color
-
+    def _resize_for_text(self, text: str) -> None:
         metrics = QFontMetrics(self._font)
         chrome = self.PAD * 2 + 22  # dot + its left offset + the pill's own side padding
         if metrics.horizontalAdvance(text) + chrome <= self.MAX_W:
@@ -1594,6 +1573,11 @@ class Toast(QWidget):
             )
             h = max(self.HEIGHT, wrapped.height() + self.PAD * 2)
         self.setFixedSize(w, h)
+
+    def show_message(self, text: str, anchor_rect: QRect, dot_color: QColor = ERROR) -> None:
+        self._text = text
+        self._dot_color = dot_color
+        self._resize_for_text(text)
 
         end_pos = self._anchor_pos(anchor_rect)
         start_pos = QPoint(end_pos.x(), end_pos.y() + 10)
@@ -1612,6 +1596,25 @@ class Toast(QWidget):
             anim.setEndValue(end)
             anim.start()
 
+        self.update()
+
+    def update_text(self, text: str, anchor_rect: QRect | None = None) -> None:
+        """Refresh an already-visible toast's label in place -- no slide-in,
+        no re-fade, just the new text (and a resize if it changed width).
+
+        For a live percentage ("Downloading… 42%" -> "43%") ticking every
+        throttled progress callback, replaying show_message()'s full entrance
+        animation on every tick would look like the toast restarting itself
+        several times a second instead of one steady counter. A no-op if the
+        toast isn't visible -- the caller's own next show_message() call
+        establishes the first text instead.
+        """
+        if not self.isVisible() or text == self._text:
+            return
+        self._text = text
+        self._resize_for_text(text)
+        if anchor_rect is not None:
+            self.move(self._anchor_pos(anchor_rect))
         self.update()
 
     def mousePressEvent(self, event) -> None:
@@ -1662,7 +1665,6 @@ class Toast(QWidget):
         path.addRoundedRect(body, self.RADIUS, self.RADIUS)
         palette = colors(self._dark)
         p.fillPath(path, palette["surface"])
-        p.fillPath(path, QBrush(_noise_tile(self.devicePixelRatioF(), self._dark)))
         p.setPen(QPen(palette["stroke"], 1))
         p.drawPath(path)
 

@@ -7,6 +7,46 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.3-beta.1] - 2026-08-18
+
+### Added
+
+- A fresh install now opens Settings immediately and starts the default
+  **Small English** CPU model download in the background. Settings shows the
+  real progress, and holding the talk key while it downloads clearly says
+  that recording continues while the speech model finishes downloading.
+- Setup can download the optional NVIDIA GPU acceleration files during a
+  fresh install, with a real percentage progress bar in the installer. If
+  you skip it, Settings provides the explicit **Download now** path later.
+- Settings has a compact **Downloads & installs** control at the top. It
+  stays out of the way when idle, then smoothly expands to show model, GPU,
+  or update progress and takes you straight to the relevant setting.
+
+### Changed
+
+- Settings and the dictation bar now use an opaque Windows 11-style surface
+  with a System, Light, or Dark color choice. The old transparency option has
+  been removed.
+- GPU acceleration is only available when Dictate's optional runtime files
+  are actually installed. Until then, Dictate safely stays on CPU and
+  GPU-only choices are unavailable instead of implying that acceleration is
+  ready.
+- GPU runtime downloads inside Dictate now fetch their three packages in
+  parallel while keeping one smooth combined progress indicator.
+- Model names throughout the app are human-readable: for example, **Small
+  English** instead of `small.en`.
+- Uninstalling now asks whether to keep downloaded models, GPU files, and
+  Settings data, so a later reinstall does not needlessly download them again.
+
+### Fixed
+
+- The updater splash now remains visible until the updated Dictate window has
+  rendered, removing the blank waiting period during an in-app update.
+- Repeated first-run/model warm-up requests share one worker instead of
+  starting duplicate downloads.
+- The installer's GPU-progress handoff and uninstall cleanup recover from
+  brief Windows file locks instead of silently failing or leaving data behind.
+
 ## [1.0.2-beta.1] - 2026-08-18
 
 ### Added

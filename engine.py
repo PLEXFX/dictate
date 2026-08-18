@@ -354,13 +354,27 @@ class Engine:
         Changing the sleep timer is free. Changing model size or device means
         the resident model is now the wrong one, so it goes and the next
         utterance pays the reload.
+
+        Called synchronously from the UI thread (Settings' ``changed`` signal),
+        so this must never block. ``self._lock`` is held by ensure_loaded() for
+        the full length of a model/GPU download, which can run for minutes --
+        a blocking acquire here would freeze the UI thread for that whole
+        window. A non-blocking attempt keeps the UI responsive; if the lock is
+        busy, the settings are still recorded and the in-progress or next
+        ensure_loaded() call notices the mismatch and reloads on its own.
         """
-        with self._lock:
-            old = (self._settings.model_size, resolve_device(self._settings.device))
-            self._settings = settings
-            new = (settings.model_size, resolve_device(settings.device))
-            if old != new and self._model is not None:
+        old = (self._settings.model_size, resolve_device(self._settings.device))
+        self._settings = settings
+        new = (settings.model_size, resolve_device(settings.device))
+        if old == new:
+            return
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
+            if self._model is not None:
                 self._unload_locked()
+        finally:
+            self._lock.release()
 
     # --- model lifecycle ---
 

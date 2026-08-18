@@ -4,13 +4,11 @@ Hold a key anywhere in Windows, speak, release. The text appears in whatever
 you were typing in. Transcription runs on this machine — no account and no
 cloud transcription. Speech-model files may download the first time they are used.
 
-## What's new in v1.0.0-beta.1
+## What's new in v1.0.1-beta.1
 
-Clicking "Restart now" for an update no longer leaves the screen empty —
-a small progress window now shows while it installs. The floating bar also
-shows a **Downloading model…** progress label when a speech model needs to
-download. Releases are now a single file to download — no separate
-checksum file alongside the installer.
+Fixed a freeze: changing a setting while a speech model or GPU acceleration
+was downloading in the background used to lock up the app until the
+download finished. Settings now apply instantly, even mid-download.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete version history.
 Read [PRIVACY.md](PRIVACY.md) for exactly what Dictate processes and what its

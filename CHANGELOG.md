@@ -7,6 +7,14 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.1-beta.1] - 2026-08-18
+
+### Fixed
+
+- Changing a setting (like the speech model or GPU/CPU) while a model or GPU
+  download was already in progress could freeze the app until that download
+  finished. Settings now apply instantly even mid-download.
+
 ## [1.0.0-beta.1] - 2026-08-17
 
 ### Added

@@ -354,9 +354,15 @@ class EngineGpuDownloadTests(unittest.TestCase):
         eng._detail = ""
         eng._progress = None
         eng._on_state = lambda *a, **k: None
+        eng._gpu_download_thread = None
+        eng._gpu_downloading = False
+        eng._gpu_progress = None
+        eng._on_gpu_status = lambda *a, **k: None
         return eng
 
-    def test_downloads_gpu_runtime_when_cuda_selected_and_files_missing(self):
+    def test_starts_background_gpu_download_and_falls_back_to_cpu_when_files_missing(self):
+        """A dictation must never wait out the ~1.3 GB GPU download -- it
+        starts the download on its own thread and loads CPU immediately."""
         import engine
 
         eng = self._bare_engine("cuda")
@@ -364,13 +370,19 @@ class EngineGpuDownloadTests(unittest.TestCase):
         with (
             patch.object(engine, "resolve_device", return_value="cuda"),
             patch.object(engine.gpu_runtime, "needs_download", return_value=True),
-            patch.object(eng, "_download_gpu_runtime", side_effect=lambda: calls.append(1)),
+            patch.object(
+                eng, "_ensure_gpu_download_started", side_effect=lambda: calls.append(1)
+            ),
             patch.object(engine, "_register_cuda_dlls"),
             patch.object(eng, "_download_with_progress"),
-            patch("faster_whisper.WhisperModel", return_value=Mock()),
+            patch("faster_whisper.WhisperModel", return_value=Mock()) as mock_model,
         ):
             eng.ensure_loaded()
         self.assertEqual(calls, [1])
+        self.assertEqual(eng._loaded_key, ("tiny.en", "cpu"))
+        mock_model.assert_called_once_with(
+            "tiny.en", device="cpu", compute_type="int8", download_root=config.model_dir()
+        )
 
     def test_skips_gpu_download_when_files_already_present(self):
         import engine
@@ -380,13 +392,16 @@ class EngineGpuDownloadTests(unittest.TestCase):
         with (
             patch.object(engine, "resolve_device", return_value="cuda"),
             patch.object(engine.gpu_runtime, "needs_download", return_value=False),
-            patch.object(eng, "_download_gpu_runtime", side_effect=lambda: calls.append(1)),
+            patch.object(
+                eng, "_ensure_gpu_download_started", side_effect=lambda: calls.append(1)
+            ),
             patch.object(engine, "_register_cuda_dlls"),
             patch.object(eng, "_download_with_progress"),
             patch("faster_whisper.WhisperModel", return_value=Mock()),
         ):
             eng.ensure_loaded()
         self.assertEqual(calls, [])
+        self.assertEqual(eng._loaded_key, ("tiny.en", "cuda"))
 
     def test_skips_gpu_download_when_device_resolves_to_cpu(self):
         import engine
@@ -398,13 +413,84 @@ class EngineGpuDownloadTests(unittest.TestCase):
             patch.object(
                 engine.gpu_runtime, "needs_download", side_effect=AssertionError
             ),
-            patch.object(eng, "_download_gpu_runtime", side_effect=lambda: calls.append(1)),
+            patch.object(
+                eng, "_ensure_gpu_download_started", side_effect=lambda: calls.append(1)
+            ),
             patch.object(engine, "_register_cuda_dlls"),
             patch.object(eng, "_download_with_progress"),
             patch("faster_whisper.WhisperModel", return_value=Mock()),
         ):
             eng.ensure_loaded()
         self.assertEqual(calls, [])
+
+    def test_ensure_gpu_download_started_is_idempotent_while_running(self):
+        import engine
+
+        eng = self._bare_engine("cuda")
+        started = threading.Event()
+        release = threading.Event()
+
+        def fake_download(on_progress=None):
+            started.set()
+            release.wait(timeout=2)
+            return True
+
+        with patch.object(engine.gpu_runtime, "download_and_install", side_effect=fake_download):
+            eng._ensure_gpu_download_started()
+            self.assertTrue(started.wait(timeout=2))
+            first_thread = eng._gpu_download_thread
+            eng._ensure_gpu_download_started()
+            self.assertIs(eng._gpu_download_thread, first_thread)
+            release.set()
+            first_thread.join(timeout=2)
+
+    def test_run_gpu_download_reports_status_and_invalidates_cpu_model_on_success(self):
+        import engine
+
+        eng = self._bare_engine("cuda")
+        eng._model = Mock()
+        eng._loaded_key = ("tiny.en", "cpu")
+        statuses = []
+        eng._on_gpu_status = lambda downloading, progress=None: statuses.append(
+            (downloading, progress)
+        )
+        with (
+            patch.object(engine.gpu_runtime, "download_and_install", return_value=True),
+            patch.object(engine, "resolve_device", return_value="cuda"),
+            patch.object(engine.gpu_runtime, "needs_download", return_value=False),
+        ):
+            eng._run_gpu_download()
+        self.assertFalse(eng._gpu_downloading)
+        self.assertIsNone(eng._gpu_progress)
+        self.assertEqual(statuses[-1], (False, None))
+        self.assertIsNone(eng._model)  # invalidated so the next load lands on CUDA
+
+    def test_start_gpu_download_no_op_without_real_gpu_or_when_already_present(self):
+        import engine
+
+        eng = self._bare_engine("cuda")
+        with (
+            patch.object(engine, "cuda_available", return_value=False),
+            patch.object(eng, "_ensure_gpu_download_started") as mock_start,
+        ):
+            self.assertFalse(eng.start_gpu_download())
+            mock_start.assert_not_called()
+
+        with (
+            patch.object(engine, "cuda_available", return_value=True),
+            patch.object(engine.gpu_runtime, "needs_download", return_value=False),
+            patch.object(eng, "_ensure_gpu_download_started") as mock_start,
+        ):
+            self.assertFalse(eng.start_gpu_download())
+            mock_start.assert_not_called()
+
+        with (
+            patch.object(engine, "cuda_available", return_value=True),
+            patch.object(engine.gpu_runtime, "needs_download", return_value=True),
+            patch.object(eng, "_ensure_gpu_download_started") as mock_start,
+        ):
+            self.assertTrue(eng.start_gpu_download())
+            mock_start.assert_called_once()
 
 
 class ModelStorageTests(unittest.TestCase):
@@ -692,6 +778,43 @@ class ThemeTests(unittest.TestCase):
         self.assertGreater(palette["surface"].lightness(), 200)
         self.assertLess(palette["text"].lightness(), 40)
 
+    def test_transparency_effects_on_reads_nonzero_dword(self):
+        key = MagicMock()
+        with (
+            patch.object(theme.winreg, "OpenKey", return_value=key),
+            patch.object(theme.winreg, "QueryValueEx", return_value=(1, 4)),
+        ):
+            self.assertTrue(theme.transparency_enabled())
+
+    def test_transparency_effects_off_reads_zero_dword(self):
+        key = MagicMock()
+        with (
+            patch.object(theme.winreg, "OpenKey", return_value=key),
+            patch.object(theme.winreg, "QueryValueEx", return_value=(0, 4)),
+        ):
+            self.assertFalse(theme.transparency_enabled())
+
+    def test_transparency_effects_falls_back_to_off_when_unreadable(self):
+        with patch.object(theme.winreg, "OpenKey", side_effect=OSError):
+            self.assertFalse(theme.transparency_enabled())
+
+    def test_theme_watcher_emits_transparency_changed_independently_of_dark(self):
+        watcher = theme.ThemeWatcher.__new__(theme.ThemeWatcher)
+        watcher._dark = True
+        watcher._transparent = False
+        changed = []
+        transparency_changed = []
+        watcher.changed = Mock(emit=lambda v: changed.append(v))
+        watcher.transparency_changed = Mock(emit=lambda v: transparency_changed.append(v))
+        with (
+            patch.object(theme, "system_is_dark", return_value=True),
+            patch.object(theme, "transparency_enabled", return_value=True),
+        ):
+            watcher._check()
+        self.assertEqual(changed, [])
+        self.assertEqual(transparency_changed, [True])
+        self.assertTrue(watcher.transparent)
+
 
 class HotkeyTests(unittest.TestCase):
     def _hotkeys(
@@ -909,6 +1032,8 @@ class PttWarmStartTests(unittest.TestCase):
         app.hotkeys = Mock()
         app.engine = Mock()
         app.tray = Mock()
+        app.act_check_update = Mock()
+        app.updater = Mock()
         app.settings_window = None
         return app, main
 
@@ -955,6 +1080,27 @@ class PttWarmStartTests(unittest.TestCase):
         app.live_preview_timer.stop.assert_called_once()
         self.assertEqual(app._preview_generation, 1)
         app.bar.update_settings.assert_called_once_with(disabled)
+
+    def test_toggling_auto_update_syncs_updater_and_tray_action_live(self):
+        """Every way of triggering an update check -- Settings' own button,
+        the tray action, the console command -- must agree with the toggle.
+        Settings' button already disables itself reactively; the tray
+        action has no such polling loop, so _apply_settings has to push the
+        new enabled state to it directly the moment the toggle flips."""
+        from dataclasses import replace
+
+        app, _main = self._app()
+        disabled = replace(app.settings, auto_update_enabled=False)
+        app._apply_settings(disabled)
+        app.updater.set_enabled.assert_called_once_with(False)
+        app.act_check_update.setEnabled.assert_called_once_with(False)
+
+        app.updater.reset_mock()
+        app.act_check_update.reset_mock()
+        enabled = replace(disabled, auto_update_enabled=True)
+        app._apply_settings(enabled)
+        app.updater.set_enabled.assert_called_once_with(True)
+        app.act_check_update.setEnabled.assert_called_once_with(True)
 
     def test_enabling_enhanced_preview_reports_hardware_limits(self):
         from dataclasses import replace
@@ -1595,6 +1741,61 @@ class UiTests(unittest.TestCase):
             ["dictate-tests", "-platform", "offscreen"]
         )
 
+    def test_stylesheet_appends_transparent_root_only_when_requested(self):
+        import settings_window
+
+        opaque = settings_window.stylesheet(dark=True, transparent=False)
+        glass = settings_window.stylesheet(dark=True, transparent=True)
+        self.assertNotIn("QWidget#root { background: transparent; }", opaque)
+        self.assertIn("QWidget#root { background: transparent; }", glass)
+        # The override is appended, not substituted -- every card/header
+        # rule from the base dark stylesheet must still be present.
+        self.assertIn("QFrame#card", glass)
+
+    def test_apply_native_chrome_requests_acrylic_backdrop_when_transparent(self):
+        import settings_window
+
+        calls = []
+
+        class FakeDwm:
+            def DwmSetWindowAttribute(self, hwnd, attribute, value_ptr, size):
+                calls.append(attribute)
+                return 0
+
+        with patch.object(settings_window.ctypes, "windll", MagicMock(dwmapi=FakeDwm())):
+            settings_window.apply_native_chrome(12345, dark=True, transparent=True)
+        self.assertIn(settings_window.DWMWA_SYSTEMBACKDROP_TYPE, calls)
+
+        calls.clear()
+        with patch.object(settings_window.ctypes, "windll", MagicMock(dwmapi=FakeDwm())):
+            settings_window.apply_native_chrome(12345, dark=True, transparent=False)
+        self.assertIn(settings_window.DWMWA_SYSTEMBACKDROP_TYPE, calls)
+
+    def test_settings_window_sets_translucent_background_when_transparency_is_on(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=False),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+            patch.object(settings_window, "transparency_enabled", return_value=True),
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+            self.assertTrue(window.testAttribute(settings_window.Qt.WA_TranslucentBackground))
+            self.assertIn(
+                "QWidget#root { background: transparent; }", window.styleSheet()
+            )
+        window.close()
+
     def test_settings_first_run_and_privacy_views_construct(self):
         from PySide6.QtWidgets import QLabel
 
@@ -1810,6 +2011,133 @@ class UiTests(unittest.TestCase):
         ):
             window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
         self.assertIn("downloads", window.device_desc_label.text().lower())
+        window.close()
+
+    def test_gpu_download_row_hidden_when_files_already_present(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+
+            def preload(self):
+                pass
+
+            def start_gpu_download(self):
+                raise AssertionError("should not be called when nothing needs downloading")
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+            patch.object(settings_window.gpu_runtime, "needs_download", return_value=False),
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+        self.assertTrue(window.gpu_download_row.isHidden())
+        self.assertTrue(window.gpu_download_progress_row.isHidden())
+        window.close()
+
+    def test_gpu_download_button_click_starts_download_and_disables_itself(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+            start_calls = 0
+
+            def preload(self):
+                pass
+
+            def start_gpu_download(self):
+                DummyEngine.start_calls += 1
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+            patch.object(settings_window.gpu_runtime, "needs_download", return_value=True),
+        ):
+            window = settings_window.SettingsWindow(
+                config.Settings(device="cpu"), DummyEngine()
+            )
+        # device is "cpu" so window construction itself must not have
+        # auto-started a download -- only the explicit button does that here.
+        self.assertEqual(DummyEngine.start_calls, 0)
+        self.assertFalse(window.gpu_download_row.isHidden())
+        self.assertTrue(window.gpu_download_btn.isEnabled())
+
+        window.gpu_download_btn.click()
+        self.assertEqual(DummyEngine.start_calls, 1)
+        self.assertFalse(window.gpu_download_btn.isEnabled())
+        self.assertEqual(window.gpu_download_btn.text(), "Downloading…")
+        window.close()
+
+    def test_selecting_gpu_processing_starts_the_download_automatically(self):
+        """Bullet #2's "on-demand" path also has to fire just from choosing
+        GPU in Processing, not only from the dedicated button."""
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+            start_calls = 0
+
+            def preload(self):
+                pass
+
+            def start_gpu_download(self):
+                DummyEngine.start_calls += 1
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+            patch.object(settings_window.gpu_runtime, "needs_download", return_value=True),
+        ):
+            window = settings_window.SettingsWindow(
+                config.Settings(device="cpu"), DummyEngine()
+            )
+            self.assertEqual(DummyEngine.start_calls, 0)
+            window.device_box.setCurrentIndex(window.device_box.findData("cuda"))
+        self.assertEqual(DummyEngine.start_calls, 1)
+        window.close()
+
+    def test_refresh_status_shows_live_gpu_download_progress(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.READY
+            active_device = "cpu"
+            last_status = (engine.READY, "tiny.en on CPU", None)
+            gpu_status = (True, 0.55)
+
+            def preload(self):
+                pass
+
+            def start_gpu_download(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+            patch.object(settings_window.gpu_runtime, "needs_download", return_value=True),
+        ):
+            window = settings_window.SettingsWindow(
+                config.Settings(device="cpu"), DummyEngine()
+            )
+            window.refresh_status()
+        self.assertFalse(window.gpu_download_progress_row.isHidden())
+        self.assertFalse(window.gpu_download_progress.isHidden())
+        self.assertEqual(window.gpu_download_progress.value(), 55)
+        self.assertFalse(window.gpu_download_btn.isEnabled())
+        self.assertIn("55%", window.gpu_download_desc_label.text())
         window.close()
 
     def test_privacy_navigates_in_place_instead_of_opening_a_window(self):

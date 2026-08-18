@@ -21,14 +21,34 @@ def system_is_dark() -> bool:
         return True
 
 
+def transparency_enabled() -> bool:
+    """Windows Settings > Personalization > Colors > "Transparency effects".
+
+    Same key family as system_is_dark(); missing/unreadable falls back to
+    False (solid light/dark) rather than guessing a translucent window onto
+    a system that never asked for one.
+    """
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        ) as key:
+            enabled, _ = winreg.QueryValueEx(key, "EnableTransparency")
+        return bool(enabled)
+    except OSError:
+        return False
+
+
 class ThemeWatcher(QObject):
     """Poll the Windows setting lightly so an open app follows changes too."""
 
     changed = Signal(bool)
+    transparency_changed = Signal(bool)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._dark = system_is_dark()
+        self._transparent = transparency_enabled()
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._check)
@@ -38,11 +58,19 @@ class ThemeWatcher(QObject):
     def dark(self) -> bool:
         return self._dark
 
+    @property
+    def transparent(self) -> bool:
+        return self._transparent
+
     def _check(self) -> None:
         dark = system_is_dark()
         if dark != self._dark:
             self._dark = dark
             self.changed.emit(dark)
+        transparent = transparency_enabled()
+        if transparent != self._transparent:
+            self._transparent = transparent
+            self.transparency_changed.emit(transparent)
 
 
 def colors(dark: bool) -> dict[str, QColor]:

@@ -287,14 +287,24 @@ class Engine:
         self,
         settings,
         on_state: Optional[Callable[[str, str, Optional[float]], None]] = None,
+        on_gpu_status: Optional[Callable[[bool, Optional[float]], None]] = None,
     ):
         self._settings = settings
         self._on_state = on_state or (lambda state, detail, progress=None: None)
+        self._on_gpu_status = on_gpu_status or (lambda downloading, progress=None: None)
 
         self._model = None
         self._loaded_key: tuple[str, str] | None = None  # (model_size, device)
         self._lock = threading.RLock()
         self._last_used = time.monotonic()
+
+        # GPU-runtime download state, tracked independently of the model's own
+        # LOADING/READY state -- see ensure_loaded()'s cuda branch. A dictation
+        # must never wait out this download, so it runs on its own detached
+        # thread and is only ever polled, never awaited.
+        self._gpu_download_thread: Optional[threading.Thread] = None
+        self._gpu_downloading = False
+        self._gpu_progress: Optional[float] = None
         self._state = UNLOADED
         self._detail = ""
         self._progress: Optional[float] = None
@@ -397,14 +407,21 @@ class Engine:
                 self._unload_locked()
 
             size, device = wanted
-            compute_type = "float16" if device == "cuda" else "int8"
-            self._set_state(LOADING, f"{size} on {device.upper()}")
             # device == "cuda" only happens once resolve_device() has already
             # confirmed real GPU hardware via the system driver -- detection
             # doesn't need our compute DLLs, only actual inference does. The
             # only open question here is whether those DLLs are on disk.
             if device == "cuda" and gpu_runtime.needs_download(gpu_available=True):
-                self._download_gpu_runtime()
+                # Don't make this dictation wait out a ~1.3 GB download. Start
+                # it on its own detached thread and load CPU for now --
+                # _invalidate_for_gpu_ready() drops this CPU model once the
+                # download finishes, so the next ensure_loaded() call picks up
+                # CUDA instead of silently staying on CPU forever.
+                self._ensure_gpu_download_started()
+                device = "cpu"
+
+            compute_type = "float16" if device == "cuda" else "int8"
+            self._set_state(LOADING, f"{size} on {device.upper()}")
             _register_cuda_dlls()
             self._download_with_progress(size, device)
             from faster_whisper import WhisperModel
@@ -427,24 +444,57 @@ class Engine:
                         compute_type="int8",
                         download_root=config.model_dir(),
                     )
-                    wanted = (size, "cpu")
+                    device = "cpu"
                 else:
                     raise
+
+            wanted = (size, device)
 
             self._loaded_key = wanted
             self._last_used = time.monotonic()
             self._set_state(READY, f"{wanted[0]} on {wanted[1].upper()}")
             return self._model
 
-    def _download_gpu_runtime(self) -> None:
+    def start_gpu_download(self) -> bool:
+        """Public, explicit trigger for Settings' own "Download now" button --
+        for someone who skipped the GPU task at install time and wants the
+        files fetched without switching Processing to GPU first.
+
+        Returns False (no-op) when there's no real GPU, or the files are
+        already on disk -- both cheap, side-effect-free checks the caller can
+        use to decide whether to show progress at all.
+        """
+        if not cuda_available() or not gpu_runtime.needs_download(gpu_available=True):
+            return False
+        self._ensure_gpu_download_started()
+        return True
+
+    def _ensure_gpu_download_started(self) -> None:
+        """Kick off the CUDA compute-DLL download on its own detached thread.
+
+        Idempotent -- a second call while one is already running (from a
+        dictation's own ensure_loaded() racing the Settings button, say) just
+        returns, since gpu_runtime.download_and_install() builds the whole
+        tree in a temp dir and only swaps it in atomically at the end, so
+        there's nothing a second concurrent run would add.
+        """
+        if self._gpu_download_thread is not None and self._gpu_download_thread.is_alive():
+            return
+        self._gpu_downloading = True
+        self._gpu_progress = 0.0
+        self._on_gpu_status(True, 0.0)
+        self._gpu_download_thread = threading.Thread(
+            target=self._run_gpu_download, daemon=True
+        )
+        self._gpu_download_thread.start()
+
+    def _run_gpu_download(self) -> None:
         """Fetch the CUDA compute DLLs a Core-only install doesn't ship with.
 
-        Only reached once resolve_device() has already confirmed real GPU
-        hardware -- see the call site's comment. A failed download just
-        leaves needs_download() true again for next time; the GPU-load
-        try/except a few lines below this in ensure_loaded() still catches
-        the resulting CTranslate2 failure and falls back to CPU either way,
-        so nothing here can turn into a hard failure.
+        Runs off the model lock entirely -- a dictation on CPU must be able
+        to proceed while this is in flight. A failed download just leaves
+        needs_download() true again for next time; _invalidate_for_gpu_ready()
+        below only ever un-sticks a *successful* download.
         """
         last_frac = 0.0
         last_emit = time.monotonic()
@@ -458,10 +508,46 @@ class Engine:
             if frac < 1.0 and frac - last_frac < 0.01 and now - last_emit < 0.1:
                 return
             last_frac, last_emit = frac, now
-            pct = int(frac * 100)
-            self._set_state(LOADING, f"GPU acceleration — downloading {pct}%", frac)
+            self._gpu_progress = frac
+            self._on_gpu_status(True, frac)
 
-        gpu_runtime.download_and_install(on_bytes)
+        try:
+            gpu_runtime.download_and_install(on_bytes)
+        finally:
+            self._gpu_downloading = False
+            self._gpu_progress = None
+            self._on_gpu_status(False, None)
+            self._invalidate_for_gpu_ready()
+
+    def _invalidate_for_gpu_ready(self) -> None:
+        """Drop a resident CPU model once the GPU runtime finishes downloading
+        successfully and the user still wants GPU, so the next
+        ensure_loaded() reloads onto CUDA instead of staying on CPU forever.
+
+        Non-blocking on purpose, same reasoning as update_settings(): this
+        runs at the tail of the download thread, not the UI thread, but a
+        transcription could be mid-flight holding the lock right now and
+        this must not make the download thread wait on it either.
+        """
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
+            wanted_device = resolve_device(self._settings.device)
+            if (
+                wanted_device == "cuda"
+                and self._loaded_key is not None
+                and self._loaded_key[1] != "cuda"
+                and not gpu_runtime.needs_download(gpu_available=True)
+            ):
+                self._unload_locked()
+        finally:
+            self._lock.release()
+
+    @property
+    def gpu_status(self) -> tuple[bool, Optional[float]]:
+        """(downloading, progress) for a UI that polls reactively, same
+        pattern as last_status. progress is None while indeterminate."""
+        return (self._gpu_downloading, self._gpu_progress)
 
     def _download_with_progress(self, size: str, device: str) -> None:
         """Report real percentage while a first-time model download runs.

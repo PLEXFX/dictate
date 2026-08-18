@@ -214,6 +214,7 @@ class Bridge(QObject):
     talk_cancelled = Signal()  # a locked recording was abandoned, audio discarded
     open_settings = Signal()
     engine_state = Signal(str, str, object)  # state, detail, progress (0..1 or None)
+    gpu_status = Signal(bool, object)  # downloading, progress (0..1 or None)
     finished = Signal(str, str)  # state, detail
     command = Signal(str)  # a line typed into the console, already normalized
     update_available = Signal(str, str)  # version, release notes -- nothing downloaded yet
@@ -250,11 +251,14 @@ class App:
         self.mic = audio_mod.MicCapture(self.settings.input_device)
         self.meter = audio_mod.SpectrumMeter(bands=bar_mod.HALF_BANDS)
         self.engine = engine_mod.Engine(
-            self.settings, on_state=self.bridge.engine_state.emit
+            self.settings,
+            on_state=self.bridge.engine_state.emit,
+            on_gpu_status=self.bridge.gpu_status.emit,
         )
         self.preview_engine = engine_mod.PreviewEngine(self.settings)
         self.bar = Bar(self.settings)
         self.theme_watcher.changed.connect(self._on_theme_changed)
+        self.theme_watcher.transparency_changed.connect(self._on_transparency_changed)
         self.cues = sounds_mod.Cues(self.settings.sound_cues)
         self.settings_window: SettingsWindow | None = None
         self._busy = False
@@ -328,6 +332,7 @@ class App:
         self.bridge.talk_cancelled.connect(self._cancel_listening)
         self.bridge.open_settings.connect(self._show_settings)
         self.bridge.engine_state.connect(self._on_engine_state)
+        self.bridge.gpu_status.connect(self._on_gpu_status)
         self.bridge.finished.connect(self._on_finished)
         self.bridge.command.connect(self._on_command)
         self.bridge.update_available.connect(self._on_update_available)
@@ -363,6 +368,16 @@ class App:
 
         if not self.settings.sleep_enabled:
             self.engine.preload()
+        elif self.settings.device in ("cuda", "auto"):
+            # Sleep is on, so the model itself stays lazily loaded, but a
+            # GPU preference already chosen -- by a prior Settings visit, or
+            # the installer's own "gpuaccel" task seeding a fresh install --
+            # shouldn't wait for a first dictation to discover the one-time
+            # ~1.3 GB runtime download is needed. Start it the moment Dictate
+            # launches, which for a fresh install is also the moment Setup's
+            # own "Finish" launches the app. A no-op when the files are
+            # already on disk or there's no real GPU.
+            self.engine.start_gpu_download()
         if self.settings.always_visible:
             self.bar.set_state("idle")
             self.bar.show_bar()
@@ -384,6 +399,15 @@ class App:
         self.bar.set_theme(dark)
         if self.settings_window is not None and self.settings_window.isVisible():
             self.settings_window.set_theme(dark)
+
+    def _on_transparency_changed(self, _transparent: bool) -> None:
+        # The bar keeps its own hand-painted translucent surface regardless
+        # of this OS toggle (see theme.colors()) -- only Settings' real,
+        # OS-framed window gets a true DWM Acrylic backdrop. set_theme()
+        # re-reads transparency_enabled() itself, so passing the current
+        # dark state through is enough to pick up the new state too.
+        if self.settings_window is not None and self.settings_window.isVisible():
+            self.settings_window.set_theme(self.theme_watcher.dark)
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self.icon)
@@ -414,9 +438,18 @@ class App:
         menu.addAction(self.act_undo)
         menu.addSeparator()
 
-        act_check_update = QAction("Check for updates", menu)
-        act_check_update.triggered.connect(lambda: self.updater.check_now(silent=False))
-        menu.addAction(act_check_update)
+        # Enabled state mirrors auto_update_enabled (kept live in
+        # _apply_settings) rather than always being clickable -- Settings'
+        # own "Check for updates" button already disables itself for the
+        # same reason: the toggle's own description promises Dictate "never
+        # contacts GitHub about updates" when off, and check_now() already
+        # no-ops silently then. A clickable action that silently does
+        # nothing reads as broken; a disabled one reads as exactly what it
+        # is.
+        self.act_check_update = QAction("Check for updates", menu)
+        self.act_check_update.setEnabled(self.settings.auto_update_enabled)
+        self.act_check_update.triggered.connect(lambda: self.updater.check_now(silent=False))
+        menu.addAction(self.act_check_update)
         menu.addSeparator()
 
         act_quit = QAction("Quit", menu)
@@ -821,6 +854,14 @@ class App:
         if self.settings_window:
             self.settings_window.refresh_status()
 
+    def _on_gpu_status(self, _downloading: bool, _progress: float | None) -> None:
+        """A background GPU-runtime download reported progress. This never
+        touches the bar -- a dictation on CPU is fully usable while this
+        runs, so the only place it's worth showing live is Settings' own
+        dedicated GPU row, if that window happens to be open."""
+        if self.settings_window:
+            self.settings_window.refresh_status()
+
     def _show_settings(self) -> None:
         if self.settings_window is None:
             self.settings_window = SettingsWindow(self.settings, self.engine, self.updater)
@@ -879,6 +920,7 @@ class App:
         self.settings = settings
         if settings.auto_update_enabled != old.auto_update_enabled:
             self.updater.set_enabled(settings.auto_update_enabled)
+            self.act_check_update.setEnabled(settings.auto_update_enabled)
         if settings.live_preview_enabled != old.live_preview_enabled:
             self._preview_generation += 1
             if settings.live_preview_enabled and self._dictation_active:

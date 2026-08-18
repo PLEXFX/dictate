@@ -6,9 +6,14 @@
 ; an NVIDIA card (NvidiaCardDetected below), offers a "gpuaccel" task that
 ; just seeds a preference in a fresh settings.json. The actual CUDA files
 ; are fetched the same way either way: gpu_runtime.py's on-demand PyPI
-; download, the first time the app actually needs them, with its own
-; progress UI in Settings. No card, no task shown, no download ever
-; attempted -- resolve_device() (engine.py) falls back to CPU regardless.
+; download, with its own progress UI in Settings -- and Dictate now starts
+; that download the moment it launches with device=cuda/auto already set
+; (main.py's own startup, right after this script's own "Launch Dictate" on
+; Finish), not deferred until the first actual dictation. No card, no task
+; shown, no download ever attempted -- resolve_device() (engine.py) falls
+; back to CPU regardless, and a dictation never waits on this download
+; either way: engine.py's ensure_loaded() runs it on its own background
+; thread and transcribes on CPU in the meantime.
 ;
 ; Build with (from the installer\ folder):
 ;   ISCC.exe dictate.iss
@@ -18,7 +23,7 @@
 ;   ISCC.exe dictate.iss /DMyAppVersion=0.1.0-beta.3
 
 #ifndef MyAppVersion
-#define MyAppVersion "1.0.1-beta.1"
+#define MyAppVersion "1.0.2-beta.1"
 #endif
 #define MyAppName "Dictate"
 #define MyAppPublisher "PLEXFX"
@@ -57,7 +62,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "autoupdate"; Description: "Automatically check GitHub for new versions of Dictate"
-Name: "gpuaccel"; Description: "Enable GPU acceleration (NVIDIA card detected) - downloads automatically the first time it's needed"; Check: NvidiaCardDetected
+Name: "gpuaccel"; Description: "Enable GPU acceleration (NVIDIA card detected) - downloads automatically in the background as soon as Dictate starts"; Check: NvidiaCardDetected
 
 [Files]
 Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -123,8 +128,9 @@ begin
   if NvidiaCardDetected() then
     GpuInfoLabel.Caption :=
       'NVIDIA graphics card detected. Check the box above to enable GPU ' +
-      'acceleration -- the files download automatically the first time ' +
-      'Dictate actually uses it.'
+      'acceleration -- the files download automatically in the ' +
+      'background as soon as Dictate starts. Dictation still works on ' +
+      'CPU the whole time it downloads.'
   else
     GpuInfoLabel.Caption := 'No NVIDIA graphics card detected -- Dictate will run on CPU.';
 end;

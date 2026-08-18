@@ -4,11 +4,13 @@ Hold a key anywhere in Windows, speak, release. The text appears in whatever
 you were typing in. Transcription runs on this machine — no account and no
 cloud transcription. Speech-model files may download the first time they are used.
 
-## What's new in v1.0.1-beta.1
+## What's new in v1.0.2-beta.1
 
-Fixed a freeze: changing a setting while a speech model or GPU acceleration
-was downloading in the background used to lock up the app until the
-download finished. Settings now apply instantly, even mid-download.
+GPU acceleration now downloads automatically in the background — at launch
+if chosen during install, or the moment you pick it in Settings — with a
+live progress row and a "Download now" option for anyone who skipped it.
+Dictation stays fully usable on CPU while it downloads. The Settings window
+also now supports Windows' own Acrylic transparency effect.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete version history.
 Read [PRIVACY.md](PRIVACY.md) for exactly what Dictate processes and what its

@@ -6,4 +6,4 @@ step here that reads one of those and drives the others automatically, so
 all three need updating together when cutting a new version.
 """
 
-VERSION = "1.0.1-beta.1"
+VERSION = "1.0.2-beta.1"

@@ -43,7 +43,7 @@ import hotkeys as hotkeys_mod
 import startup as startup_mod
 import updater as updater_mod
 from bar import ENTER_MS, EXIT_MS, FLUENT_ACCELERATE, FLUENT_DECELERATE
-from theme import system_is_dark
+from theme import system_is_dark, transparency_enabled
 from toggle import ToggleSwitch
 from version import VERSION
 
@@ -295,19 +295,40 @@ MODEL_LABELS = {
 }
 
 
-def stylesheet(dark: bool | None = None) -> str:
-    return DARK_STYLE if (system_is_dark() if dark is None else dark) else LIGHT_STYLE
+# A translucent #root doesn't touch any card, header, or control -- those
+# keep their own near-opaque backgrounds from DARK_STYLE/LIGHT_STYLE above,
+# same as the real Windows 11 Settings app: Mica/Acrylic blurs the gaps
+# between cards, not the cards themselves. Appended after the base
+# stylesheet so it overrides just the one #root rule.
+_TRANSPARENT_ROOT_OVERRIDE = "\nQWidget#root { background: transparent; }\n"
+
+
+def stylesheet(dark: bool | None = None, transparent: bool | None = None) -> str:
+    base = DARK_STYLE if (system_is_dark() if dark is None else dark) else LIGHT_STYLE
+    if transparency_enabled() if transparent is None else transparent:
+        return base + _TRANSPARENT_ROOT_OVERRIDE
+    return base
 
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWA_SYSTEMBACKDROP_TYPE = 38
 DWMWCP_ROUND = 2
+DWMSBT_NONE = 1
+DWMSBT_TRANSIENTWINDOW = 3  # Acrylic -- the public enum has no plain "glass"
 
 
-def apply_native_chrome(hwnd: int, dark: bool | None = None) -> None:
-    """Dark title bar and Windows 11 rounded corners on a normal window.
+def apply_native_chrome(
+    hwnd: int, dark: bool | None = None, transparent: bool | None = None
+) -> None:
+    """Dark title bar, rounded corners, and (when Windows' own "Transparency
+    effects" setting is on) an Acrylic system backdrop on a normal window.
 
     These are the same DWM attributes the shell uses. Silently ignored on
-    builds that predate them, so no version check is needed.
+    builds that predate them (DWMWA_SYSTEMBACKDROP_TYPE needs Windows 11), so
+    no version check is needed -- DwmSetWindowAttribute just fails and the
+    window keeps its solid QSS-painted background from stylesheet() instead,
+    exactly the "fall back to standard light or dark mode" Windows itself
+    does when a caller asks for a backdrop it can't provide.
     """
     try:
         dwm = ctypes.windll.dwmapi
@@ -318,6 +339,11 @@ def apply_native_chrome(hwnd: int, dark: bool | None = None) -> None:
         corner = ctypes.c_int(DWMWCP_ROUND)
         dwm.DwmSetWindowAttribute(
             hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(corner), ctypes.sizeof(corner)
+        )
+        want_transparent = transparency_enabled() if transparent is None else transparent
+        backdrop = ctypes.c_int(DWMSBT_TRANSIENTWINDOW if want_transparent else DWMSBT_NONE)
+        dwm.DwmSetWindowAttribute(
+            hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(backdrop), ctypes.sizeof(backdrop)
         )
     except Exception:
         pass
@@ -1148,6 +1174,7 @@ class SettingsWindow(QWidget):
 
         self.setObjectName("root")
         self.setWindowTitle("Dictate settings")
+        self.setAttribute(Qt.WA_TranslucentBackground, transparency_enabled())
         self.setStyleSheet(stylesheet())
         self.setMinimumSize(620, 520)
         self.resize(660, 560)
@@ -1156,12 +1183,23 @@ class SettingsWindow(QWidget):
 
         self._build()
         self._paint_chevron(system_is_dark())
+        # winId() forces the native handle into existence, which is what
+        # apply_native_chrome() needs -- previously this window's first open
+        # had no dark title bar or rounded corners at all, only gaining them
+        # after set_theme() ran once from a live Windows theme change. Not
+        # something this pass set out to fix, but the same gap would have
+        # silently swallowed the new Acrylic backdrop below too.
+        apply_native_chrome(int(self.winId()))
         self._loading = False
 
     def set_theme(self, dark: bool) -> None:
-        """Refresh an already-open Settings window after Windows changes theme."""
-        self.setStyleSheet(stylesheet(dark))
-        apply_native_chrome(int(self.winId()), dark)
+        """Refresh an already-open Settings window after Windows changes
+        theme OR its separate "Transparency effects" setting -- both are
+        cheap to recompute together, so one refresh call covers either."""
+        transparent = transparency_enabled()
+        self.setAttribute(Qt.WA_TranslucentBackground, transparent)
+        self.setStyleSheet(stylesheet(dark, transparent))
+        apply_native_chrome(int(self.winId()), dark, transparent)
         self._paint_chevron(dark)
 
     def _paint_chevron(self, dark: bool) -> None:
@@ -1389,6 +1427,29 @@ class SettingsWindow(QWidget):
         device_row = _card("Processing", device_desc, self.device_box)
         self.device_desc_label = device_row.findChild(QLabel, "desc")
 
+        # A dedicated call-to-action for GPU acceleration, separate from the
+        # Processing dropdown above: for someone who skipped the installer's
+        # GPU task and never touches Processing at all, this is the only way
+        # to fetch the files ahead of time instead of discovering the
+        # download mid-dictation. Selecting GPU in the dropdown above starts
+        # the same download automatically (see _maybe_start_gpu_download) --
+        # this button exists for people who want the files without switching
+        # yet. Hidden once the files are already on disk or there's no real
+        # GPU to accelerate with.
+        self.gpu_download_btn = QPushButton("Download now")
+        self.gpu_download_btn.clicked.connect(self._start_gpu_download_clicked)
+        self.gpu_download_row = _card(
+            "GPU acceleration",
+            "Not downloaded yet. Dictate keeps using CPU until this finishes "
+            "— about 1.3 GB, downloaded once in the background.",
+            self.gpu_download_btn,
+        )
+        self.gpu_download_desc_label = self.gpu_download_row.findChild(QLabel, "desc")
+        self.gpu_download_progress = _native_progress_bar()
+        self.gpu_download_progress_row = _progress_row(self.gpu_download_progress)
+        self.gpu_download_row.setVisible(False)
+        self.gpu_download_progress_row.setVisible(False)
+
         self.model_box = QComboBox()
         for value, _desc in config.MODELS:
             self.model_box.addItem(MODEL_LABELS.get(value, value), value)
@@ -1406,7 +1467,13 @@ class SettingsWindow(QWidget):
         )
 
         advanced_col.addWidget(
-            _settings_group(device_row, self.model_card, model_storage_row)
+            _settings_group(
+                device_row,
+                self.gpu_download_row,
+                self.gpu_download_progress_row,
+                self.model_card,
+                model_storage_row,
+            )
         )
 
         behavior_header = QLabel("APP BEHAVIOR")
@@ -1557,6 +1624,8 @@ class SettingsWindow(QWidget):
 
         col.addLayout(bottom_row)
         self._load_widgets(self._settings)
+        self._update_gpu_download_visibility()
+        self._maybe_start_gpu_download()
 
     # --- behaviour ---
 
@@ -1579,6 +1648,7 @@ class SettingsWindow(QWidget):
             return
         self._sync_mode_from_advanced()
         self._queue_save()
+        self._maybe_start_gpu_download()
 
     def _on_mode_changed(self, *_args) -> None:
         if self._loading:
@@ -1597,6 +1667,7 @@ class SettingsWindow(QWidget):
             self.model_desc_label.setText(self._model_desc())
         self._update_mode_desc()
         self._queue_save()
+        self._maybe_start_gpu_download()
 
     def _sync_mode_from_advanced(self) -> None:
         mode = config.transcription_mode_for(
@@ -1619,6 +1690,75 @@ class SettingsWindow(QWidget):
             self.mode_desc_label.setText(
                 descriptions.get(self.mode_box.currentData(), descriptions["balanced"])
             )
+
+    def _maybe_start_gpu_download(self) -> None:
+        """Kick off the GPU-runtime download the moment a choice needs it,
+        rather than waiting for a dictation to discover that lazily.
+
+        Safe to call anytime, including at window construction (an install-
+        time "gpuaccel" task seeds device=cuda before Settings has ever been
+        opened) -- Engine.start_gpu_download() is itself a no-op unless
+        there's a real GPU and the files are actually missing. Reached via
+        getattr rather than a direct call so a test double or older Engine
+        stub without the method just no-ops instead of crashing the slot.
+        """
+        start = getattr(self._engine, "start_gpu_download", None)
+        if start is not None and self._has_cuda and self.device_box.currentData() in (
+            "cuda",
+            "auto",
+        ):
+            start()
+        self._update_gpu_download_visibility()
+
+    def _start_gpu_download_clicked(self) -> None:
+        self.gpu_download_btn.setEnabled(False)
+        self.gpu_download_btn.setText("Downloading…")
+        start = getattr(self._engine, "start_gpu_download", None)
+        if start is not None:
+            start()
+
+    def _update_gpu_download_visibility(self) -> None:
+        """Show the dedicated GPU row only while there's something to act
+        on: a real GPU with files not yet on disk. Once they land, this row
+        has nothing left to offer -- Processing above already covers it."""
+        visible = self._has_cuda and gpu_runtime.needs_download(gpu_available=True)
+        self.gpu_download_row.setVisible(visible)
+        self.gpu_download_progress_row.setVisible(visible)
+
+    def _refresh_gpu_download_status(self) -> None:
+        """Live progress for a GPU-runtime download in flight, polled the
+        same reactive way as last_status/updater's own last_status -- see
+        refresh_status()'s own docstring for why polling beats a dedicated
+        cross-thread signal for this app's status surfaces."""
+        if not self._has_cuda:
+            return
+        downloading, progress = getattr(self._engine, "gpu_status", (False, None))
+        needs = gpu_runtime.needs_download(gpu_available=True)
+        visible = needs or downloading
+        self.gpu_download_row.setVisible(visible)
+        self.gpu_download_progress_row.setVisible(visible)
+        self.gpu_download_progress.setVisible(downloading)
+        if downloading:
+            self.gpu_download_btn.setEnabled(False)
+            self.gpu_download_btn.setText("Downloading…")
+            if progress is not None:
+                self.gpu_download_progress.setRange(0, 100)
+                self.gpu_download_progress.setValue(int(progress * 100))
+            else:
+                self.gpu_download_progress.setRange(0, 0)
+            if self.gpu_download_desc_label is not None:
+                pct = f" {int(progress * 100)}%" if progress is not None else ""
+                self.gpu_download_desc_label.setText(
+                    f"Downloading{pct} — Dictate keeps using CPU until this finishes."
+                )
+        elif needs:
+            self.gpu_download_btn.setEnabled(True)
+            self.gpu_download_btn.setText("Download now")
+            if self.gpu_download_desc_label is not None:
+                self.gpu_download_desc_label.setText(
+                    "Not downloaded yet. Dictate keeps using CPU until this "
+                    "finishes — about 1.3 GB, downloaded once in the background."
+                )
 
     def _update_vocabulary_button(self) -> None:
         count = len(self._vocabulary)
@@ -1769,6 +1909,8 @@ class SettingsWindow(QWidget):
                     self.update_desc_label.setText(
                         "Turned off — Dictate won't check GitHub for new releases."
                     )
+
+        self._refresh_gpu_download_status()
 
         state, detail, progress = self._engine.last_status
         if self._pending_reload:

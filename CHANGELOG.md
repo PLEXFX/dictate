@@ -7,6 +7,26 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.2-beta.1] - 2026-08-18
+
+### Added
+
+- GPU acceleration files now start downloading automatically as soon as
+  Dictate launches (if GPU was chosen at install) or the moment you pick GPU
+  in Settings — no need to start a dictation first. A new "GPU acceleration"
+  row in Settings → Advanced shows live progress and a "Download now" button
+  for anyone who skipped it earlier. Dictation stays fully usable on CPU the
+  whole time it downloads.
+- The Settings window now uses Windows' own Acrylic transparency effect when
+  "Transparency effects" is turned on in Windows, and falls back to a solid
+  light/dark background when it's off.
+
+### Fixed
+
+- The tray's "Check for updates" stayed clickable and silently did nothing
+  when "Check for updates automatically" was turned off in Settings. It now
+  matches Settings' own button and disables itself instead.
+
 ## [1.0.1-beta.1] - 2026-08-18
 
 ### Fixed

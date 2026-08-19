@@ -186,7 +186,7 @@ QPushButton#downloadOverview {
     padding: 0px;
     text-align: left;
 }
-QPushButton#downloadOverview[tone="accent"], QPushButton#downloadOverview[tone="error"] {
+QPushButton#downloadOverview[tone="accent"], QPushButton#downloadOverview[tone="available"], QPushButton#downloadOverview[tone="error"] {
     background: #292929;
     border-color: #363636;
 }
@@ -199,6 +199,7 @@ QFrame#downloadOverviewStatus {
 }
 QFrame#downloadOverviewStatus[tone="success"] { background: #6CCB5F; }
 QFrame#downloadOverviewStatus[tone="accent"] { background: #4CC2FF; }
+QFrame#downloadOverviewStatus[tone="available"] { background: #FFB900; }
 QFrame#downloadOverviewStatus[tone="error"] { background: #F1707B; }
 QLabel#downloadOverviewTitle { color: #F4F4F4; font-size: 8pt; font-weight: 600; background: transparent; }
 QLabel#downloadOverviewDetail { color: #AFAFAF; font-size: 8pt; background: transparent; }
@@ -343,12 +344,13 @@ QPushButton#apply:hover { background: #006CBE; } QPushButton#apply:pressed { bac
 QPushButton#secondary { background: #FFFFFF; color: #1A1A1A; border: 1px solid #C9C9C9; border-radius: 4px; padding: 6px 18px; }
 QPushButton#secondary:hover { background: #F3F3F3; }
 QPushButton#downloadOverview { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 0px; text-align: left; }
-QPushButton#downloadOverview[tone="accent"], QPushButton#downloadOverview[tone="error"] { background: #F5F5F5; border-color: #DEDEDE; }
+QPushButton#downloadOverview[tone="accent"], QPushButton#downloadOverview[tone="available"], QPushButton#downloadOverview[tone="error"] { background: #F5F5F5; border-color: #DEDEDE; }
 QPushButton#downloadOverview:hover { background: #E5E5E5; border-color: #D2D2D2; }
 QPushButton#downloadOverview:pressed { background: #EEEEEE; }
 QFrame#downloadOverviewStatus { background: #8A8A8A; border: none; border-radius: 4px; }
 QFrame#downloadOverviewStatus[tone="success"] { background: #0F7B0F; }
 QFrame#downloadOverviewStatus[tone="accent"] { background: #0078D4; }
+QFrame#downloadOverviewStatus[tone="available"] { background: #D97706; }
 QFrame#downloadOverviewStatus[tone="error"] { background: #C42B1C; }
 QLabel#downloadOverviewTitle { color: #1A1A1A; font-size: 8pt; font-weight: 600; background: transparent; }
 QLabel#downloadOverviewDetail { color: #616161; font-size: 8pt; background: transparent; }
@@ -1516,7 +1518,10 @@ class SettingsWindow(QWidget):
 
         if ready_action is not None:
             self._download_focus, self._download_action, mode, title, detail = ready_action
-            tone = "error" if mode == "error" else "accent"
+            tone = {
+                "available": "available",
+                "error": "error",
+            }.get(mode, "accent")
             self._set_download_overview_presentation(mode, title, detail, tone=tone)
             return
 

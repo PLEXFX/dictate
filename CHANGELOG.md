@@ -7,6 +7,20 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.1-beta.1] - 2026-08-19
+
+### Changed
+
+- Update availability now stands out in Settings with an orange status dot
+  and a clear **Update available** download action.
+
+### Fixed
+
+- Published updates now include the installer release asset required by the
+  in-app launch check, so installed builds can discover and download them.
+- Added regression coverage for the launch-time update check's activity-bar
+  notification and click-to-download action.
+
 ## [1.2.0-beta.1] - 2026-08-19
 
 ### Added

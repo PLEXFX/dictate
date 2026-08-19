@@ -1155,6 +1155,21 @@ class PttWarmStartTests(unittest.TestCase):
             "loading", "Downloading update 1.2.3 — 10%", 0.10
         )
 
+    def test_update_available_notifies_on_the_bar_and_downloads_when_clicked(self):
+        app, _main = self._app()
+        app._notify = Mock()
+
+        app._on_update_available("1.2.3", "Release notes")
+
+        app._notify.assert_called_once_with(
+            "Update 1.2.3 available. Click to download.",
+            tone="info",
+            on_click=app._start_update,
+        )
+        app.updater.start_update.return_value = True
+        app._notify.call_args.kwargs["on_click"]()
+        app.updater.start_update.assert_called_once_with()
+
     def test_update_terminal_state_clears_the_flag_without_a_second_bar_call(self):
         """UP_TO_DATE/ERROR/AVAILABLE each already have their own dedicated
         callback (_on_update_current/_on_update_error/_on_update_available)
@@ -2539,6 +2554,7 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual(window.download_overview_title.text(), "Update available")
         self.assertEqual(window.download_overview_detail.text(), "Click to download")
+        self.assertEqual(window.download_overview_status.property("tone"), "available")
         window.download_overview.click()
         dummy_updater.start_update.assert_called_once_with()
 

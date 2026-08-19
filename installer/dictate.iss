@@ -31,7 +31,7 @@
 ;   ISCC.exe dictate.iss /DMyAppVersion=0.1.0-beta.3
 
 #ifndef MyAppVersion
-#define MyAppVersion "1.2.0-beta.1"
+#define MyAppVersion "1.2.1-beta.1"
 #endif
 #define MyAppName "Dictate"
 #define MyAppPublisher "PLEXFX"

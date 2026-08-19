@@ -4,12 +4,12 @@ Hold a key anywhere in Windows, speak, release. The text appears in whatever
 you were typing in. Transcription runs on this machine — no account and no
 cloud transcription. Speech-model files may download the first time they are used.
 
-## What's new in v1.2.0-beta.1
+## What's new in v1.2.1-beta.1
 
-Every version upgrade now opens its matching release notes once, and the same
-theme-matched What's New window remains available above GitHub in Settings.
-The update progress helper also runs from a temporary copy, preventing the
-Windows access-denied error that could appear while replacing it.
+Dictate checks for a new release when it opens and shows a clickable activity-
+bar notification when one is ready. Settings now marks that same download
+action with a clear orange status dot. This release also includes the installer
+asset the updater needs to discover and install the new version.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete version history.
 Read [PRIVACY.md](PRIVACY.md) for exactly what Dictate processes and what its

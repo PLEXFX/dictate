@@ -1,5 +1,5 @@
 """Background updater: checks GitHub Releases for a newer Dictate build,
-downloads the installer, and hands off to it once verified.
+downloads the installer, and stages it for an explicit restart once verified.
 
 The repo is public, so the check is a single unauthenticated GET -- unlike
 server-dashboard's private-repo OAuth flow, there is no token to manage.
@@ -8,11 +8,11 @@ Checking and downloading are deliberately two separate steps. ``check_now``
 only ever tells the caller a newer release exists (AVAILABLE) -- it never
 downloads anything on its own, on a timer or otherwise. Downloading only
 starts from an explicit ``start_update()`` call, which main.py wires to a
-person clicking the "download & install" notification, never to a
-background timer. Once that download verifies, the installer is launched
-immediately as part of the same click -- there is no separate "now click
-again to actually install" step, because the click that started the
-download already said what should happen once it finishes.
+person clicking the download notification, never to a background timer.
+Once that download verifies, it is persisted as READY_TO_RESTART. A second,
+explicit restart action revalidates the staged installer before launching it,
+then main.py quits so the existing update splash can own installation and
+relaunch.
 """
 
 from __future__ import annotations
@@ -55,6 +55,8 @@ CHECKING = "checking"
 UP_TO_DATE = "up_to_date"
 AVAILABLE = "available"    # a newer release exists; nothing downloaded yet
 DOWNLOADING = "downloading"
+READY_TO_RESTART = "ready_to_restart"
+VERIFYING = "verifying"
 INSTALLING = "installing"
 ERROR = "error"
 
@@ -264,6 +266,97 @@ def _verify_authenticode(path: Path, trusted_thumbprint: str) -> bool:
 
 
 _DOWNLOAD_TEMP_PREFIX = "dictate-update-"
+_PENDING_METADATA_NAME = "pending-update.json"
+
+
+def _app_data_dir() -> Path:
+    return Path(os.environ.get("APPDATA", Path.home())) / "dictate"
+
+
+def _pending_update_dir() -> Path:
+    return _app_data_dir() / "pending-update"
+
+
+def _pending_metadata_path() -> Path:
+    return _pending_update_dir() / _PENDING_METADATA_NAME
+
+
+def _clear_pending_update() -> None:
+    """Remove only Dictate's dedicated staged-update directory."""
+    shutil.rmtree(_pending_update_dir(), ignore_errors=True)
+
+
+def _normalise_pending_info(data: object, current_version: str) -> Optional[dict]:
+    """Validate persisted metadata without trusting it to choose a path."""
+    if not isinstance(data, dict):
+        return None
+    version = data.get("version")
+    name = data.get("installer_name")
+    size = data.get("installer_size")
+    digest = data.get("installer_sha256")
+    notes = data.get("release_notes", "")
+    if (
+        not isinstance(version, str)
+        or not is_newer(version, current_version)
+        or not isinstance(name, str)
+        or Path(name).name != name
+        or not name.casefold().endswith(".exe")
+        or not isinstance(size, int)
+        or size <= 0
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None
+        or not isinstance(notes, str)
+    ):
+        return None
+    installer = _pending_update_dir() / name
+    try:
+        if not installer.is_file() or installer.stat().st_size != size:
+            return None
+    except OSError:
+        return None
+    return {
+        "version": version,
+        "installer_name": name,
+        "installer_size": size,
+        "installer_sha256": digest.casefold(),
+        "release_notes": notes[:_MAX_RELEASE_NOTES_CHARS],
+        "installer_path": installer,
+    }
+
+
+def _load_pending_update(current_version: str) -> Optional[dict]:
+    path = _pending_metadata_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        if path.exists():
+            _clear_pending_update()
+        return None
+    info = _normalise_pending_info(data, current_version)
+    if info is None:
+        _clear_pending_update()
+    return info
+
+
+def _persist_pending_update(info: dict, verified_installer: Path) -> dict:
+    """Atomically publish a verified download as the one pending update."""
+    pending_dir = _pending_update_dir()
+    _clear_pending_update()
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    installer = pending_dir / info["installer_name"]
+    os.replace(verified_installer, installer)
+    metadata = {
+        "version": info["version"],
+        "installer_name": info["installer_name"],
+        "installer_size": info["installer_size"],
+        "installer_sha256": info["installer_sha256"],
+        "release_notes": str(info.get("release_notes") or "")[:_MAX_RELEASE_NOTES_CHARS],
+    }
+    tmp_metadata = pending_dir / f"{_PENDING_METADATA_NAME}.tmp"
+    tmp_metadata.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    os.replace(tmp_metadata, _pending_metadata_path())
+    metadata["installer_path"] = installer
+    return metadata
 
 
 def cleanup_stale_downloads() -> None:
@@ -290,7 +383,7 @@ def cleanup_stale_downloads() -> None:
 
 
 def _update_notice_path() -> Path:
-    return Path(os.environ.get("APPDATA", Path.home())) / "dictate" / "update-notice.json"
+    return _app_data_dir() / "update-notice.json"
 
 
 def _write_update_notice(version: str, notes: str) -> None:
@@ -322,7 +415,7 @@ def consume_update_notice(version: str) -> Optional[str]:
 
 
 class Updater:
-    """Owns the background check cycle, and the download+install pipeline
+    """Owns the background check cycle, and the download+restart pipeline
     once a person explicitly asks for it via start_update().
 
     UI-agnostic on purpose: main.py wires on_available to the bar's
@@ -359,10 +452,14 @@ class Updater:
         self._stop = threading.Event()
         self._busy = threading.Lock()
         # Set once check_now() finds something newer, cleared the instant
-        # start_update() picks it up -- both act as the "is a download
-        # already spoken for" guard alongside _busy, and as the only record
-        # of which release AVAILABLE is currently naming.
+        # start_update() picks it up.
         self._available: Optional[dict] = None
+        self._pending = _load_pending_update(current_version)
+        if self._pending is not None:
+            self._status_state = READY_TO_RESTART
+            self._status_detail = (
+                f"Update {self._pending['version']} is verified and ready to restart"
+            )
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -386,13 +483,14 @@ class Updater:
         revert_after: Optional[float] = None,
     ) -> None:
         """Update status and notify. ``revert_after`` schedules a return to
-        IDLE that many seconds later -- used for one-shot confirmations
+        the stable idle/ready state that many seconds later -- used for one-shot confirmations
         (UP_TO_DATE, ERROR) so a UI polling reactively (settings_window.py's
         refresh_status()) gets a real window to observe and display the
         state before it clears itself, without either side needing to track
         "have I already shown this" -- reverting the source state is simpler
         and race-free against Qt's async signal delivery than trying to
-        debounce on the display side. AVAILABLE/DOWNLOADING/INSTALLING never
+        debounce on the display side. AVAILABLE/DOWNLOADING/READY_TO_RESTART/
+        VERIFYING/INSTALLING never
         pass one: each is superseded by the next real state in the pipeline
         rather than reverting to IDLE on its own.
         """
@@ -409,8 +507,14 @@ class Updater:
             self._revert_timer.start()
 
     def _revert_to_idle(self) -> None:
-        self._status_state = IDLE
-        self._status_detail = ""
+        if self._pending is not None:
+            self._status_state = READY_TO_RESTART
+            self._status_detail = (
+                f"Update {self._pending['version']} is verified and ready to restart"
+            )
+        else:
+            self._status_state = IDLE
+            self._status_detail = ""
         self._status_progress = None
         self._on_status_change()
 
@@ -447,7 +551,11 @@ class Updater:
         """
         if not self._enabled:
             return
-        if self._available is not None or not self._busy.acquire(blocking=False):
+        if (
+            self._available is not None
+            or self._pending is not None
+            or not self._busy.acquire(blocking=False)
+        ):
             return
         threading.Thread(target=self._check, args=(silent,), daemon=True).start()
 
@@ -476,7 +584,7 @@ class Updater:
             self._busy.release()
 
     def start_update(self) -> bool:
-        """Download, verify, and install the currently available release.
+        """Download, verify, and stage the currently available release.
 
         Only main.py's click handler for the AVAILABLE notification (bar
         toast or the Settings button) should ever call this -- never a
@@ -490,9 +598,16 @@ class Updater:
         if info is None or not self._busy.acquire(blocking=False):
             return False
         self._available = None
-        threading.Thread(
-            target=self._download_and_install, args=(info,), daemon=True
-        ).start()
+        threading.Thread(target=self._download_and_prepare, args=(info,), daemon=True).start()
+        return True
+
+    def restart_to_install(self) -> bool:
+        """Revalidate and launch the staged installer after an explicit click."""
+        info = self._pending
+        if info is None or not self._busy.acquire(blocking=False):
+            return False
+        self._set_status(VERIFYING, "Verifying the downloaded update…")
+        threading.Thread(target=self._verify_and_install, args=(info,), daemon=True).start()
         return True
 
     def _fail(self, message: str) -> None:
@@ -503,7 +618,7 @@ class Updater:
         self._set_status(ERROR, message, revert_after=8.0)
         self._on_error(message)
 
-    def _download_and_install(self, info: dict) -> None:
+    def _download_and_prepare(self, info: dict) -> None:
         try:
             expected_hash = info.get("installer_sha256")
             if expected_hash is None:
@@ -553,6 +668,42 @@ class Updater:
                     pass
                 self._fail("The update could not be verified")
                 print(f"[dictate] update verification detail: {exc}")
+                return
+
+            try:
+                self._pending = _persist_pending_update(info, dest)
+            except OSError as exc:
+                self._fail("The verified update could not be saved")
+                print(f"[dictate] could not stage verified installer: {exc}")
+                return
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            print(f"[dictate] update {info['version']} verified and ready to restart")
+            self._set_status(
+                READY_TO_RESTART,
+                f"Update {info['version']} is verified and ready to restart",
+            )
+        finally:
+            self._busy.release()
+
+    def _verify_and_install(self, info: dict) -> None:
+        try:
+            dest = Path(info["installer_path"])
+            try:
+                if dest.parent.resolve() != _pending_update_dir().resolve():
+                    raise ValueError("installer path left the pending-update directory")
+                if dest.stat().st_size != info["installer_size"]:
+                    raise ValueError("staged installer size changed")
+                if _sha256(dest) != info["installer_sha256"]:
+                    raise ValueError("staged installer hash changed")
+                if self._trusted_signer_thumbprint and not _verify_authenticode(
+                    dest, self._trusted_signer_thumbprint
+                ):
+                    raise ValueError("installer signer did not match Dictate")
+            except Exception as exc:
+                self._pending = None
+                _clear_pending_update()
+                self._fail("The downloaded update could not be verified")
+                print(f"[dictate] pending update verification detail: {exc}")
                 return
 
             _write_update_notice(info["version"], info["release_notes"])

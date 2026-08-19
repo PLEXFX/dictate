@@ -61,17 +61,6 @@ UPDATED_WINDOW_READY_EVENT = "Global\\DictateUpdatedWindowReady"
 # not, so a forgotten one would otherwise hold the microphone open all day.
 MAX_LOCKED_SECONDS = 5 * 60
 
-# Whisper is an offline model, so "live" text is a throttled rolling preview:
-# one bounded audio window at a time, never a queue of increasingly stale
-# inference jobs.  The final release transcription still uses the full clip.
-LIVE_PREVIEW_POLL_MS = 80
-LIVE_PREVIEW_INTERVAL_MS = 450
-LIVE_PREVIEW_PAUSE_SETTLE_MS = 160
-LIVE_PREVIEW_PAUSE_MIN_GAP_MS = 180
-LIVE_PREVIEW_WINDOW_SECONDS = 6.0
-LIVE_PREVIEW_MIN_SECONDS = 0.45
-ENHANCED_PREVIEW_SLOW_SECONDS = 0.9
-
 # How long "Undo last dictation" stays on offer. Dictate cannot read another
 # app's undo history, so it can never *prove* its paste is still the top of
 # that stack -- it can only refuse whenever it has evidence otherwise. A short
@@ -81,8 +70,7 @@ UNDO_WINDOW_SECONDS = 30
 
 # (name, description) pairs for the debug console's `help` output. A plain
 # list rather than a dict so the printed order matches the order below --
-# roughly "look something up" first, then actions, then the fake-notification
-# pair used only to eyeball the update UI without touching the network.
+# roughly "look something up" first, then actions.
 CONSOLE_COMMANDS: list[tuple[str, str]] = [
     ("status", "current engine state, active device, and auto-update setting"),
     ("gpu", "GPU detection and whether acceleration files are installed"),
@@ -95,8 +83,6 @@ CONSOLE_COMMANDS: list[tuple[str, str]] = [
     ("settings", "open the Settings window"),
     ("check update", "check GitHub for a new release right now"),
     ("open data", "open the settings folder in File Explorer"),
-    ("update test", "simulate an update-available notification (no network, no download)"),
-    ("update test current", "simulate an up-to-date notification"),
     ("quit", "exit Dictate"),
     ("help", "show this list (alias: ?)"),
 ]
@@ -195,34 +181,6 @@ def _tray_tip(settings) -> str:
     return f"{APP_NAME} — hold {key} to talk"
 
 
-def preview_hardware() -> tuple[int, float, bool]:
-    """Return logical CPU threads, installed RAM in GiB, and a cautious limit flag."""
-    threads = os.cpu_count() or 1
-    ram_gib = 0.0
-    try:
-        class MemoryStatus(ctypes.Structure):
-            _fields_ = [
-                ("length", ctypes.c_ulong),
-                ("memory_load", ctypes.c_ulong),
-                ("total_physical", ctypes.c_ulonglong),
-                ("available_physical", ctypes.c_ulonglong),
-                ("total_page_file", ctypes.c_ulonglong),
-                ("available_page_file", ctypes.c_ulonglong),
-                ("total_virtual", ctypes.c_ulonglong),
-                ("available_virtual", ctypes.c_ulonglong),
-                ("available_extended_virtual", ctypes.c_ulonglong),
-            ]
-
-        status = MemoryStatus()
-        status.length = ctypes.sizeof(status)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            ram_gib = status.total_physical / (1024 ** 3)
-    except (AttributeError, OSError):
-        pass
-    limited = threads < 8 or (ram_gib > 0 and ram_gib < 12.0)
-    return threads, ram_gib, limited
-
-
 class Bridge(QObject):
     """Signal-only object used to hop onto the UI thread from other threads."""
 
@@ -242,9 +200,6 @@ class Bridge(QObject):
     update_status_changed = Signal()  # live status/progress text changed
     dictated = Signal(str)  # successfully inserted text, kept only in memory
     pasted_into = Signal(int)  # window handle the text landed in, for undo
-    # generation, rolling text, measured inference seconds (-1 on failure),
-    # and whether the dedicated Enhanced preview model handled the request.
-    live_preview = Signal(int, str, float, bool)
 
 
 class App:
@@ -273,7 +228,6 @@ class App:
             on_state=self.bridge.engine_state.emit,
             on_gpu_status=self.bridge.gpu_status.emit,
         )
-        self.preview_engine = engine_mod.PreviewEngine(self.settings)
         self.bar = Bar(self.settings)
         self.theme_watcher.changed.connect(self._on_theme_changed)
         self.cues = sounds_mod.Cues(self.settings.sound_cues)
@@ -286,15 +240,10 @@ class App:
         self._reload_pending = False  # set only by a Settings-triggered reload
         self._gpu_download_showing = False  # bar is currently reflecting a GPU download
         self._update_showing = False  # bar is currently reflecting update check/download/install
+        self._update_ready_notified = False
         self._last_dictation = ""
         self._undo_target = None  # window the last paste landed in
         self._undo_at = 0.0
-        self._preview_generation = 0
-        self._preview_running = False
-        self._preview_last_request_at = 0.0
-        self._preview_last_voice_at = 0.0
-        self._preview_was_speaking = False
-        self._enhanced_benchmark_pending = False
         self._clipboard_restore = None
         self._clipboard_restore_timer = QTimer()
         self._clipboard_restore_timer.setSingleShot(True)
@@ -363,17 +312,12 @@ class App:
         self.bridge.update_status_changed.connect(self._on_update_status_changed)
         self.bridge.dictated.connect(self._remember_last_dictation)
         self.bridge.pasted_into.connect(self._offer_undo)
-        self.bridge.live_preview.connect(self._on_live_preview)
         self.bar.clicked.connect(self._on_bar_clicked)
 
         # Drives the waveform. Only runs while the mic is open.
         self.meter_timer = QTimer()
         self.meter_timer.setInterval(16)
         self.meter_timer.timeout.connect(self._pump_meter)
-
-        self.live_preview_timer = QTimer()
-        self.live_preview_timer.setInterval(LIVE_PREVIEW_POLL_MS)
-        self.live_preview_timer.timeout.connect(self._request_live_preview)
 
         self._build_tray()
         self.hotkeys.start()
@@ -565,19 +509,6 @@ class App:
                 os.startfile(config.CONFIG_DIR)
             except OSError as exc:
                 print(f"[dictate] could not open {config.CONFIG_DIR}: {exc}")
-        elif text == "update test":
-            # Fakes a "found a newer version" result without touching the
-            # network or waiting on the real 24h check cadence, so the
-            # available-toast (text, colour, click-to-download) can be
-            # eyeballed on demand. Nothing is actually recorded as available
-            # in the real Updater, so clicking the toast finds start_update()
-            # has nothing to do and no-ops instead of trying to download a
-            # nonexistent release.
-            print("[dictate] simulating an update-available notification")
-            self.bridge.update_available.emit("9.9.9-test", "Simulated release notes.")
-        elif text == "update test current":
-            print("[dictate] simulating an up-to-date notification")
-            self.bridge.update_current.emit()
         elif text == "quit":
             self._quit()
         elif text in ("help", "?"):
@@ -617,13 +548,6 @@ class App:
             self.engine.preload()
         self.bar.set_state("listening")
         self.meter_timer.start()
-        self._preview_generation += 1
-        now = time.perf_counter()
-        self._preview_last_request_at = now
-        self._preview_last_voice_at = now
-        self._preview_was_speaking = False
-        if self.settings.live_preview_enabled:
-            self.live_preview_timer.start()
 
     def _on_talk_locked(self) -> None:
         """A tap locked the recording on. The bar staying up is the signal."""
@@ -663,8 +587,6 @@ class App:
         """Throw away a locked recording without transcribing it."""
         self.lock_limit_timer.stop()
         self.meter_timer.stop()
-        self.live_preview_timer.stop()
-        self._preview_generation += 1
         self.mic.stop()
         self._dictation_active = False
         self.bar.set_clickable(False)
@@ -674,8 +596,6 @@ class App:
     def _stop_listening(self, duration: float) -> None:
         self.lock_limit_timer.stop()
         self.meter_timer.stop()
-        self.live_preview_timer.stop()
-        self._preview_generation += 1
         self.bar.set_clickable(False)
         clip = self.mic.stop()
         if duration < hotkeys_mod.MIN_HOLD_SECONDS or clip.size == 0:
@@ -743,83 +663,6 @@ class App:
 
     def _pump_meter(self) -> None:
         self.bar.set_levels(self.meter.update(self.mic.latest_window()))
-
-    def _request_live_preview(self) -> None:
-        """Start one coalesced preview, favoring natural pauses in speech."""
-        if (
-            not self.settings.live_preview_enabled
-            or self._preview_running
-            or not self._dictation_active
-        ):
-            return
-
-        now = time.perf_counter()
-        latest = self.mic.latest_window()
-        voice_now = (
-            latest.size >= 32
-            and audio_mod.rms_level(latest)
-            >= audio_mod.SILENCE_RMS_THRESHOLD * 1.15
-        )
-        if voice_now:
-            self._preview_last_voice_at = now
-            self._preview_was_speaking = True
-        pause_edge = (
-            self._preview_was_speaking
-            and (now - self._preview_last_voice_at) * 1000
-            >= LIVE_PREVIEW_PAUSE_SETTLE_MS
-        )
-        since_last_ms = (now - self._preview_last_request_at) * 1000
-        if pause_edge:
-            self._preview_was_speaking = False
-        if since_last_ms < LIVE_PREVIEW_INTERVAL_MS and not (
-            pause_edge and since_last_ms >= LIVE_PREVIEW_PAUSE_MIN_GAP_MS
-        ):
-            return
-
-        clip = self.mic.snapshot(LIVE_PREVIEW_WINDOW_SECONDS)
-        if clip.size < int(audio_mod.SAMPLE_RATE * LIVE_PREVIEW_MIN_SECONDS):
-            return
-        if audio_mod.rms_level(clip) < audio_mod.SILENCE_RMS_THRESHOLD:
-            return
-        generation = self._preview_generation
-        self._preview_running = True
-        self._preview_last_request_at = now
-        enhanced = self.settings.enhanced_preview_enabled
-
-        def work() -> None:
-            measured = 0.0
-            try:
-                if enhanced:
-                    text, measured = self.preview_engine.transcribe(clip)
-                else:
-                    text = self.engine.transcribe_preview(clip)
-            except Exception as exc:
-                # Preview is decorative and must never break the dependable
-                # release-to-paste path.  The final pass will report a real
-                # transcription failure through its existing error state.
-                print(f"[dictate] live preview skipped: {exc}")
-                text = ""
-                measured = -1.0
-            self.bridge.live_preview.emit(generation, text, measured, enhanced)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _on_live_preview(
-        self, generation: int, text: str, measured: float = 0.0, enhanced: bool = False
-    ) -> None:
-        self._preview_running = False
-        if enhanced and self._enhanced_benchmark_pending:
-            self._enhanced_benchmark_pending = False
-            if measured < 0:
-                self._notify("Enhanced preview couldn't start.")
-            elif measured > ENHANCED_PREVIEW_SLOW_SECONDS:
-                self._notify("Enhanced preview may be slow.")
-            else:
-                self._notify("Enhanced preview is ready.", tone="success")
-        if generation != self._preview_generation or not self._dictation_active:
-            return
-        if text:
-            self.bar.set_live_text(text)
 
     # --- settings ---
 
@@ -909,6 +752,7 @@ class App:
             self.settings_window.changed.connect(self._apply_settings)
             self.settings_window.capture_active.connect(self.hotkeys.set_capture_active)
             self.settings_window.margin_preview.connect(self.bar.preview_margin)
+            self.settings_window.width_preview.connect(self.bar.preview_width)
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
@@ -965,32 +809,8 @@ class App:
         if settings.auto_update_enabled != old.auto_update_enabled:
             self.updater.set_enabled(settings.auto_update_enabled)
             self.act_check_update.setEnabled(settings.auto_update_enabled)
-        if settings.live_preview_enabled != old.live_preview_enabled:
-            self._preview_generation += 1
-            if settings.live_preview_enabled and self._dictation_active:
-                self.live_preview_timer.start()
-            else:
-                self.live_preview_timer.stop()
-        enhanced_turned_on = (
-            settings.enhanced_preview_enabled
-            and not old.enhanced_preview_enabled
-        )
-        if enhanced_turned_on:
-            self._enhanced_benchmark_pending = True
-            _threads, _ram_gib, limited = preview_hardware()
-            self._notify(
-                "Enhanced preview may be slow." if limited else "Enhanced preview is on."
-            )
-        elif old.enhanced_preview_enabled and not settings.enhanced_preview_enabled:
-            self._enhanced_benchmark_pending = False
-            preview_engine = getattr(self, "preview_engine", None)
-            if preview_engine is not None:
-                threading.Thread(target=preview_engine.unload, daemon=True).start()
         self.mic.set_device(settings.input_device)
         self.engine.update_settings(settings)
-        preview_engine = getattr(self, "preview_engine", None)
-        if preview_engine is not None:
-            preview_engine.update_settings(settings)
         self.hotkeys.update_settings(settings)
         if not settings.tap_to_lock:
             # Turning the gesture off must also release a lock already running,
@@ -1098,11 +918,10 @@ class App:
     def _on_update_available(self, version: str, notes: str) -> None:
         # No auto-download: this notification is the only thing that ever
         # happens on its own. Clicking it is the one action that starts the
-        # download, and that same click also carries through to installing
-        # once the download verifies -- see _start_update() and
-        # updater.Updater.start_update()'s own docstring.
+        # download. Installation remains a separate, explicit restart action
+        # after the downloaded installer has been verified.
         self._notify(
-            f"Update {version} ready. Click to install.",
+            f"Update {version} available. Click to download.",
             tone="info",
             on_click=self._start_update,
         )
@@ -1110,6 +929,10 @@ class App:
     def _start_update(self) -> None:
         if self.updater.start_update():
             self._notify("Downloading update…", tone="info")
+
+    def _restart_update(self) -> None:
+        if self.updater.restart_to_install():
+            self._notify("Verifying update before restart…", tone="info")
 
     def _on_update_installing(self, version: str, installer_pid: int) -> None:
         # The installer is already launched and waiting for this process to
@@ -1169,21 +992,34 @@ class App:
         if self._dictation_active or self._ptt_preload_pending:
             return
         state, detail, progress = self.updater.last_status
-        busy = (updater_mod.CHECKING, updater_mod.DOWNLOADING, updater_mod.INSTALLING)
+        busy = (
+            updater_mod.CHECKING,
+            updater_mod.DOWNLOADING,
+            updater_mod.VERIFYING,
+            updater_mod.INSTALLING,
+        )
         if state in busy:
+            self._update_ready_notified = False
             self._update_showing = True
             self.bar.set_state(
                 "loading", detail, progress if state == updater_mod.DOWNLOADING else None
             )
+        elif state == updater_mod.READY_TO_RESTART:
+            self._update_showing = False
+            if not getattr(self, "_update_ready_notified", False):
+                self._update_ready_notified = True
+                self._notify(
+                    "Update verified. Click to restart and finish.",
+                    tone="success",
+                    on_click=self._restart_update,
+                    duration_ms=8000,
+                )
         elif self._update_showing:
             self._update_showing = False
 
     def _quit(self) -> None:
         self.hotkeys.stop()
         self.engine.shutdown()
-        preview_engine = getattr(self, "preview_engine", None)
-        if preview_engine is not None:
-            preview_engine.shutdown()
         self.updater.shutdown()
         running_notice_handle = getattr(self, "_running_notice_handle", None)
         if running_notice_handle:

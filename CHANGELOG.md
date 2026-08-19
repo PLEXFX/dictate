@@ -7,6 +7,36 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0-beta.1] - 2026-08-19
+
+### Changed
+
+- Removed the live transcript preview from the activity bar and Settings. It
+  will return only when it can be smooth, accurate, and representative of the
+  words being spoken.
+- Refined Settings and the post-update page around a minimal Windows 11
+  layout. Privacy now opens and returns with a short in-place transition.
+- Reorganized Settings into focused Dictation, Activity bar, Appearance,
+  Updates, and Privacy pages behind a persistent Windows-style navigation
+  rail. GitHub and version details now live in its minimal footer.
+- Moved download and update status into one adaptive rail control above
+  GitHub. Update downloads now stop at a persisted, verified “Restart to
+  finish” state, and the installer is revalidated before Dictate launches it.
+
+### Removed
+
+- Removed Settings reset-to-default actions. Changes now remain in place until
+  you choose a different value yourself.
+
+### Added
+
+- `prepare-release-notes.bat` now copies the exact version-specific release
+  body from this changelog for GitHub. The in-app post-update page receives
+  that matching release body automatically after an update.
+- Added a live activity-bar width control from 180–280 px. The new 200 px
+  default is slightly shorter, and its interruption-safe spring follows rapid
+  slider changes without restarting, drifting, or cropping the waveform.
+
 ## [1.0.3-beta.1] - 2026-08-18
 
 ### Added

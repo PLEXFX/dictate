@@ -54,11 +54,6 @@ def _model_status_name(size: str, device: str) -> str:
     """Compact user-facing model/device text for bars and Settings."""
     return f"{config.model_display_name(size)} · {device.upper()}"
 
-# Enhanced live preview deliberately uses a separate, smaller CPU model.  It
-# can keep producing provisional text while the user's final model is busy,
-# without changing the model or device chosen for the text that gets pasted.
-PREVIEW_MODEL_SIZE = "base.en"
-
 # Files a whisper repo actually needs, mirroring faster_whisper.utils.download_model's
 # own allow_patterns -- kept in sync manually since that list isn't exported.
 _MODEL_ALLOW_PATTERNS = [
@@ -672,27 +667,6 @@ class Engine:
             )
         return options
 
-    def transcribe_preview(self, audio: np.ndarray) -> str:
-        """Return a best-effort rolling preview without changing UI state.
-
-        Whisper is not a true streaming model, so the app periodically sends
-        a bounded window of captured audio here. Calls are serialized with the
-        final transcription by the same lock: a preview can delay release by
-        at most one in-flight pass, but it can never run the model concurrently
-        or corrupt its decoder state.
-        """
-        if audio.size == 0:
-            return ""
-        with self._lock:
-            model = self.ensure_loaded()
-            try:
-                segments, _info = model.transcribe(
-                    audio, without_timestamps=True, **self._transcription_options()
-                )
-                return "".join(seg.text for seg in segments).strip()
-            finally:
-                self._last_used = time.monotonic()
-
     def transcribe(self, audio: np.ndarray) -> str:
         """Turn float32 16 kHz mono samples into text. Blocking; call off-UI."""
         if audio.size == 0:
@@ -713,71 +687,3 @@ class Engine:
                         f"{_model_status_name(*self._loaded_key)} ready",
                     )
             return text
-
-
-class PreviewEngine:
-    """A dedicated, optional CPU model for responsive provisional text.
-
-    This model has its own lock and lifecycle, so it never queues behind the
-    final Engine.  It is created cheaply at app startup but only loads files
-    after Enhanced preview is actually used, and unloads as soon as that
-    option is turned off.
-    """
-
-    def __init__(self, settings):
-        self._settings = settings
-        self._model = None
-        self._lock = threading.RLock()
-
-    def update_settings(self, settings) -> None:
-        self._settings = settings
-
-    def ensure_loaded(self):
-        with self._lock:
-            if self._model is not None:
-                return self._model
-            _predownload_with_progress(PREVIEW_MODEL_SIZE, lambda _n, _total: None)
-            from faster_whisper import WhisperModel
-
-            self._model = WhisperModel(
-                PREVIEW_MODEL_SIZE,
-                device="cpu",
-                compute_type="int8",
-                download_root=config.model_dir(),
-            )
-            return self._model
-
-    def transcribe(self, audio: np.ndarray) -> tuple[str, float]:
-        """Return preview text and measured inference time (model load excluded)."""
-        if audio.size == 0:
-            return "", 0.0
-        with self._lock:
-            model = self.ensure_loaded()
-            options = {
-                "language": "en",
-                "beam_size": 1,
-                "vad_filter": True,
-                "condition_on_previous_text": False,
-            }
-            if self._settings.vocabulary:
-                options["initial_prompt"] = (
-                    "Names and terms that may appear: "
-                    + ", ".join(self._settings.vocabulary)
-                    + "."
-                )
-            started = time.perf_counter()
-            segments, _info = model.transcribe(
-                audio, without_timestamps=True, **options
-            )
-            text = "".join(seg.text for seg in segments).strip()
-            return text, time.perf_counter() - started
-
-    def unload(self) -> None:
-        with self._lock:
-            self._model = None
-            import gc
-
-            gc.collect()
-
-    def shutdown(self) -> None:
-        self.unload()

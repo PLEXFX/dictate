@@ -4,9 +4,10 @@ Each option is a rounded card row: title and one line of explanation on the
 left, the control on the right. That pattern is most of what makes a window
 read as native, more than any individual control does.
 
-The main page exposes only the decisions needed for everyday dictation.
-Implementation details remain available in a collapsed Advanced section.
-Changes save automatically; model-affecting changes visibly reload the engine.
+The stable left rail opens focused Dictation, Activity bar, Appearance,
+Updates, and Privacy pages. Implementation details remain available in a
+collapsed Advanced section. Changes save automatically; model-affecting
+changes visibly reload the engine.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from dataclasses import asdict, replace
 
 from PySide6.QtCore import (
     QAbstractAnimation,
+    QPoint,
     Property,
     Qt,
     QParallelAnimationGroup,
@@ -29,6 +31,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDialog,
     QFrame,
@@ -82,6 +85,40 @@ QFrame#hero {
     border: 1px solid #303030;
     border-radius: 8px;
 }
+QFrame#navRail {
+    background: #1C1C1C;
+    border: none;
+    border-right: 1px solid #2D2D2D;
+}
+QLabel#navTitle { color: #FFFFFF; font-size: 14pt; font-weight: 600; }
+QLabel#navCaption { color: #8F8F8F; font-size: 8pt; }
+QPushButton#navItem {
+    background: transparent;
+    color: #DADADA;
+    border: none;
+    border-radius: 4px;
+    padding: 9px 12px 9px 15px;
+    text-align: left;
+}
+QPushButton#navItem:hover { background: #292929; }
+QPushButton#navItem:pressed { background: #242424; }
+QPushButton#navItem:checked {
+    background: #303030;
+    color: #FFFFFF;
+    font-weight: 600;
+}
+QFrame#navIndicator { background: #4CC2FF; border: none; border-radius: 1px; }
+QFrame#navDivider { background: #303030; border: none; max-height: 1px; }
+QPushButton#navFooterLink {
+    background: transparent;
+    color: #BEBEBE;
+    border: none;
+    border-radius: 4px;
+    padding: 7px 8px;
+    text-align: left;
+}
+QPushButton#navFooterLink:hover { background: #292929; color: #FFFFFF; }
+QPushButton#navFooterLink:pressed { background: #242424; }
 QFrame#settingsGroup {
     background: #2B2B2B;
     border: 1px solid #353535;
@@ -142,20 +179,26 @@ QPushButton#secondary {
 }
 QPushButton#secondary:hover { background: #3B3B3B; }
 QPushButton#downloadOverview {
-    background: #2B2B2B;
-    border: 1px solid #383838;
-    border-radius: 8px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
     padding: 0px;
     text-align: left;
 }
-QPushButton#downloadOverview:hover { background: #323232; border-color: #484848; }
-QPushButton#downloadOverview:pressed { background: #262626; }
+QPushButton#downloadOverview[tone="accent"], QPushButton#downloadOverview[tone="error"] {
+    background: #292929;
+    border-color: #363636;
+}
+QPushButton#downloadOverview:hover { background: #303030; border-color: #414141; }
+QPushButton#downloadOverview:pressed { background: #252525; }
 QFrame#downloadOverviewStatus {
     background: #777777;
     border: none;
     border-radius: 4px;
 }
-QFrame#downloadOverviewStatus[active="true"] { background: #4CC2FF; }
+QFrame#downloadOverviewStatus[tone="success"] { background: #6CCB5F; }
+QFrame#downloadOverviewStatus[tone="accent"] { background: #4CC2FF; }
+QFrame#downloadOverviewStatus[tone="error"] { background: #F1707B; }
 QLabel#downloadOverviewTitle { color: #F4F4F4; font-size: 8pt; font-weight: 600; background: transparent; }
 QLabel#downloadOverviewDetail { color: #AFAFAF; font-size: 8pt; background: transparent; }
 QLabel#downloadOverviewChevron { color: #9A9A9A; font-size: 14pt; font-weight: 400; background: transparent; }
@@ -181,15 +224,6 @@ QPushButton#expander:hover { background: #323232; }
 QPushButton#expander:pressed { background: #262626; }
 QPushButton#expander:checked { border-color: #3D3D3D; }
 QLabel#expanderLabel { color: #E8E8E8; font-weight: 600; background: transparent; }
-QPushButton#sliderReset {
-    background: transparent;
-    color: #4CC2FF;
-    border: none;
-    padding: 1px 0px;
-    font-size: 8pt;
-}
-QPushButton#sliderReset:hover { color: #78D3FF; text-decoration: underline; }
-
 /* Windows 11 slider. The thumb is an accent-filled centre inside a neutral
    ring -- not a light centre with an accent ring, which is the inverted
    version and the reason these looked wrong. The centre is 12px at rest,
@@ -281,6 +315,18 @@ QLabel[role="appTitle"] { color: #1A1A1A; font-size: 19pt; font-weight: 600; }
 QLabel[role="section"] { color: #4A4A4A; font-size: 8pt; font-weight: 600; padding: 3px 2px 1px 2px; }
 QFrame#card { background: #FFFFFF; border: 1px solid #E3E3E3; border-radius: 6px; }
 QFrame#hero { background: #FAFAFA; border: 1px solid #E0E0E0; border-radius: 8px; }
+QFrame#navRail { background: #EDEDED; border: none; border-right: 1px solid #DDDDDD; }
+QLabel#navTitle { color: #1A1A1A; font-size: 14pt; font-weight: 600; }
+QLabel#navCaption { color: #666666; font-size: 8pt; }
+QPushButton#navItem { background: transparent; color: #303030; border: none; border-radius: 4px; padding: 9px 12px 9px 15px; text-align: left; }
+QPushButton#navItem:hover { background: #E3E3E3; }
+QPushButton#navItem:pressed { background: #DADADA; }
+QPushButton#navItem:checked { background: #DADADA; color: #111111; font-weight: 600; }
+QFrame#navIndicator { background: #0078D4; border: none; border-radius: 1px; }
+QFrame#navDivider { background: #D8D8D8; border: none; max-height: 1px; }
+QPushButton#navFooterLink { background: transparent; color: #505050; border: none; border-radius: 4px; padding: 7px 8px; text-align: left; }
+QPushButton#navFooterLink:hover { background: #E3E3E3; color: #111111; }
+QPushButton#navFooterLink:pressed { background: #DADADA; }
 QFrame#settingsGroup { background: #FFFFFF; border: 1px solid #E0E0E0; border-radius: 8px; }
 QFrame#settingsRow { background: transparent; border: none; border-bottom: 1px solid #E6E6E6; border-radius: 0px; }
 QFrame#settingsRow[nested="true"] { background: #F8F8F8; }
@@ -295,18 +341,21 @@ QPushButton#apply { background: #0078D4; color: #FFFFFF; border: none; border-ra
 QPushButton#apply:hover { background: #006CBE; } QPushButton#apply:pressed { background: #005A9E; } QPushButton#apply:disabled { background: #DADADA; color: #888888; }
 QPushButton#secondary { background: #FFFFFF; color: #1A1A1A; border: 1px solid #C9C9C9; border-radius: 4px; padding: 6px 18px; }
 QPushButton#secondary:hover { background: #F3F3F3; }
-QPushButton#downloadOverview { background: #FAFAFA; border: 1px solid #E0E0E0; border-radius: 8px; padding: 0px; text-align: left; }
-QPushButton#downloadOverview:hover { background: #F5F5F5; border-color: #D0D0D0; }
+QPushButton#downloadOverview { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 0px; text-align: left; }
+QPushButton#downloadOverview[tone="accent"], QPushButton#downloadOverview[tone="error"] { background: #F5F5F5; border-color: #DEDEDE; }
+QPushButton#downloadOverview:hover { background: #E5E5E5; border-color: #D2D2D2; }
 QPushButton#downloadOverview:pressed { background: #EEEEEE; }
 QFrame#downloadOverviewStatus { background: #8A8A8A; border: none; border-radius: 4px; }
-QFrame#downloadOverviewStatus[active="true"] { background: #0078D4; }
+QFrame#downloadOverviewStatus[tone="success"] { background: #0F7B0F; }
+QFrame#downloadOverviewStatus[tone="accent"] { background: #0078D4; }
+QFrame#downloadOverviewStatus[tone="error"] { background: #C42B1C; }
 QLabel#downloadOverviewTitle { color: #1A1A1A; font-size: 8pt; font-weight: 600; background: transparent; }
 QLabel#downloadOverviewDetail { color: #616161; font-size: 8pt; background: transparent; }
 QLabel#downloadOverviewChevron { color: #6D6D6D; font-size: 14pt; font-weight: 400; background: transparent; }
 QProgressBar#downloadOverviewProgress { background: #D6D6D6; border: none; border-radius: 1px; min-height: 3px; max-height: 3px; }
 QProgressBar#downloadOverviewProgress::chunk { background: #0078D4; border-radius: 1px; }
-QPushButton#link, QPushButton#sliderReset { background: transparent; color: #0067B8; border: none; padding: 5px 2px; }
-QPushButton#link:hover, QPushButton#sliderReset:hover { color: #004C87; text-decoration: underline; }
+QPushButton#link { background: transparent; color: #0067B8; border: none; padding: 5px 2px; }
+QPushButton#link:hover { color: #004C87; text-decoration: underline; }
 QPushButton#expander { background: #FFFFFF; border: 1px solid #E0E0E0; border-radius: 8px; text-align: left; }
 QPushButton#expander:hover { background: #F8F8F8; }
 QPushButton#expander:pressed { background: #F0F0F0; }
@@ -699,7 +748,7 @@ class BindingCapture(QPushButton):
 
 
 class ValueSlider(QWidget):
-    """A compact Fluent slider that keeps its default visible after a change."""
+    """A compact Fluent slider that keeps its default value visible."""
 
     valueChanged = Signal(int)
 
@@ -720,17 +769,9 @@ class ValueSlider(QWidget):
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(3)
 
-        top = QHBoxLayout()
-        top.setContentsMargins(0, 0, 0, 0)
         self.value_label = QLabel()
         self.value_label.setProperty("role", "status")
-        top.addWidget(self.value_label)
-        top.addStretch(1)
-        self.reset_btn = QPushButton("Reset")
-        self.reset_btn.setObjectName("sliderReset")
-        self.reset_btn.clicked.connect(lambda: self.setValue(self._default))
-        top.addWidget(self.reset_btn)
-        col.addLayout(top)
+        col.addWidget(self.value_label)
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(0, len(values) - 1)
@@ -761,12 +802,80 @@ class ValueSlider(QWidget):
         current = self.value()
         if current == self._default:
             self.value_label.setText(f"{self._format(current)} · Default")
-            self.reset_btn.setVisible(False)
         else:
             self.value_label.setText(
                 f"{self._format(current)} · Default: {self._format(self._default)}"
             )
-            self.reset_btn.setVisible(True)
+
+
+class SettlingScrollArea(QScrollArea):
+    """A Windows-style brake at the end of a person-driven scroll gesture.
+
+    It deliberately ignores programmatic scrollbar changes, such as jumping
+    to a download detail, and only reacts after the wheel or scrollbar thumb
+    comes to rest. The two-pixel follow-through is enough to acknowledge the
+    end of a gesture without turning Settings into a bouncy touch interface.
+    """
+
+    _SETTLE_PX = 2
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._settle_direction = 0
+        self._drag_start_value: int | None = None
+        self._settle_timer = QTimer(self)
+        self._settle_timer.setSingleShot(True)
+        self._settle_timer.setInterval(100)
+        self._settle_timer.timeout.connect(self._play_scroll_settle)
+        self._settle_motion = QSequentialAnimationGroup(self)
+        self.verticalScrollBar().sliderPressed.connect(self._on_scrollbar_pressed)
+        self.verticalScrollBar().sliderReleased.connect(self._on_scrollbar_released)
+
+    def wheelEvent(self, event) -> None:
+        bar = self.verticalScrollBar()
+        before = bar.value()
+        self._cancel_scroll_settle()
+        super().wheelEvent(event)
+        self._note_scroll_delta(bar.value() - before)
+
+    def _on_scrollbar_pressed(self) -> None:
+        self._cancel_scroll_settle()
+        self._drag_start_value = self.verticalScrollBar().value()
+
+    def _on_scrollbar_released(self) -> None:
+        if self._drag_start_value is not None:
+            self._note_scroll_delta(self.verticalScrollBar().value() - self._drag_start_value)
+        self._drag_start_value = None
+
+    def _note_scroll_delta(self, delta: int) -> None:
+        if not delta:
+            return
+        self._settle_direction = 1 if delta > 0 else -1
+        self._settle_timer.start()
+
+    def _cancel_scroll_settle(self) -> None:
+        self._settle_timer.stop()
+        if self._settle_motion.state() == QAbstractAnimation.Running:
+            self._settle_motion.stop()
+
+    def _play_scroll_settle(self) -> None:
+        bar = self.verticalScrollBar()
+        start = bar.value()
+        end = max(bar.minimum(), min(bar.maximum(), start + self._settle_direction * self._SETTLE_PX))
+        if end == start:
+            return
+        self._settle_motion.clear()
+        for start_value, end_value, duration, curve in (
+            (start, end, 65, FLUENT_DECELERATE),
+            (end, start, 95, FLUENT_ACCELERATE),
+        ):
+            animation = QPropertyAnimation(bar, b"value", self._settle_motion)
+            animation.setStartValue(start_value)
+            animation.setEndValue(end_value)
+            animation.setDuration(duration)
+            animation.setEasingCurve(curve)
+            self._settle_motion.addAnimation(animation)
+        self._settle_motion.start()
 
 
 def _fill_microphone_box(box: QComboBox, selected_key: str) -> None:
@@ -906,7 +1015,7 @@ class PrivacyDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        scroll = QScrollArea()
+        scroll = SettlingScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         outer.addWidget(scroll)
@@ -952,7 +1061,7 @@ class PrivacyPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        scroll = QScrollArea()
+        scroll = SettlingScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         outer.addWidget(scroll)
@@ -975,8 +1084,50 @@ class PrivacyPage(QWidget):
         col.addStretch(1)
 
 
+def _release_note_row(text: str) -> QFrame:
+    """One readable release-note item inside a Windows Settings group."""
+    frame = QFrame()
+    frame.setObjectName("settingsRow")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(14, 9, 14, 9)
+    note = QLabel(text)
+    note.setProperty("role", "desc")
+    note.setWordWrap(True)
+    layout.addWidget(note)
+    return frame
+
+
+def _release_note_groups(notes: str) -> list[tuple[str, list[str]]]:
+    """Turn the version-specific GitHub release body into quiet UI groups.
+
+    GitHub sends the body belonging to the exact release the updater selected.
+    Supporting its normal Markdown headings and bullets here keeps the app
+    update view version-aware without maintaining a second set of notes.
+    """
+    groups: list[tuple[str, list[str]]] = []
+    heading = "Changes in this version"
+    entries: list[str] = []
+    for raw_line in notes.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if entries:
+                groups.append((heading, entries))
+            heading = line.lstrip("#").strip() or heading
+            entries = []
+            continue
+        if line.startswith(("- ", "* ")):
+            line = line[2:].strip()
+        if line:
+            entries.append(line)
+    if entries:
+        groups.append((heading, entries))
+    return groups or [("Changes in this version", ["Dictate has the latest improvements and fixes."])]
+
+
 class UpdateCompleteDialog(QDialog):
-    """A small, native-looking receipt after Dictate restarts updated."""
+    """A version-specific Windows 11-style receipt after an update restarts."""
 
     # Emitted after the dialog has entered the event loop and had a chance to
     # paint. main.py uses this to release the standalone update splash only
@@ -989,28 +1140,45 @@ class UpdateCompleteDialog(QDialog):
         self.setObjectName("root")
         self.setWindowTitle("What's new in Dictate")
         self.setStyleSheet(stylesheet())
-        self.setMinimumSize(500, 340)
-        self.resize(540, 390)
+        self.setMinimumSize(520, 390)
+        self.resize(560, 500)
         base = QFont("Segoe UI Variable Text", 9)
         self.setFont(base if base.exactMatch() else QFont("Segoe UI", 9))
 
         col = QVBoxLayout(self)
-        col.setContentsMargins(24, 22, 24, 22)
-        col.setSpacing(10)
-        title = QLabel("Dictate was updated")
+        col.setContentsMargins(22, 20, 22, 20)
+        col.setSpacing(12)
+        hero = QFrame()
+        hero.setObjectName("hero")
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(16, 14, 16, 14)
+        hero_layout.setSpacing(3)
+        title = QLabel("Dictate is up to date")
         title.setProperty("role", "header")
-        col.addWidget(title)
+        hero_layout.addWidget(title)
         version_label = QLabel(f"Version {version} is ready to use.")
         version_label.setProperty("role", "desc")
-        col.addWidget(version_label)
-        heading = QLabel("WHAT'S NEW")
+        hero_layout.addWidget(version_label)
+        col.addWidget(hero)
+        heading = QLabel("What changed")
         heading.setProperty("role", "section")
         col.addWidget(heading)
-        body = QPlainTextEdit()
-        body.setReadOnly(True)
-        body.setPlainText(notes.strip() or "Dictate has the latest improvements and fixes.")
-        body.setMinimumHeight(150)
-        col.addWidget(body, 1)
+        scroll = SettlingScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page = QWidget()
+        page.setObjectName("root")
+        content = QVBoxLayout(page)
+        content.setContentsMargins(0, 0, 4, 0)
+        content.setSpacing(8)
+        for group_heading, items in _release_note_groups(notes.strip()):
+            group_label = QLabel(group_heading)
+            group_label.setProperty("role", "section")
+            content.addWidget(group_label)
+            content.addWidget(_settings_group(*[_release_note_row(item) for item in items]))
+        content.addStretch(1)
+        scroll.setWidget(page)
+        col.addWidget(scroll, 1)
         row = QHBoxLayout()
         row.addStretch(1)
         done = QPushButton("Done")
@@ -1177,6 +1345,7 @@ class SettingsWindow(QWidget):
     changed = Signal(object)  # emits the new Settings
     capture_active = Signal(bool)  # tells the global listener to stand down
     margin_preview = Signal(int)  # live "Bar position" value while the slider is being dragged
+    width_preview = Signal(int)  # live activity-bar width while the slider is being dragged
 
     def __init__(
         self,
@@ -1197,17 +1366,13 @@ class SettingsWindow(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(250)
         self._save_timer.timeout.connect(self._save_now)
-        self._saved_timer = QTimer(self)
-        self._saved_timer.setSingleShot(True)
-        self._saved_timer.setInterval(1500)
-        self._saved_timer.timeout.connect(self._show_auto_save_message)
-
+        self._current_section = "dictation"
         self.setObjectName("root")
         self.setWindowTitle("Dictate settings")
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setStyleSheet(stylesheet())
-        self.setMinimumSize(620, 520)
-        self.resize(660, 560)
+        self.setMinimumSize(760, 540)
+        self.resize(820, 620)
         base = QFont("Segoe UI Variable Text", 9)
         self.setFont(base if base.exactMatch() else QFont("Segoe UI", 9))
 
@@ -1246,13 +1411,8 @@ class SettingsWindow(QWidget):
     # --- compact download overview -----------------------------------
 
     def _refresh_download_overview(self) -> None:
-        """Keep the compact header honest without duplicating full progress UI.
-
-        The detailed controls stay in their natural Settings sections. This
-        header only answers "what is downloading right now?" and remembers
-        the most useful destination for its one-click animated jump.
-        """
-        active: list[tuple[str, str, float | None]] = []
+        """Resolve all download work into one compact, truthful rail control."""
+        active: list[tuple[str, str, str, float | None]] = []
         state, _detail, progress = self._engine.last_status
         if state == engine_mod.LOADING:
             detail = (
@@ -1260,13 +1420,7 @@ class SettingsWindow(QWidget):
                 if progress is not None
                 else f"Preparing {config.model_display_name(self._settings.model_size)}"
             )
-            active.append(
-                (
-                    "model",
-                    detail,
-                    progress,
-                )
-            )
+            active.append(("model", "Downloading model", detail, progress))
 
         downloading_gpu, gpu_progress = getattr(self._engine, "gpu_status", (False, None))
         if downloading_gpu:
@@ -1275,58 +1429,105 @@ class SettingsWindow(QWidget):
                 if gpu_progress is not None
                 else "GPU acceleration · Working"
             )
-            active.append(("gpu", detail, gpu_progress))
+            active.append(("gpu", "Installing GPU support", detail, gpu_progress))
 
-        ready_action: tuple[str, str] | None = None
+        ready_action: tuple[str, str, str, str, str] | None = None
         if self._updater is not None:
-            update_state, _update_detail, update_progress = self._updater.last_status
+            update_state, update_detail, update_progress = self._updater.last_status
             if update_state in (
                 updater_mod.CHECKING,
                 updater_mod.DOWNLOADING,
+                updater_mod.VERIFYING,
                 updater_mod.INSTALLING,
             ):
                 if update_state == updater_mod.DOWNLOADING and update_progress is not None:
-                    text = f"Dictate update · {int(update_progress * 100)}%"
+                    title = "Downloading update"
+                    text = f"Dictate · {int(update_progress * 100)}%"
                 elif update_state == updater_mod.DOWNLOADING:
-                    text = "Downloading update"
+                    title, text = "Downloading update", "Preparing download"
                 elif update_state == updater_mod.CHECKING:
-                    text = "Checking for updates"
+                    title, text = "Checking for updates", "Connecting to GitHub"
+                elif update_state == updater_mod.VERIFYING:
+                    title, text = "Finishing update", "Verifying before restart"
                 else:
-                    text = "Installing update"
-                active.append(("update", text, update_progress))
+                    title, text = "Restarting Dictate", "Installing verified update"
+                active.append(("update", title, text, update_progress))
+            elif update_state == updater_mod.READY_TO_RESTART:
+                ready_action = (
+                    "update",
+                    "restart_update",
+                    "ready",
+                    "Restart to finish",
+                    "Verified and ready",
+                )
             elif update_state == updater_mod.AVAILABLE:
-                ready_action = ("update", "Update ready to install")
+                ready_action = (
+                    "update",
+                    "start_update",
+                    "available",
+                    "Update available",
+                    "Click to download",
+                )
+            elif update_state == updater_mod.ERROR:
+                ready_action = (
+                    "update",
+                    "open_update",
+                    "error",
+                    "Needs attention",
+                    update_detail or "Open Updates for details",
+                )
 
         if active:
             # Active transfer work owns the header. A ready update is still
             # available below, but it never hides a download that is moving.
             active.sort(key=lambda entry: {"update": 0, "model": 1, "gpu": 2}[entry[0]])
-            self._download_focus, text, selected_progress = active[0]
+            self._download_focus, title, text, selected_progress = active[0]
+            self._download_action = f"open_{self._download_focus}"
             extra = f" · +{len(active) - 1}" if len(active) > 1 else ""
             self._set_download_overview_presentation(
-                "active", "Downloads & installs", text + extra, selected_progress
+                "active", title, text + extra, selected_progress, tone="accent"
             )
             return
 
         if ready_action is not None:
-            self._download_focus, title = ready_action
-            self._set_download_overview_presentation("ready", title)
+            self._download_focus, self._download_action, mode, title, detail = ready_action
+            tone = "error" if mode == "error" else "accent"
+            self._set_download_overview_presentation(mode, title, detail, tone=tone)
             return
 
         if self._has_cuda and gpu_runtime.needs_download(gpu_available=True):
             self._download_focus = "gpu"
-            self._set_download_overview_presentation("ready", "GPU acceleration ready")
+            self._download_action = "open_gpu"
+            self._set_download_overview_presentation(
+                "ready", "GPU available", "Set up acceleration", tone="accent"
+            )
         else:
             self._download_focus = "update"
-            self._set_download_overview_presentation("idle", "Downloads")
+            self._download_action = "open_update"
+            if self._updater is not None and not self.auto_update_check.isChecked():
+                self._set_download_overview_presentation(
+                    "idle", "Updates paused", tone="muted"
+                )
+            else:
+                self._set_download_overview_presentation(
+                    "idle", "Up to date", tone="success"
+                )
 
-    def _set_download_overview_active(self, active: bool) -> None:
+    def _set_download_overview_active(self, active: bool, tone: str) -> None:
         """Set the status color and a gentle pulse for active work only."""
-        if self.download_overview_status.property("active") != active:
+        if (
+            self.download_overview_status.property("active") != active
+            or self.download_overview_status.property("tone") != tone
+        ):
             self.download_overview_status.setProperty("active", active)
+            self.download_overview_status.setProperty("tone", tone)
+            self.download_overview.setProperty("tone", tone)
             style = self.download_overview_status.style()
             style.unpolish(self.download_overview_status)
             style.polish(self.download_overview_status)
+            overview_style = self.download_overview.style()
+            overview_style.unpolish(self.download_overview)
+            overview_style.polish(self.download_overview)
         if active:
             self._download_overview_status_effect.setOpacity(1.0)
             if self._download_overview_pulse.state() != QAbstractAnimation.State.Running:
@@ -1341,23 +1542,38 @@ class SettingsWindow(QWidget):
         title: str,
         detail: str = "",
         progress: float | None = None,
+        *,
+        tone: str = "muted",
     ) -> None:
-        """Switch between the quiet idle pill and the active download card."""
+        """Switch the rail control between quiet, actionable, and active states."""
         previous_mode = self._download_overview_mode
         self._download_overview_mode = mode
         active = mode == "active"
         self.download_overview_title.setText(title)
-        self._set_download_overview_active(active)
+        self._set_download_overview_active(active, tone)
 
-        if active:
+        presentation_key = (mode, title, self._download_action)
+        if presentation_key != getattr(self, "_download_overview_presentation_key", None):
+            self._download_overview_presentation_key = presentation_key
+            self._download_overview_copy_fade.stop()
+            self._download_overview_copy_effect.setOpacity(0.55)
+            self._download_overview_copy_fade.setStartValue(0.55)
+            self._download_overview_copy_fade.setEndValue(1.0)
+            self._download_overview_copy_fade.setDuration(150)
+            self._download_overview_copy_fade.setEasingCurve(FLUENT_DECELERATE)
+            self._download_overview_copy_fade.start()
+
+        show_details = bool(detail)
+        if show_details:
             self.download_overview_detail.setText(detail)
-            if progress is None:
-                self.download_overview_progress.setRange(0, 0)
-            else:
-                self.download_overview_progress.setRange(0, 100)
-                self.download_overview_progress.setValue(int(progress * 100))
-            self.download_overview_progress.setVisible(True)
-            if previous_mode != "active":
+            self.download_overview_progress.setVisible(active)
+            if active:
+                if progress is None:
+                    self.download_overview_progress.setRange(0, 0)
+                else:
+                    self.download_overview_progress.setRange(0, 100)
+                    self.download_overview_progress.setValue(int(progress * 100))
+            if self.download_overview_details.isHidden():
                 self._download_overview_hide_details_after_fade = False
                 self.download_overview_details.setVisible(True)
                 self._download_overview_details_effect.setOpacity(0.0)
@@ -1367,7 +1583,7 @@ class SettingsWindow(QWidget):
                 self._download_overview_details_fade.setDuration(150)
                 self._download_overview_details_fade.setEasingCurve(FLUENT_DECELERATE)
                 self._download_overview_details_fade.start()
-        elif previous_mode == "active":
+        elif not self.download_overview_details.isHidden():
             # Fade the extra information away before the card contracts; that
             # feels like a Windows status control settling, not disappearing.
             self._download_overview_hide_details_after_fade = True
@@ -1383,12 +1599,14 @@ class SettingsWindow(QWidget):
             self.download_overview_details.setVisible(False)
 
         sizes = {
-            "idle": QSize(142, 36),
-            "ready": QSize(212, 36),
-            "active": QSize(236, 64),
+            "idle": QSize(156, 40),
+            "ready": QSize(156, 58),
+            "available": QSize(156, 58),
+            "error": QSize(156, 58),
+            "active": QSize(156, 68),
         }
         target = sizes[mode]
-        if previous_mode != mode:
+        if self._download_overview_size_target != target:
             if previous_mode == "active" and not active:
                 QTimer.singleShot(105, lambda: self._animate_download_overview_size(mode, target))
             else:
@@ -1400,7 +1618,7 @@ class SettingsWindow(QWidget):
             self.download_overview_progress.setVisible(False)
 
     def _animate_download_overview_size(self, mode: str, target: QSize) -> None:
-        """Animate the header control between its idle and active footprints."""
+        """Animate the rail control between its idle and active footprints."""
         if self._download_overview_mode != mode:
             return
         current = self.download_overview.size()
@@ -1442,33 +1660,118 @@ class SettingsWindow(QWidget):
         QTimer.singleShot(0, start)
 
     def _open_download_overview(self) -> None:
-        """Open the relevant detailed section from the header overview."""
+        """Run the rail control's current action or open its detailed page."""
+        action = self._download_action
+        if action == "start_update" and self._updater is not None:
+            if self._updater.start_update():
+                self._set_download_overview_presentation(
+                    "active", "Starting download", "Preparing update", tone="accent"
+                )
+            return
+        if action == "restart_update" and self._updater is not None:
+            if self._updater.restart_to_install():
+                self._set_download_overview_presentation(
+                    "active", "Finishing update", "Verifying before restart", tone="accent"
+                )
+            return
         focus = self._download_focus
         if focus == "model":
+            self._navigate_to_section("dictation")
             self._scroll_to_widget(self.model_download_row)
             return
         if focus == "gpu":
+            self._navigate_to_section("dictation")
             if not self.advanced_btn.isChecked():
                 self.advanced_btn.setChecked(True)
                 QTimer.singleShot(ENTER_MS + 30, lambda: self._scroll_to_widget(self.gpu_download_row))
             else:
                 self._scroll_to_widget(self.gpu_download_row)
             return
-        self._scroll_to_widget(self.updates_group)
+        self._navigate_to_section("updates")
 
     # --- construction ---
 
     def _build(self) -> None:
-        outer = QVBoxLayout(self)
+        outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        # Privacy is a second page in the same window (Windows 11 Settings
-        # style: navigate in, back arrow to return) rather than a popup --
-        # see PrivacyPage. self._pages holds exactly these two.
+        nav = QFrame()
+        nav.setObjectName("navRail")
+        nav.setFixedWidth(184)
+        nav_col = QVBoxLayout(nav)
+        nav_col.setContentsMargins(14, 18, 14, 16)
+        nav_col.setSpacing(4)
+        nav_title = QLabel("Settings")
+        nav_title.setObjectName("navTitle")
+        nav_col.addWidget(nav_title)
+        nav_caption = QLabel("Dictate")
+        nav_caption.setObjectName("navCaption")
+        nav_col.addWidget(nav_caption)
+        nav_col.addSpacing(14)
+
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
+        self._nav_buttons: dict[str, QPushButton] = {}
+        for key, label in (
+            ("dictation", "Dictation"),
+            ("activity", "Activity bar"),
+            ("appearance", "Appearance"),
+            ("updates", "Updates"),
+            ("privacy", "Privacy"),
+        ):
+            button = QPushButton(label)
+            button.setObjectName("navItem")
+            button.setCheckable(True)
+            button.setCursor(Qt.PointingHandCursor)
+            self._nav_group.addButton(button)
+            self._nav_buttons[key] = button
+            nav_col.addWidget(button)
+        self._nav_buttons["dictation"].setChecked(True)
+        self.privacy_btn = self._nav_buttons["privacy"]
+        self._nav_indicator = QFrame(nav)
+        self._nav_indicator.setObjectName("navIndicator")
+        self._nav_indicator.setFixedSize(3, 18)
+        self._nav_indicator.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._nav_indicator.hide()
+        self._nav_indicator_anim = QPropertyAnimation(
+            self._nav_indicator, b"pos", self
+        )
+        self._nav_indicator_anim.setDuration(180)
+        self._nav_indicator_anim.setEasingCurve(FLUENT_DECELERATE)
+        nav_col.addStretch(1)
+        self._download_overview_slot = QVBoxLayout()
+        self._download_overview_slot.setContentsMargins(0, 0, 0, 0)
+        self._download_overview_slot.setSpacing(0)
+        nav_col.addLayout(self._download_overview_slot)
+        nav_col.addSpacing(7)
+        nav_divider = QFrame()
+        nav_divider.setObjectName("navDivider")
+        nav_divider.setFixedHeight(1)
+        nav_col.addWidget(nav_divider)
+        nav_col.addSpacing(5)
+        self.github_btn = QPushButton("GitHub")
+        self.github_btn.setObjectName("navFooterLink")
+        self.github_btn.setCursor(Qt.PointingHandCursor)
+        self.github_btn.clicked.connect(self._open_github)
+        nav_col.addWidget(self.github_btn)
+        nav_col.addSpacing(5)
+        nav_status = QLabel(f"Version {VERSION}")
+        nav_status.setProperty("role", "status")
+        nav_col.addWidget(nav_status)
+        self.save_status = QLabel()
+        self.save_status.setProperty("role", "status")
+        self.save_status.setWordWrap(True)
+        self.save_status.setVisible(False)
+        nav_col.addWidget(self.save_status)
+        outer.addWidget(nav)
+
+        # Each rail destination is a real page. The rail stays still while the
+        # content plane changes, matching Windows Settings' spatial model.
         self._pages = QStackedWidget()
-        outer.addWidget(self._pages)
+        outer.addWidget(self._pages, 1)
 
-        scroll = QScrollArea()
+        scroll = SettlingScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._pages.addWidget(scroll)
@@ -1477,9 +1780,9 @@ class SettingsWindow(QWidget):
             scroll.verticalScrollBar(), b"value", self
         )
 
+        self._settings_page = scroll
         self._privacy_page = PrivacyPage()
-        self._privacy_page.back.connect(lambda: self._pages.setCurrentWidget(scroll))
-        self._pages.addWidget(self._privacy_page)
+        self._privacy_page.back.connect(self._hide_privacy)
 
         page = QWidget()
         page.setObjectName("root")
@@ -1503,29 +1806,32 @@ class SettingsWindow(QWidget):
         hero_copy.addWidget(app_desc)
         hero_row.addLayout(hero_copy, 1)
 
-        # One compact readout at the top is faster to scan than hunting down
-        # three separate places for a speech-model, GPU, or app-update task.
+        # One adaptive rail control keeps app updates, model downloads, and
+        # GPU setup visible without turning the page header into a toolbar.
         self._download_focus = "update"
+        self._download_action = "open_update"
         self._download_overview_mode = "idle"
         self.download_overview = QPushButton()
         self.download_overview.setObjectName("downloadOverview")
         self.download_overview.setCursor(Qt.PointingHandCursor)
-        self.download_overview.setFixedSize(142, 36)
+        self.download_overview.setFixedSize(156, 40)
+        self.download_overview.setAccessibleName("Downloads and updates")
         self.download_overview.setToolTip(
-            "See the current download or installation and jump to its Settings control."
+            "See current download and update activity, or open its detailed control."
         )
-        self._download_overview_size_target = QSize(142, 36)
+        self._download_overview_size_target = QSize(156, 40)
         self._download_overview_size_anim = QParallelAnimationGroup(self)
         self._download_overview_size_anim.finished.connect(
             self._finish_download_overview_size_animation
         )
 
         download_copy = QHBoxLayout(self.download_overview)
-        download_copy.setContentsMargins(12, 7, 10, 7)
-        download_copy.setSpacing(9)
+        download_copy.setContentsMargins(10, 7, 8, 7)
+        download_copy.setSpacing(8)
         self.download_overview_status = QFrame()
         self.download_overview_status.setObjectName("downloadOverviewStatus")
         self.download_overview_status.setProperty("active", False)
+        self.download_overview_status.setProperty("tone", "muted")
         self.download_overview_status.setFixedSize(8, 8)
         self.download_overview_status.setAttribute(Qt.WA_TransparentForMouseEvents)
         self._download_overview_status_effect = QGraphicsOpacityEffect(
@@ -1541,15 +1847,25 @@ class SettingsWindow(QWidget):
             pulse = QPropertyAnimation(self._download_overview_status_effect, b"opacity", self)
             pulse.setStartValue(start)
             pulse.setEndValue(end)
-            pulse.setDuration(720)
+            pulse.setDuration(760)
             pulse.setEasingCurve(easing)
             self._download_overview_pulse.addAnimation(pulse)
         self._download_overview_pulse.setLoopCount(-1)
         download_copy.addWidget(self.download_overview_status, 0, Qt.AlignVCenter)
-        overview_copy = QVBoxLayout()
+        self.download_overview_copy = QWidget()
+        self.download_overview_copy.setAttribute(Qt.WA_TransparentForMouseEvents)
+        overview_copy = QVBoxLayout(self.download_overview_copy)
         overview_copy.setContentsMargins(0, 0, 0, 0)
-        overview_copy.setSpacing(0)
-        self.download_overview_title = QLabel("Downloads")
+        overview_copy.setSpacing(1)
+        self._download_overview_copy_effect = QGraphicsOpacityEffect(
+            self.download_overview_copy
+        )
+        self._download_overview_copy_effect.setOpacity(1.0)
+        self.download_overview_copy.setGraphicsEffect(self._download_overview_copy_effect)
+        self._download_overview_copy_fade = QPropertyAnimation(
+            self._download_overview_copy_effect, b"opacity", self
+        )
+        self.download_overview_title = QLabel("Up to date")
         self.download_overview_title.setObjectName("downloadOverviewTitle")
         self.download_overview_title.setAttribute(Qt.WA_TransparentForMouseEvents)
         overview_copy.addWidget(self.download_overview_title)
@@ -1579,13 +1895,13 @@ class SettingsWindow(QWidget):
             self._finish_download_overview_details_fade
         )
         overview_copy.addWidget(self.download_overview_details)
-        download_copy.addLayout(overview_copy, 1)
+        download_copy.addWidget(self.download_overview_copy, 1)
         overview_chevron = QLabel("›")
         overview_chevron.setObjectName("downloadOverviewChevron")
         overview_chevron.setAttribute(Qt.WA_TransparentForMouseEvents)
         download_copy.addWidget(overview_chevron, 0, Qt.AlignVCenter)
         self.download_overview.clicked.connect(self._open_download_overview)
-        hero_row.addWidget(self.download_overview, 0, Qt.AlignVCenter)
+        self._download_overview_slot.addWidget(self.download_overview)
         col.addWidget(hero)
 
         col.addSpacing(3)
@@ -1617,28 +1933,6 @@ class SettingsWindow(QWidget):
             self.tap_lock_check,
         )
         self.tap_lock_desc_label = self.tap_lock_row.findChild(QLabel, "desc")
-
-        self.live_preview_check = ToggleSwitch(self._settings.live_preview_enabled)
-        self.live_preview_check.toggled.connect(self._queue_save)
-        self.live_preview_check.toggled.connect(self._sync_preview_controls)
-        live_preview_row = _card(
-            "Live transcript preview",
-            "Shows smooth rolling text above the activity bar while you speak.",
-            self.live_preview_check,
-        )
-
-        self.enhanced_preview_check = ToggleSwitch(
-            self._settings.enhanced_preview_enabled
-        )
-        self.enhanced_preview_check.toggled.connect(self._queue_save)
-        enhanced_preview_row = _card(
-            "Enhanced preview (Alpha)",
-            "Uses a separate Base model on the CPU for more responsive live updates. "
-            "Needs a stronger PC and about 250 MB for the model download.",
-            self.enhanced_preview_check,
-        )
-        enhanced_preview_row.setProperty("nested", True)
-        enhanced_preview_row.layout().setContentsMargins(30, 9, 14, 9)
 
         self.mode_box = QComboBox()
         for value, label, _model, _device in config.TRANSCRIPTION_MODES:
@@ -1696,7 +1990,7 @@ class SettingsWindow(QWidget):
         self.sleep_slider.valueChanged.connect(self._queue_save)
         sleep_after_row = _card(
             "Sleep after",
-            "Moving this shows the normal default and offers a one-click reset.",
+            "Moving this shows the normal default value.",
             self.sleep_slider,
         )
 
@@ -1720,8 +2014,6 @@ class SettingsWindow(QWidget):
             mic_row,
             ptt_row,
             self.tap_lock_row,
-            live_preview_row,
-            enhanced_preview_row,
             mode_row,
             self.model_download_row,
             vocabulary_row,
@@ -1807,7 +2099,7 @@ class SettingsWindow(QWidget):
             )
         )
 
-        behavior_header = QLabel("APP BEHAVIOR")
+        behavior_header = QLabel("SHORTCUTS")
         behavior_header.setProperty("role", "section")
         advanced_col.addWidget(behavior_header)
 
@@ -1818,6 +2110,50 @@ class SettingsWindow(QWidget):
             "Open settings",
             "Click, then press a key or mouse button. Hold inputs together for a combination.",
             self.hotkey_edit,
+        )
+
+        advanced_col.addWidget(_settings_group(hotkey_row))
+        self.advanced_panel.setVisible(False)
+        self.advanced_panel.setMaximumHeight(0)
+        self._advanced_opacity = QGraphicsOpacityEffect(self.advanced_panel)
+        self._advanced_opacity.setOpacity(0.0)
+        self.advanced_panel.setGraphicsEffect(self._advanced_opacity)
+        self._advanced_height_anim = QPropertyAnimation(
+            self.advanced_panel, b"maximumHeight", self
+        )
+        self._advanced_fade_anim = QPropertyAnimation(
+            self._advanced_opacity, b"opacity", self
+        )
+        self._advanced_chevron_anim = QPropertyAnimation(
+            self.advanced_btn.chevron, b"rotation", self
+        )
+        # Keep the panel's geometry, contents, and affordance on one clock.
+        # Starting them separately can expose a one-frame mismatch while the
+        # layout is catching up, which reads as a hitch rather than a reveal.
+        self._advanced_motion = QParallelAnimationGroup(self)
+        self._advanced_motion.addAnimation(self._advanced_height_anim)
+        self._advanced_motion.addAnimation(self._advanced_fade_anim)
+        self._advanced_motion.addAnimation(self._advanced_chevron_anim)
+        self._advanced_motion.finished.connect(self._on_advanced_anim_finished)
+        col.addWidget(self.advanced_panel)
+
+        activity_header = QLabel("ACTIVITY BAR")
+        activity_header.setProperty("role", "section")
+        col.addWidget(activity_header)
+        self.activity_header = activity_header
+
+        self.width_slider = ValueSlider(
+            [180, 190, 200, 210, 220, 240, 260, 280],
+            int(self._settings.bar_width),
+            200,
+            " px",
+        )
+        self.width_slider.valueChanged.connect(self._queue_save)
+        self.width_slider.valueChanged.connect(self.width_preview.emit)
+        width_row = _card(
+            "Bar width",
+            "Adjust the activity bar without changing the waveform behavior.",
+            self.width_slider,
         )
 
         self.visible_check = ToggleSwitch(self._settings.always_visible)
@@ -1837,7 +2173,7 @@ class SettingsWindow(QWidget):
         self.margin_slider.valueChanged.connect(self._queue_save)
         self.margin_slider.valueChanged.connect(self.margin_preview.emit)
         margin_row = _card(
-            "Bar position",
+            "Distance from taskbar",
             "Gap between the activity bar and the taskbar; 8 px is the default.",
             self.margin_slider,
         )
@@ -1855,25 +2191,10 @@ class SettingsWindow(QWidget):
             "before it fades away.",
             self.linger_slider,
         )
-        advanced_col.addWidget(
-            _settings_group(hotkey_row, visible_row, margin_row, linger_row)
+        self.activity_group = _settings_group(
+            width_row, visible_row, margin_row, linger_row
         )
-        self.advanced_panel.setVisible(False)
-        self.advanced_panel.setMaximumHeight(0)
-        self._advanced_opacity = QGraphicsOpacityEffect(self.advanced_panel)
-        self._advanced_opacity.setOpacity(0.0)
-        self.advanced_panel.setGraphicsEffect(self._advanced_opacity)
-        self._advanced_height_anim = QPropertyAnimation(
-            self.advanced_panel, b"maximumHeight", self
-        )
-        self._advanced_fade_anim = QPropertyAnimation(
-            self._advanced_opacity, b"opacity", self
-        )
-        self._advanced_chevron_anim = QPropertyAnimation(
-            self.advanced_btn.chevron, b"rotation", self
-        )
-        self._advanced_height_anim.finished.connect(self._on_advanced_anim_finished)
-        col.addWidget(self.advanced_panel)
+        col.addWidget(self.activity_group)
 
         # Notifications section: covers every bar toast this app raises, not
         # just updates -- Dictate opening, a second launch attempt finding it
@@ -1894,11 +2215,13 @@ class SettingsWindow(QWidget):
             "this on to also mirror them as a Windows notification.",
             self.system_notifications_check,
         )
-        col.addWidget(_settings_group(system_notifications_row))
+        self.notifications_group = _settings_group(system_notifications_row)
+        col.addWidget(self.notifications_group)
 
         appearance_header = QLabel("APPEARANCE")
         appearance_header.setProperty("role", "section")
         col.addWidget(appearance_header)
+        self.appearance_header = appearance_header
         self.theme_box = QComboBox()
         self.theme_box.addItem("Use Windows setting", "system")
         self.theme_box.addItem("Light", "light")
@@ -1911,14 +2234,15 @@ class SettingsWindow(QWidget):
             self.theme_box,
         )
 
-        col.addWidget(_settings_group(theme_row))
+        self.appearance_group = _settings_group(theme_row)
+        col.addWidget(self.appearance_group)
 
-        # Windows puts Windows Update at the end of Settings navigation. This
-        # single-page app has no navigation rail, so its equivalent is the
-        # final primary section -- prominent, never hidden in a footer.
+        # Updates gets a dedicated rail destination, so the primary action is
+        # prominent without being buried in a long general-settings document.
         updates_header = QLabel("DICTATE UPDATE")
         updates_header.setProperty("role", "section")
         col.addWidget(updates_header)
+        self.updates_header = updates_header
         self.auto_update_check = ToggleSwitch(self._settings.auto_update_enabled)
         self.auto_update_check.toggled.connect(self._queue_save)
         auto_update_row = _card(
@@ -1954,24 +2278,99 @@ class SettingsWindow(QWidget):
         self.reload_progress = _native_progress_bar()
         col.addWidget(self.reload_progress)
 
-        bottom_row = QHBoxLayout()
-        self.privacy_btn = QPushButton("Privacy")
-        self.privacy_btn.setObjectName("link")
-        self.privacy_btn.clicked.connect(self._show_privacy)
-        bottom_row.addWidget(self.privacy_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        self.github_btn = QPushButton("GitHub")
-        self.github_btn.setObjectName("link")
-        self.github_btn.clicked.connect(self._open_github)
-        bottom_row.addWidget(self.github_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        about = QLabel(f"Version {VERSION}")
-        about.setProperty("role", "status")
-        bottom_row.addWidget(about)
-        bottom_row.addStretch(1)
-        self.save_status = QLabel("Changes save automatically")
-        self.save_status.setProperty("role", "status")
-        bottom_row.addWidget(self.save_status, 0, Qt.AlignRight | Qt.AlignVCenter)
+        def finish_page(
+            page_scroll: QScrollArea,
+            page_layout: QVBoxLayout,
+            title: QLabel,
+            heading: str,
+            description: str,
+            *widgets: QWidget,
+        ) -> None:
+            title.setText(heading)
+            title.setProperty("role", "appTitle")
+            title.style().unpolish(title)
+            title.style().polish(title)
+            page_layout.addWidget(title)
+            copy = QLabel(description)
+            copy.setProperty("role", "desc")
+            copy.setWordWrap(True)
+            page_layout.addWidget(copy)
+            page_layout.addSpacing(12)
+            for widget in widgets:
+                page_layout.addWidget(widget)
+            page_layout.addStretch(1)
+            self._pages.addWidget(page_scroll)
 
-        col.addLayout(bottom_row)
+        def new_page() -> tuple[QScrollArea, QVBoxLayout]:
+            page_scroll = SettlingScrollArea()
+            page_scroll.setWidgetResizable(True)
+            page_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            page_root = QWidget()
+            page_root.setObjectName("root")
+            page_layout = QVBoxLayout(page_root)
+            page_layout.setContentsMargins(26, 24, 26, 26)
+            page_layout.setSpacing(8)
+            page_scroll.setWidget(page_root)
+            return page_scroll, page_layout
+
+        self._activity_page, activity_col = new_page()
+        finish_page(
+            self._activity_page,
+            activity_col,
+            self.activity_header,
+            "Activity bar",
+            "Choose how the compact waveform appears and leaves the screen.",
+            self.activity_group,
+        )
+
+        self._appearance_page, appearance_col = new_page()
+        finish_page(
+            self._appearance_page,
+            appearance_col,
+            self.appearance_header,
+            "Appearance",
+            "Keep Dictate aligned with Windows and choose where notifications appear.",
+            self.appearance_group,
+            notifications_header,
+            self.notifications_group,
+        )
+
+        self._updates_page, updates_col = new_page()
+        finish_page(
+            self._updates_page,
+            updates_col,
+            self.updates_header,
+            "Updates",
+            "Control when Dictate checks GitHub and install only when you choose.",
+            self.updates_group,
+        )
+        self._pages.addWidget(self._privacy_page)
+
+        self._page_map = {
+            "dictation": self._settings_page,
+            "activity": self._activity_page,
+            "appearance": self._appearance_page,
+            "updates": self._updates_page,
+            "privacy": self._privacy_page,
+        }
+        self._page_order = list(self._page_map)
+        self._page_effects: dict[str, QGraphicsOpacityEffect] = {}
+        for key, content_page in self._page_map.items():
+            effect = QGraphicsOpacityEffect(content_page)
+            effect.setOpacity(1.0)
+            content_page.setGraphicsEffect(effect)
+            self._page_effects[key] = effect
+        self._page_motion = QParallelAnimationGroup(self)
+        self._page_slide = QPropertyAnimation(self._settings_page, b"pos", self)
+        self._page_fade = QPropertyAnimation(
+            self._page_effects["dictation"], b"opacity", self
+        )
+        self._page_motion.addAnimation(self._page_slide)
+        self._page_motion.addAnimation(self._page_fade)
+        for key, button in self._nav_buttons.items():
+            button.clicked.connect(
+                lambda _checked=False, section=key: self._navigate_to_section(section)
+            )
         self._load_widgets(self._settings)
         self._update_gpu_download_visibility()
         self._update_gpu_download_visibility()
@@ -2132,9 +2531,7 @@ class SettingsWindow(QWidget):
         is the thing that makes a hand-built expander feel unlike the real
         control, even when every individual piece is right.
         """
-        self._advanced_height_anim.stop()
-        self._advanced_fade_anim.stop()
-        self._advanced_chevron_anim.stop()
+        self._advanced_motion.stop()
 
         duration = ENTER_MS if open_ else EXIT_MS
         curve = FLUENT_DECELERATE if open_ else FLUENT_ACCELERATE
@@ -2148,7 +2545,14 @@ class SettingsWindow(QWidget):
             end_opacity = 0.0
 
         for anim, start, end in (
-            (self._advanced_height_anim, self.advanced_panel.height(), end_height),
+            # maximumHeight is the value the layout is currently honoring.
+            # QWidget.height() can still report the previous layout pass when
+            # someone reverses the expander, which makes the panel snap.
+            (
+                self._advanced_height_anim,
+                self.advanced_panel.maximumHeight(),
+                end_height,
+            ),
             (self._advanced_fade_anim, self._advanced_opacity.opacity(), end_opacity),
             (
                 self._advanced_chevron_anim,
@@ -2160,7 +2564,7 @@ class SettingsWindow(QWidget):
             anim.setEasingCurve(curve)
             anim.setStartValue(start)
             anim.setEndValue(end)
-            anim.start()
+        self._advanced_motion.start()
 
     def _on_advanced_anim_finished(self) -> None:
         # Only actually hide once collapsed -- an expand's "finished" fires
@@ -2169,7 +2573,74 @@ class SettingsWindow(QWidget):
             self.advanced_panel.setVisible(False)
 
     def _show_privacy(self) -> None:
-        self._pages.setCurrentWidget(self._privacy_page)
+        """Open Privacy as a real rail destination."""
+        self._nav_buttons["privacy"].setChecked(True)
+        self._move_nav_indicator("privacy")
+        self._animate_to_page("privacy")
+
+    def _hide_privacy(self) -> None:
+        """Return to the last working page with reverse spatial motion."""
+        self._nav_buttons[self._current_section].setChecked(True)
+        self._move_nav_indicator(self._current_section)
+        self._animate_to_page(self._current_section)
+
+    def _move_nav_indicator(self, section: str, *, animate: bool = True) -> None:
+        """Move one restrained accent mark instead of flashing button borders."""
+        button = self._nav_buttons[section]
+        target = QPoint(
+            button.x(),
+            button.y() + max(0, (button.height() - self._nav_indicator.height()) // 2),
+        )
+        if not animate or not self._nav_indicator.isVisible():
+            self._nav_indicator_anim.stop()
+            self._nav_indicator.move(target)
+            self._nav_indicator.show()
+            self._nav_indicator.raise_()
+            return
+        self._nav_indicator_anim.stop()
+        self._nav_indicator_anim.setStartValue(self._nav_indicator.pos())
+        self._nav_indicator_anim.setEndValue(target)
+        self._nav_indicator_anim.start()
+        self._nav_indicator.raise_()
+
+    def _animate_to_page(self, section: str, *, force: bool = False) -> None:
+        """Show one content page with interruption-safe spatial continuity."""
+        target = self._page_map[section]
+        visible = getattr(self, "_visible_section", "dictation")
+        if not force and visible == section and self._pages.currentWidget() is target:
+            return
+        old_index = self._page_order.index(visible)
+        new_index = self._page_order.index(section)
+        direction = 1 if new_index >= old_index else -1
+
+        self._page_motion.stop()
+        for key, content_page in self._page_map.items():
+            content_page.move(0, 0)
+            self._page_effects[key].setOpacity(1.0)
+        self._pages.setCurrentWidget(target)
+        effect = self._page_effects[section]
+        self._page_slide.setTargetObject(target)
+        self._page_fade.setTargetObject(effect)
+        self._page_slide.setDuration(210)
+        self._page_slide.setEasingCurve(FLUENT_DECELERATE)
+        self._page_slide.setStartValue(QPoint(16 * direction, 0))
+        self._page_slide.setEndValue(QPoint(0, 0))
+        self._page_fade.setDuration(160)
+        self._page_fade.setEasingCurve(FLUENT_DECELERATE)
+        self._page_fade.setStartValue(0.58)
+        self._page_fade.setEndValue(1.0)
+        self._visible_section = section
+        self._page_motion.start()
+
+    def _navigate_to_section(self, section: str) -> None:
+        """Navigate like Windows Settings: stable rail, distinct content pages."""
+        if section == "privacy":
+            self._show_privacy()
+            return
+        self._current_section = section
+        self._nav_buttons[section].setChecked(True)
+        self._move_nav_indicator(section)
+        self._animate_to_page(section)
 
     def _open_github(self) -> None:
         QDesktopServices.openUrl(QUrl("https://github.com/PLEXFX/dictate"))
@@ -2190,7 +2661,16 @@ class SettingsWindow(QWidget):
             self.update_btn.setEnabled(False)
             self.update_btn.setText("Downloading…")
             self._updater.start_update()
-        elif u_state in (updater_mod.CHECKING, updater_mod.DOWNLOADING, updater_mod.INSTALLING):
+        elif u_state == updater_mod.READY_TO_RESTART:
+            self.update_btn.setEnabled(False)
+            self.update_btn.setText("Verifying…")
+            self._updater.restart_to_install()
+        elif u_state in (
+            updater_mod.CHECKING,
+            updater_mod.DOWNLOADING,
+            updater_mod.VERIFYING,
+            updater_mod.INSTALLING,
+        ):
             return  # already busy -- the button should already be disabled
         else:
             self.update_btn.setEnabled(False)
@@ -2207,19 +2687,29 @@ class SettingsWindow(QWidget):
         Updater.last_status reverts itself back to IDLE a few seconds after
         a one-shot confirmation (UP_TO_DATE/ERROR) -- see updater.py's
         _set_status -- so this can just poll it fresh each call with no
-        "have I already shown this" bookkeeping of its own. AVAILABLE
-        remains visible until the person clicks "Download & install".
+        "have I already shown this" bookkeeping of its own. AVAILABLE and
+        READY_TO_RESTART remain visible until the person acts.
         """
         self._refresh_download_overview()
         if self._updater is not None:
             auto_update_on = self.auto_update_check.isChecked()
             u_state, u_detail, u_progress = self._updater.last_status
+            update_busy = u_state in (
+                updater_mod.CHECKING,
+                updater_mod.DOWNLOADING,
+                updater_mod.VERIFYING,
+                updater_mod.INSTALLING,
+            )
             self.update_btn.setEnabled(
-                auto_update_on
-                and u_state not in (updater_mod.CHECKING, updater_mod.DOWNLOADING, updater_mod.INSTALLING)
+                u_state == updater_mod.READY_TO_RESTART
+                or (auto_update_on and not update_busy)
             )
             if u_state == updater_mod.AVAILABLE:
-                self.update_btn.setText("Download & install")
+                self.update_btn.setText("Download update")
+            elif u_state == updater_mod.READY_TO_RESTART:
+                self.update_btn.setText("Restart now")
+            elif u_state == updater_mod.VERIFYING:
+                self.update_btn.setText("Verifying…")
             elif u_state == updater_mod.INSTALLING:
                 self.update_btn.setText("Restarting…")
             elif u_state in (updater_mod.CHECKING, updater_mod.DOWNLOADING):
@@ -2231,9 +2721,8 @@ class SettingsWindow(QWidget):
             # description text: determinate while a size is known
             # (DOWNLOADING), indeterminate (range 0,0) for CHECKING/
             # INSTALLING, where there's real work happening but no fraction.
-            busy = u_state in (updater_mod.CHECKING, updater_mod.DOWNLOADING, updater_mod.INSTALLING)
-            self.update_progress.setVisible(busy)
-            if busy:
+            self.update_progress.setVisible(update_busy)
+            if update_busy:
                 if u_state == updater_mod.DOWNLOADING and u_progress is not None:
                     self.update_progress.setRange(0, 100)
                     self.update_progress.setValue(int(u_progress * 100))
@@ -2241,7 +2730,7 @@ class SettingsWindow(QWidget):
                     self.update_progress.setRange(0, 0)
 
             if u_state != updater_mod.IDLE:
-                self.save_status.setText(u_detail)
+                self._set_status(u_detail)
                 if self.update_desc_label is not None:
                     self.update_desc_label.setText(u_detail)
                 return
@@ -2273,7 +2762,7 @@ class SettingsWindow(QWidget):
             self.model_download_progress.setValue(int(progress * 100))
             if self.model_download_desc_label is not None:
                 self.model_download_desc_label.setText(detail)
-            self.save_status.setText(detail)
+            self._set_status(detail)
             return
 
         self.model_download_row.setVisible(False)
@@ -2282,16 +2771,16 @@ class SettingsWindow(QWidget):
             if state == engine_mod.READY:
                 self._pending_reload = False
                 self.reload_progress.setVisible(False)
-                self.save_status.setText("Saved")
-                self._saved_timer.start()
+                self._clear_status()
                 return
             if state == engine_mod.ERROR:
                 self._pending_reload = False
                 self.reload_progress.setVisible(False)
-                self.save_status.setText("The speech model could not load")
+                self._set_status("The speech model could not load")
                 return
         else:
             self.reload_progress.setVisible(False)
+            self._clear_status()
 
     def _tap_lock_desc(self) -> str:
         """Explain the gesture using the key that is actually bound to it."""
@@ -2310,17 +2799,11 @@ class SettingsWindow(QWidget):
         try:
             os.startfile(folder)
         except OSError:
-            self.save_status.setText("Could not open the model folder")
+            self._set_status("Could not open the model folder")
 
     def _refresh_tap_lock_desc(self, *_args) -> None:
         if self.tap_lock_desc_label is not None:
             self.tap_lock_desc_label.setText(self._tap_lock_desc())
-
-    def _sync_preview_controls(self, *_args) -> None:
-        """Keep Enhanced preview visibly nested under its parent switch."""
-        self.enhanced_preview_check.setEnabled(
-            self.live_preview_check.isChecked()
-        )
 
     def _on_appearance_changed(self, *_args) -> None:
         if self._loading:
@@ -2339,11 +2822,10 @@ class SettingsWindow(QWidget):
             sleep_after_minutes=self.sleep_slider.value(),
             ptt_key=self.ptt_edit.binding() or config.DEFAULT_PTT_KEY,
             tap_to_lock=self.tap_lock_check.isChecked(),
-            live_preview_enabled=self.live_preview_check.isChecked(),
-            enhanced_preview_enabled=self.enhanced_preview_check.isChecked(),
             settings_hotkey=self.hotkey_edit.binding() or "ctrl+alt+d",
             vocabulary=self._vocabulary,
             always_visible=self.visible_check.isChecked(),
+            bar_width=self.width_slider.value(),
             bar_margin=self.margin_slider.value(),
             bar_linger_ms=self.linger_slider.value(),
             start_with_windows=self.startup_check.isChecked(),
@@ -2359,7 +2841,6 @@ class SettingsWindow(QWidget):
         self.sleep_slider.setEnabled(self.sleep_check.isChecked())
         if self._updater is not None:
             self.refresh_status()
-        self.save_status.setText("Saving…")
         self._save_timer.start()
 
     def _save_now(self) -> None:
@@ -2377,7 +2858,7 @@ class SettingsWindow(QWidget):
                 self.startup_check.setChecked(old.start_with_windows)
                 self.startup_check.blockSignals(blocked)
                 new = replace(new, start_with_windows=old.start_with_windows)
-                self.save_status.setText("Could not update Windows startup")
+                self._set_status("Could not update Windows startup")
                 if asdict(new) == asdict(old):
                     return
 
@@ -2386,18 +2867,25 @@ class SettingsWindow(QWidget):
         self._settings = new
         config.save(new)
         self.changed.emit(new)  # main.py wires this to engine/hotkeys/bar/tray
-        self.save_status.setText("Saved")
-        self._saved_timer.start()
-
         if needs_reload:
             self._pending_reload = True
-            self.save_status.setText("Saved · Updating speech model…")
+            self._set_status("Updating speech model…")
             self._engine.preload()
         else:
             self._pending_reload = False
+            self._clear_status()
 
     def _show_auto_save_message(self) -> None:
-        self.save_status.setText("Changes save automatically")
+        self._clear_status()
+
+    def _set_status(self, text: str) -> None:
+        """Show the rail status only for live work or an actionable failure."""
+        self.save_status.setText(text)
+        self.save_status.setVisible(True)
+
+    def _clear_status(self) -> None:
+        self.save_status.clear()
+        self.save_status.setVisible(False)
 
     def _load_widgets(self, s: config.Settings) -> None:
         """Push settings values into the controls without staging a change."""
@@ -2412,14 +2900,12 @@ class SettingsWindow(QWidget):
         _fill_microphone_box(self.mic_box, s.input_device)
         self.ptt_edit.setBinding(s.ptt_key)
         self.tap_lock_check.setChecked(s.tap_to_lock)
-        self.live_preview_check.setChecked(s.live_preview_enabled)
-        self.enhanced_preview_check.setChecked(s.enhanced_preview_enabled)
-        self._sync_preview_controls()
         self._refresh_tap_lock_desc()
         self.hotkey_edit.setBinding(s.settings_hotkey)
         self._vocabulary = list(s.vocabulary)
         self._update_vocabulary_button()
         self.visible_check.setChecked(s.always_visible)
+        self.width_slider.setValue(s.bar_width)
         self.margin_slider.setValue(s.bar_margin)
         self.linger_slider.setValue(s.bar_linger_ms)
         self.startup_check.setChecked(s.start_with_windows)
@@ -2434,6 +2920,9 @@ class SettingsWindow(QWidget):
         self._apply_appearance()
         _fill_microphone_box(self.mic_box, self._settings.input_device)
         self.refresh_status()
+        visible = getattr(self, "_visible_section", "dictation")
+        QTimer.singleShot(0, lambda: self._move_nav_indicator(visible, animate=False))
+        self._animate_to_page(visible, force=True)
 
     def closeEvent(self, event) -> None:
         self.ptt_edit.cancel()

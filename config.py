@@ -147,8 +147,6 @@ class Settings:
 
     # --- feedback ---
     sound_cues: bool = True       # short tones when the mic opens and closes
-    live_preview_enabled: bool = True  # rolling two-line card while speaking
-    enhanced_preview_enabled: bool = False  # dedicated Base model on CPU
 
     # --- updates ---
     auto_update_enabled: bool = True  # periodically check GitHub for a new release
@@ -164,6 +162,7 @@ class Settings:
     # --- appearance ---
     theme_mode: str = "system"  # system | light | dark
     always_visible: bool = False  # keep the bar on screen even when idle
+    bar_width: int = 200          # visible activity-bar width in logical pixels
     bar_margin: int = 8           # gap in px between the bar and the taskbar
     bar_linger_ms: int = 750      # how long the bar stays after finishing before it fades
 
@@ -192,14 +191,13 @@ class Settings:
         out.start_with_windows = bool(out.start_with_windows)
         out.tap_to_lock = bool(out.tap_to_lock)
         out.sound_cues = bool(out.sound_cues)
-        out.live_preview_enabled = bool(out.live_preview_enabled)
-        out.enhanced_preview_enabled = bool(out.enhanced_preview_enabled)
         out.auto_update_enabled = bool(out.auto_update_enabled)
         out.system_notifications_enabled = bool(out.system_notifications_enabled)
         if out.theme_mode not in {"system", "light", "dark"}:
             out.theme_mode = "system"
         out.onboarding_complete = bool(out.onboarding_complete)
         out.sleep_after_minutes = min(max(float(out.sleep_after_minutes), 0.5), 240.0)
+        out.bar_width = min(max(int(out.bar_width), 180), 280)
         out.bar_margin = min(max(int(out.bar_margin), 0), 400)
         out.bar_linger_ms = min(max(int(out.bar_linger_ms), 400), 4000)
         return out

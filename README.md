@@ -4,14 +4,12 @@ Hold a key anywhere in Windows, speak, release. The text appears in whatever
 you were typing in. Transcription runs on this machine — no account and no
 cloud transcription. Speech-model files may download the first time they are used.
 
-## What's new in v1.0.3-beta.1
+## What's new in v1.1.0-beta.1
 
-Fresh setup now opens Settings and prepares **Small English** on CPU in the
-background, with clear progress whether or not you start talking first.
-Downloads & installs stays compact until it has real work to show, then opens
-smoothly with model, GPU, or update progress. Setup can also install optional
-NVIDIA acceleration with a real percentage; later GPU setup remains a clear,
-manual choice in Settings.
+Settings is now organized into focused Dictation, Activity bar, Appearance,
+Updates, and Privacy pages, with a quiet Windows-style navigation rail. The
+activity bar, setup, downloads, and updates all have clearer live feedback,
+while Settings no longer includes reset-to-default actions.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete version history.
 Read [PRIVACY.md](PRIVACY.md) for exactly what Dictate processes and what its
@@ -27,9 +25,7 @@ States morph into one another rather than swapping, each capsule starting a
 beat after its neighbour so the change ripples across, and it takes its colour
 from your Windows accent, glowing a little brighter the louder you speak. It
 draws at your display's refresh rate, is built for whatever scale factor
-that display uses, and stops entirely once nothing is moving. A live
-transcript card grows out of the same surface while you talk, showing the
-last line or two of what Dictate has heard so far.
+that display uses, and stops entirely once nothing is moving.
 
 ## Install
 
@@ -65,12 +61,12 @@ lets you choose a microphone.
 Use `run-dictate-debug.bat` instead when something is wrong; it keeps a
 console open so `[dictate]` status lines and errors are visible, and you can
 type commands into it — `help` lists them (model loading, status, GPU and
-version info, a settings/update shortcut, and a couple that fake an update
-notification for testing without touching the network).
+version info, and a settings/update shortcut).
 
 ## Settings
 
-The main page keeps only the everyday choices visible. Changes save
+Settings uses a persistent Windows-style navigation rail with separate
+Dictation, Activity bar, Appearance, Updates, and Privacy pages. Changes save
 automatically, and preferences are stored in the normal Windows per-user
 app-data folder rather than beside the source code.
 
@@ -92,7 +88,14 @@ app-data folder rather than beside the source code.
 | Processing | CPU, GPU, or automatic. If installed without GPU support, switching to GPU downloads the acceleration files first (about 1.3 GB from PyPI). |
 | Speech model | `tiny.en` through `large-v3-turbo`; `small.en` is the default. **Open model folder** shows Dictate's private model cache. |
 | Open settings | Click and press a keyboard or mouse combination, default `ctrl+alt+d` |
-| Always show activity bar / Bar position | Control when and where the bar appears |
+
+**Activity bar** keeps its display choices together:
+
+| Setting | What it does |
+| --- | --- |
+| Bar width | Live 180–280 px control; 200 px is the compact default and changes animate smoothly |
+| Always show / Distance from taskbar | Control when and where the bar appears |
+| Stay after finishing | Set how long completed feedback remains visible |
 
 Dictate always pastes the result and adds one separating space. Those are
 consistent app behaviors rather than settings. Slider values show the default
@@ -112,24 +115,36 @@ result in memory only; choosing it temporarily replaces the clipboard, then
 restores what was there after 5 seconds. If you copy anything in that window,
 Dictate leaves your newer clipboard item alone.
 
-A Notifications section in Settings has one toggle, "Also show Windows
+A Notifications section on the Appearance page has one toggle, "Also show Windows
 notifications" — off by default. Dictate's own floating-bar notification
 always shows for everything it raises (opening, an update, a second launch
 attempt); turning this on also mirrors each one as a normal Windows
 notification.
 
-The Dictate Update section at the bottom of Settings has its own toggle,
+The Updates page has its own toggle,
 "Check for updates automatically" — on by default, and also set at install
 time. Turning it off stops the daily background check and disables the
 manual "Check for updates" button; Dictate makes no GitHub request at all
 while it's off. Finding a newer version never downloads it automatically —
-Settings shows "Download & install," and the bar shows the same
-notification; either one starts the download, verifies it, and installs it
-only once you click it.
+the Settings rail and bar show an "Update available" action. Clicking it
+downloads and verifies the installer without closing Dictate. The rail then
+changes to "Restart to finish"; only that explicit second click revalidates
+the staged installer, launches it, and restarts the app. The verified state
+survives closing and reopening Dictate.
 
-The Privacy page at the bottom of Settings explains microphone use, local
+The Privacy page in the Settings rail explains microphone use, local
 transcription, model downloads, clipboard behavior, and diagnostics in plain
 language. Debug output reports activity and errors without printing dictated text.
+
+## Preparing release notes
+
+The post-update page automatically shows the GitHub release body for the exact
+version that was installed. `CHANGELOG.md` is the single source for that text:
+move the finished entries from **Unreleased** under the new version heading,
+then double-click `prepare-release-notes.bat`. It checks that the app,
+package, and installer versions match, copies that version's notes to the
+clipboard, and opens a readable copy. Paste the copied text into the matching
+GitHub release—no separate in-app notes to maintain.
 
 ## Sounds
 
@@ -211,6 +226,7 @@ quitting gives that back. On CPU, sleep really does return everything.
 | `sounds.py` | The two synthesised cues and their playback |
 | `config.py` | Settings defaults, load, save, and clamping |
 | `updater.py` | Background GitHub Releases check, download, and verification |
+| `release_notes.py` | Extracts the current version's GitHub release body from `CHANGELOG.md` |
 | `gpu_runtime.py` | On-demand CUDA compute DLL download from PyPI for an installed build |
 
 Three threads matter: the Qt UI thread, pynput's listener thread, and a

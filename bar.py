@@ -109,7 +109,7 @@ FALLBACK_ACCENT = QColor(76, 194, 255)  # #4CC2FF, the Windows 11 dark accent
 HALF_BANDS = 20        # bands the meter produces (main.py builds it from this)
 N_BARS = 21            # slim capsules, asymmetric, no mirroring
 BAR_W = 4.0
-BAR_GAP = 5.0
+BAR_GAP = 4.0
 BAR_R = BAR_W / 2      # a true capsule reads sleeker than a rounded rectangle
 WAVE_W = N_BARS * BAR_W + (N_BARS - 1) * BAR_GAP
 
@@ -121,14 +121,14 @@ SHADOW_PAD = 12        # room around the pill for the ambient shadow
 # The transcript is part of this same frameless window.  Reserving its full
 # height keeps the waveform anchored above the taskbar while the card grows
 # upward instead of making the whole control jump when the first words arrive.
-CARD_FULL_H = 48        # two compact rows with Windows-like 4px top breathing room
+CARD_FULL_H = 48        # retained only for a future, verified preview implementation
 CARD_ONE_H = 29         # one row stays compact until history actually exists
 CARD_STUB_H = 8        # the small connected lip visible before speech resolves
 CARD_OVERLAP = 3       # tucks under the pill so the two surfaces read as one
 CARD_INSET = 4
 CARD_TEXT_PAD = 12
 CARD_RADIUS = 8
-PILL_TOP = SHADOW_PAD + CARD_FULL_H
+PILL_TOP = SHADOW_PAD
 WIDTH = PILL_W + 2 * SHADOW_PAD
 HEIGHT = PILL_TOP + PILL_H + SHADOW_PAD
 MAX_BAR_H = PILL_H - 12
@@ -164,6 +164,17 @@ SPRING_ZETA = 0.70
 PRESS_OMEGA = 90.0
 PRESS_ZETA = 0.85
 PRESS_DIP = 0.97   # how far the pill shrinks on press; subtle, not a bounce toy
+# Width follows a critically damped spring instead of restarting a canned
+# animation on every slider step. Preserving velocity is what makes a drag
+# feel like one continuous gesture rather than a stack of interrupted tweens.
+WIDTH_OMEGA = 14.0
+WIDTH_ZETA = 1.0
+# The taskbar gap moves the whole native window, where discrete slider values
+# are especially obvious. A critically damped spring keeps the bar attached to
+# the person's drag without the stepped movement of calling move() for every
+# individual slider value.
+MARGIN_OMEGA = 18.0
+MARGIN_ZETA = 1.0
 # Fluent point-to-point motion is 150-250 ms. An earlier build stacked a
 # 350 ms dwell floor, a 200 ms morph and a 144 ms ripple, so a state change
 # could take 694 ms end to end and read as lag. These are sized so the worst
@@ -299,6 +310,7 @@ def _box_blur(a: np.ndarray, radius: int, axis: int) -> np.ndarray:
 def _surface_path(
     card_height: float = 0.0,
     *,
+    pill_width: float = PILL_W,
     y_offset: float = 0.0,
     pixel_inset: float = 0.0,
 ) -> QPainterPath:
@@ -312,7 +324,7 @@ def _surface_path(
         QRectF(
             SHADOW_PAD + pixel_inset,
             PILL_TOP + y_offset + pixel_inset,
-            PILL_W - 2 * pixel_inset,
+            pill_width - 2 * pixel_inset,
             PILL_H - 2 * pixel_inset,
         ),
         RADIUS,
@@ -325,7 +337,7 @@ def _surface_path(
         QRectF(
             SHADOW_PAD + CARD_INSET + pixel_inset,
             PILL_TOP + CARD_OVERLAP + y_offset - card_height + pixel_inset,
-            PILL_W - 2 * CARD_INSET - 2 * pixel_inset,
+            pill_width - 2 * CARD_INSET - 2 * pixel_inset,
             card_height - 2 * pixel_inset,
         ),
         CARD_RADIUS,
@@ -335,7 +347,10 @@ def _surface_path(
 
 
 def _shadow(
-    dpr: float, dark: bool = True, card_height: float = 0.0
+    dpr: float,
+    dark: bool = True,
+    card_height: float = 0.0,
+    pill_width: float = PILL_W,
 ) -> QPixmap:
     """Ambient elevation under the complete control, cached per card height.
 
@@ -348,17 +363,21 @@ def _shadow(
     # doing three blur passes on every frame of the height spring.
     card_height = max(0.0, min(CARD_FULL_H, card_height))
     shadow_card_height = float(int(round(card_height / 2.0)) * 2)
-    key = ("shadow", round(dpr, 3), dark, shadow_card_height)
+    pill_width = float(round(pill_width))
+    key = ("shadow", round(dpr, 3), dark, shadow_card_height, pill_width)
     if key in _CACHE:
         return _CACHE[key]
-    width, height = int(round(WIDTH * dpr)), int(round(HEIGHT * dpr))
+    logical_width = pill_width + 2 * SHADOW_PAD
+    width, height = int(round(logical_width * dpr)), int(round(HEIGHT * dpr))
     layer = QImage(width, height, QImage.Format_ARGB32)
     layer.fill(Qt.transparent)
     p = QPainter(layer)
     p.setRenderHint(QPainter.Antialiasing, True)
     p.setPen(Qt.NoPen)
     p.scale(dpr, dpr)
-    path = _surface_path(shadow_card_height, y_offset=2.0)
+    path = _surface_path(
+        shadow_card_height, pill_width=pill_width, y_offset=2.0
+    )
     shadow_color = QColor(colors(dark)["shadow"])
     shadow_color.setAlpha(round(shadow_color.alpha() * 0.76))
     p.fillPath(path, shadow_color)
@@ -409,16 +428,24 @@ class Bar(QWidget):
         self._toast_on_click = None      # optional callback for an actionable notice
         self._loading_notice_active = False
         self._linger_ms = settings.bar_linger_ms
-        self._preview_margin: int | None = None  # live override while dragging the Settings slider
+        self._margin_value = float(settings.bar_margin)
+        self._margin_target = self._margin_value
+        self._margin_velocity = 0.0
+        self._margin_last_tick = time.perf_counter()
+        self._pill_width = float(settings.bar_width)
+        self._width_target = self._pill_width
+        self._width_velocity = 0.0
+        self._width_last_tick = time.perf_counter()
+        self._width_anchor_x: float | None = None
 
         self._clickable = False          # only true while a locked recording is running
         self._press_scale = 1.0
         self._press_vel = 0.0
         self._press_target = 1.0
 
-        # Rolling two-line transcript.  ``_card_expand == 0`` still paints a
-        # small lip while listening; the first line opens a compact card and
-        # 1 reveals enough room for both lines.
+        # Reserved for a future, fully dependable preview surface. The bar is
+        # intentionally waveform-only today; its height is kept stable so it
+        # never obscures the application receiving the final dictation.
         self._card_active = False
         self._card_expand = 0.0
         self._card_vel = 0.0
@@ -473,12 +500,10 @@ class Bar(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
-        # The transcript reserves its full upward animation area even while
-        # collapsed.  Keep those transparent pixels click-through unless a
-        # locked recording has explicitly armed the bar's finish-on-click
-        # action, or the invisible rectangle would block the app underneath.
+        # Keep transparent pixels click-through unless a locked recording has
+        # explicitly armed the bar's finish-on-click action.
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setFixedSize(WIDTH, HEIGHT)
+        self.setFixedSize(self._window_width(), HEIGHT)
 
         self._toast = Toast(self._dark)
         self._toast.clicked.connect(self._on_toast_clicked)
@@ -486,6 +511,16 @@ class Bar(QWidget):
         # Everything about the entrance -- fade, scale and rise -- is driven
         # from this one value, so the three can never disagree.
         self._reveal_anim = QPropertyAnimation(self, b"reveal", self)
+
+        self._width_timer = QTimer(self)
+        self._width_timer.setInterval(16)
+        self._width_timer.setTimerType(Qt.PreciseTimer)
+        self._width_timer.timeout.connect(self._tick_width)
+
+        self._margin_timer = QTimer(self)
+        self._margin_timer.setInterval(16)
+        self._margin_timer.setTimerType(Qt.PreciseTimer)
+        self._margin_timer.timeout.connect(self._tick_margin)
 
         self._timer = QTimer(self)
         self._timer.setInterval(16)     # replaced by the real refresh period
@@ -514,10 +549,121 @@ class Bar(QWidget):
 
     # --- placement ---
 
+    def _window_width(self) -> int:
+        return int(round(self._pill_width)) + 2 * SHADOW_PAD
+
+    def _wave_width(self) -> float:
+        return max(1.0, self._pill_width - 2 * PAD)
+
+    def _bar_gap(self) -> float:
+        return max(0.0, (self._wave_width() - N_BARS * BAR_W) / (N_BARS - 1))
+
+    def _set_pill_width(self, width: float) -> None:
+        width = min(280.0, max(180.0, float(width)))
+        if abs(width - self._pill_width) < 0.01:
+            return
+        anchor_x = self._width_anchor_x
+        if anchor_x is None:
+            anchor_x = self.x() + self.width() / 2.0
+        self._pill_width = width
+        self.setFixedSize(self._window_width(), HEIGHT)
+        if self.isVisible():
+            self.move(round(anchor_x - self.width() / 2.0), self.y())
+        if hasattr(self, "_toast"):
+            self._toast.follow(self.pill_geometry())
+        self.update()
+
+    def _animate_width(self, width: int) -> None:
+        target = float(min(280, max(180, width)))
+        self._width_target = target
+        if abs(target - self._pill_width) < 0.05 and abs(self._width_velocity) < 0.05:
+            self._set_pill_width(target)
+            return
+        if not self._width_timer.isActive():
+            self._width_anchor_x = self.x() + self.width() / 2.0
+            self._width_last_tick = time.perf_counter()
+            self._width_timer.start()
+
+    def _tick_width(self) -> None:
+        """Advance one interruption-safe width spring frame."""
+        now = time.perf_counter()
+        dt = min(max(0.0, now - self._width_last_tick), 0.05)
+        self._width_last_tick = now
+        if dt <= 0.0:
+            return
+        width, velocity = _spring_scalar(
+            self._pill_width,
+            self._width_velocity,
+            self._width_target,
+            WIDTH_OMEGA,
+            WIDTH_ZETA,
+            dt,
+        )
+        self._width_velocity = velocity
+        self._set_pill_width(width)
+        if abs(width - self._width_target) < 0.05 and abs(velocity) < 0.5:
+            self._set_pill_width(self._width_target)
+            self._width_velocity = 0.0
+            self._width_timer.stop()
+            self._width_anchor_x = None
+
+    def _animate_margin(self, margin: int) -> None:
+        """Retarget one continuous taskbar-gap spring without snapping."""
+        target = float(max(0, margin))
+        self._margin_target = target
+        if abs(target - self._margin_value) < 0.05 and abs(self._margin_velocity) < 0.05:
+            self._margin_value = target
+            self._move_for_margin(target)
+            return
+        if not self._margin_timer.isActive():
+            self._margin_last_tick = time.perf_counter()
+            self._margin_timer.start()
+
+    def _tick_margin(self) -> None:
+        """Advance the taskbar-gap spring from its current, not starting, value."""
+        now = time.perf_counter()
+        dt = min(max(0.0, now - self._margin_last_tick), 0.05)
+        self._margin_last_tick = now
+        if dt <= 0.0:
+            return
+        margin, velocity = _spring_scalar(
+            self._margin_value,
+            self._margin_velocity,
+            self._margin_target,
+            MARGIN_OMEGA,
+            MARGIN_ZETA,
+            dt,
+        )
+        self._margin_value = margin
+        self._margin_velocity = velocity
+        self._move_for_margin(margin)
+        if abs(margin - self._margin_target) < 0.05 and abs(velocity) < 0.5:
+            self._margin_value = self._margin_target
+            self._margin_velocity = 0.0
+            self._move_for_margin(self._margin_target)
+            self._margin_timer.stop()
+
     def pill_geometry(self) -> QRect:
         """Where the visible pill is on screen, ignoring the shadow margin."""
         geo = self.geometry()
-        return QRect(geo.x() + SHADOW_PAD, geo.y() + PILL_TOP, PILL_W, PILL_H)
+        return QRect(
+            geo.x() + SHADOW_PAD,
+            geo.y() + PILL_TOP,
+            int(round(self._pill_width)),
+            PILL_H,
+        )
+
+    def _move_for_margin(self, margin: float) -> None:
+        """Place the current window for one already-resolved taskbar gap."""
+        screen = QApplication.screenAt(QPoint(0, 0)) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        self._sync_frame_rate(screen)
+        area = screen.availableGeometry()
+        x = area.center().x() - self._window_width() // 2
+        y = area.bottom() + 1 - max(0.0, margin) - PILL_H - PILL_TOP
+        self.move(x, round(y))
+        self._toast.follow(self.pill_geometry())
 
     def reposition(self) -> None:
         """Centre horizontally, sit just above the taskbar.
@@ -527,16 +673,9 @@ class Bar(QWidget):
         another edge without any special-casing. The shadow margin is backed
         out so the configured gap applies to the pill, not to the window.
         """
-        screen = QApplication.screenAt(QPoint(0, 0)) or QApplication.primaryScreen()
-        if screen is None:
-            return
-        self._sync_frame_rate(screen)
-        area = screen.availableGeometry()
-        x = area.center().x() - WIDTH // 2
-        margin = self._preview_margin if self._preview_margin is not None else self._settings.bar_margin
-        y = area.bottom() + 1 - max(0, margin) - PILL_H - PILL_TOP
-        self.move(x, y)
-        self._toast.follow(self.pill_geometry())
+        self._move_for_margin(self._margin_value)
+        if not self._width_timer.isActive():
+            self._width_anchor_x = None
 
     def _sync_frame_rate(self, screen) -> None:
         """Draw at the display's refresh rate rather than a hardcoded 60 Hz."""
@@ -555,16 +694,34 @@ class Bar(QWidget):
         _CACHE.pop("accent", None)          # the user may have changed it
         self._accent = system_accent()
         self._linger_ms = settings.bar_linger_ms
-        self._preview_margin = None    # the real value just landed; stop overriding it
-        if settings.live_preview_enabled:
-            if self._state == "listening":
-                self._card_active = True
-        else:
-            self._card_active = False
-            self.clear_live_text()
-        if settings.always_visible and self._state == "idle":
+        self._card_active = False
+        self.clear_live_text()
+        if abs(self._width_target - settings.bar_width) >= 0.5:
+            self._animate_width(settings.bar_width)
+        if abs(self._margin_target - settings.bar_margin) >= 0.5:
+            self._animate_margin(settings.bar_margin)
+        if self._state == "idle":
+            if settings.always_visible:
+                # A just-disabled preview/linger timer must not win after the
+                # person explicitly asks for the idle bar to stay on screen.
+                self._hide_timer.stop()
+                self.show_bar()
+            elif self.isVisible():
+                # Settings changes do not pass through _apply_state(), so
+                # turning this preference off used to leave an already-idle
+                # bar visible until the next dictation happened to return to
+                # idle. Start the ordinary exit immediately instead.
+                self._hide_timer.stop()
+                self._auto_hide()
+        if not self._margin_timer.isActive():
+            self.reposition()
+
+    def preview_width(self, width: int) -> None:
+        """Preview a candidate width with the same Fluent resize used on save."""
+        self._animate_width(width)
+        if self._state == "idle":
             self.show_bar()
-        self.reposition()
+        self._hide_timer.start(3000)
 
     def preview_margin(self, margin: int) -> None:
         """Show the bar at a candidate "Bar position" value while the user
@@ -577,8 +734,7 @@ class Bar(QWidget):
         same animation -- same duration, same easing -- as the bar fading
         away after "stay after finishing" elapses.
         """
-        self._preview_margin = margin
-        self.reposition()
+        self._animate_margin(margin)
         if self._state == "idle":
             self.show_bar()
         self._hide_timer.start(3000)
@@ -685,8 +841,7 @@ class Bar(QWidget):
             self._history[:] = 0.0
             self._mic_level = 0.0
             self._slice_accum = 0.0
-            self._card_active = self._settings.live_preview_enabled
-            self.clear_live_text()
+            self._card_active = False
             self._hide_timer.stop()
             self.show_bar()
         elif state in ("transcribing", "loading"):
@@ -760,14 +915,13 @@ class Bar(QWidget):
             self._mic_level = float(np.sqrt(np.mean(np.square(levels))))
 
     def set_live_text(self, text: str) -> None:
-        """Animate a rolling Whisper preview into the two-row card.
+        """Intentionally ignore provisional transcript text for now.
 
-        Only the last two fitted rows are kept.  When a new row begins, the
-        lower row rises toward the history slot while the older row dissolves;
-        ordinary corrections within the current row use a quieter crossfade.
+        The final, pasted transcription is the only text Dictate currently
+        presents. Keeping this no-op guard makes accidental calls harmless
+        while a future preview is rebuilt against a reliable streaming design.
         """
-        if self._state != "listening" or not self._settings.live_preview_enabled:
-            return
+        return
         normalized = " ".join(text.split())
         rows = self._fit_live_rows(normalized)
         top, bottom = self._fit_live_lines(normalized)
@@ -870,7 +1024,7 @@ class Bar(QWidget):
         if not words or words == [""]:
             return []
         metrics = QFontMetrics(self._text_font)
-        max_width = PILL_W - 2 * (CARD_INSET + CARD_TEXT_PAD)
+        max_width = self._pill_width - 2 * (CARD_INSET + CARD_TEXT_PAD)
         rows: list[tuple[str, int, int]] = []
         current = ""
         start = 0
@@ -1146,7 +1300,7 @@ class Bar(QWidget):
         # The click press-dip multiplies in on top -- same pivot, so a click
         # mid-entrance still shrinks from wherever the reveal scale already is.
         scale = (0.92 + 0.08 * self._reveal) * self._press_scale
-        cx, cy = SHADOW_PAD + PILL_W / 2.0, PILL_TOP + PILL_H / 2.0
+        cx, cy = SHADOW_PAD + self._pill_width / 2.0, PILL_TOP + PILL_H / 2.0
         p.translate(0.0, RISE_PX * (1.0 - self._reveal))
         p.translate(cx, cy)
         p.scale(scale, scale)
@@ -1163,12 +1317,21 @@ class Bar(QWidget):
             if self._card_active
             else 0.0
         )
-        p.drawPixmap(0, 0, _shadow(dpr, self._dark, visible_card_h))
+        p.drawPixmap(
+            0,
+            0,
+            _shadow(dpr, self._dark, visible_card_h, self._pill_width),
+        )
 
         if self._card_active:
             self._paint_transcript_card(p, dpr)
 
-        pill = QRectF(SHADOW_PAD + 0.5, PILL_TOP + 0.5, PILL_W - 1, PILL_H - 1)
+        pill = QRectF(
+            SHADOW_PAD + 0.5,
+            PILL_TOP + 0.5,
+            self._pill_width - 1,
+            PILL_H - 1,
+        )
         path = QPainterPath()
         path.addRoundedRect(pill, RADIUS, RADIUS)
         p.fillPath(path, self._palette["surface"])
@@ -1180,6 +1343,7 @@ class Bar(QWidget):
         p.drawPath(
             _surface_path(
                 visible_card_h if self._card_active else 0.0,
+                pill_width=self._pill_width,
                 pixel_inset=0.5,
             )
         )
@@ -1193,7 +1357,9 @@ class Bar(QWidget):
         x0 = SHADOW_PAD + PAD
         hairline = QPainterPath()
         hairline.addRoundedRect(
-            QRectF(x0, cy - TRACK_H / 2, WAVE_W, TRACK_H), TRACK_H / 2, TRACK_H / 2
+            QRectF(x0, cy - TRACK_H / 2, self._wave_width(), TRACK_H),
+            TRACK_H / 2,
+            TRACK_H / 2,
         )
         p.fillPath(hairline, self._palette["track"])
 
@@ -1215,7 +1381,7 @@ class Bar(QWidget):
         card = QRectF(
             SHADOW_PAD + CARD_INSET + 0.5,
             bottom - visible_h,
-            PILL_W - 2 * CARD_INSET - 1,
+            self._pill_width - 2 * CARD_INSET - 1,
             visible_h,
         )
         path = QPainterPath()
@@ -1368,7 +1534,12 @@ class Bar(QWidget):
             colour.setAlphaF(base_alpha * lift)
             capsule = QPainterPath()
             capsule.addRoundedRect(
-                QRectF(x0 + i * (BAR_W + BAR_GAP), cy - h / 2, BAR_W, h),
+                QRectF(
+                    x0 + i * (BAR_W + self._bar_gap()),
+                    cy - h / 2,
+                    BAR_W,
+                    h,
+                ),
                 BAR_R, BAR_R,
             )
             p.fillPath(capsule, colour)
@@ -1378,7 +1549,7 @@ class Bar(QWidget):
         the bars just sank into: two accent segments, the longer one leading."""
         cy = PILL_TOP + PILL_H / 2.0
         x0 = SHADOW_PAD + PAD
-        width = WAVE_W
+        width = self._wave_width()
 
         for offset, frac, speed in SWEEP_SEGMENTS:
             phase = ((self._clock * SWEEP_HZ * speed) + offset) % 1.0
@@ -1412,7 +1583,7 @@ class Bar(QWidget):
         """
         cy = PILL_TOP + PILL_H / 2.0
         x0 = SHADOW_PAD + PAD
-        filled = WAVE_W * float(np.clip(fraction, 0.0, 1.0))
+        filled = self._wave_width() * float(np.clip(fraction, 0.0, 1.0))
         if filled <= 0.5:
             return
         path = QPainterPath()
@@ -1465,6 +1636,12 @@ def _spring_scalar(
     """Same closed-form solution as ``_spring``, for the one scalar value
     (the click press-scale) that does not need a 21-wide array."""
     offset = pos - target
+    if zeta >= 0.999:
+        decay = math.exp(-omega * dt)
+        b = vel + omega * offset
+        new_offset = (offset + b * dt) * decay
+        new_vel = (vel - omega * b * dt) * decay
+        return target + new_offset, new_vel
     damped = omega * math.sqrt(1.0 - zeta * zeta)
     decay = math.exp(-zeta * omega * dt)
     cos_t = math.cos(damped * dt)

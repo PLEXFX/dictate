@@ -189,42 +189,6 @@ class VocabularyTests(unittest.TestCase):
         subject.transcribe(np.ones(20, dtype=np.float32))
         self.assertNotIn("initial_prompt", model.transcribe.call_args.kwargs)
 
-    def test_live_preview_uses_the_model_without_entering_transcribing_state(self):
-        import engine
-
-        model = Mock()
-        model.transcribe.return_value = ([Mock(text=" words appearing live ")], Mock())
-        subject = engine.Engine.__new__(engine.Engine)
-        subject._lock = threading.RLock()
-        subject._settings = config.Settings()
-        subject._model = model
-        subject._loaded_key = ("small.en", "cpu")
-        subject._last_used = 0.0
-        subject.ensure_loaded = Mock(return_value=model)
-        subject._set_state = Mock()
-
-        result = subject.transcribe_preview(np.ones(20, dtype=np.float32))
-
-        self.assertEqual(result, "words appearing live")
-        self.assertTrue(model.transcribe.call_args.kwargs["without_timestamps"])
-        subject._set_state.assert_not_called()
-
-    def test_enhanced_preview_uses_a_dedicated_cpu_model_and_reports_inference_time(self):
-        import engine
-
-        model = Mock()
-        model.transcribe.return_value = ([Mock(text=" quick preview ")], Mock())
-        subject = engine.PreviewEngine(config.Settings(vocabulary=["Northwind"]))
-        subject.ensure_loaded = Mock(return_value=model)
-
-        with patch.object(engine.time, "perf_counter", side_effect=[10.0, 10.35]):
-            text, seconds = subject.transcribe(np.ones(20, dtype=np.float32))
-
-        self.assertEqual(text, "quick preview")
-        self.assertAlmostEqual(seconds, 0.35)
-        self.assertTrue(model.transcribe.call_args.kwargs["without_timestamps"])
-        self.assertIn("Northwind", model.transcribe.call_args.kwargs["initial_prompt"])
-
 
 class MicrophoneTests(unittest.TestCase):
     def test_device_key_survives_numeric_index_changes(self):
@@ -836,10 +800,15 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertEqual(migrated.input_device, "")
         self.assertFalse(migrated.onboarding_complete)
         self.assertFalse(migrated.start_with_windows)
-        self.assertTrue(migrated.live_preview_enabled)
-        self.assertFalse(migrated.enhanced_preview_enabled)
+        self.assertNotIn("live_preview_enabled", config.Settings.__dataclass_fields__)
+        self.assertNotIn("enhanced_preview_enabled", config.Settings.__dataclass_fields__)
         self.assertNotIn("output_mode", config.Settings.__dataclass_fields__)
         self.assertNotIn("trailing_space", config.Settings.__dataclass_fields__)
+        self.assertEqual(migrated.bar_width, 200)
+
+    def test_activity_bar_width_is_kept_inside_the_ui_range(self):
+        self.assertEqual(config.Settings(bar_width=1).clamped().bar_width, 180)
+        self.assertEqual(config.Settings(bar_width=999).clamped().bar_width, 280)
 
     def test_outcome_modes_map_to_real_engine_settings(self):
         self.assertEqual(
@@ -1126,9 +1095,6 @@ class PttWarmStartTests(unittest.TestCase):
         app.cues = Mock()
         app.bar = Mock()
         app.meter_timer = Mock()
-        app.live_preview_timer = Mock()
-        app._preview_generation = 0
-        app._preview_running = False
         app.lock_limit_timer = Mock()
         app.hotkeys = Mock()
         app.engine = Mock()
@@ -1203,6 +1169,25 @@ class PttWarmStartTests(unittest.TestCase):
         app.bar.set_state.assert_not_called()
         self.assertFalse(app._update_showing)
 
+    def test_verified_update_notification_restarts_only_when_clicked(self):
+        app, main = self._app()
+        app._notify = Mock()
+        app._update_ready_notified = False
+        app.updater.last_status = (
+            main.updater_mod.READY_TO_RESTART,
+            "Update 1.2.3 is verified and ready to restart",
+            None,
+        )
+
+        app._on_update_status_changed()
+
+        app._notify.assert_called_once()
+        self.assertIn("restart", app._notify.call_args.args[0].lower())
+        restart_action = app._notify.call_args.kwargs["on_click"]
+        app.updater.restart_to_install.return_value = True
+        restart_action()
+        app.updater.restart_to_install.assert_called_once_with()
+
     def test_update_status_never_touches_the_bar_during_a_real_dictation(self):
         app, main = self._app()
         app._dictation_active = True
@@ -1234,28 +1219,6 @@ class PttWarmStartTests(unittest.TestCase):
         self.assertTrue(app._dictation_active)
         self.assertFalse(app._ptt_preload_pending)
 
-    def test_disabled_live_preview_does_not_start_the_preview_timer(self):
-        app, main = self._app()
-        app.engine.state = main.engine_mod.READY
-        app.settings.live_preview_enabled = False
-
-        app._start_listening()
-
-        app.live_preview_timer.start.assert_not_called()
-
-    def test_turning_live_preview_off_during_recording_stops_and_hides_it(self):
-        from dataclasses import replace
-
-        app, _main = self._app()
-        app._dictation_active = True
-        disabled = replace(app.settings, live_preview_enabled=False)
-
-        app._apply_settings(disabled)
-
-        app.live_preview_timer.stop.assert_called_once()
-        self.assertEqual(app._preview_generation, 1)
-        app.bar.update_settings.assert_called_once_with(disabled)
-
     def test_toggling_auto_update_syncs_updater_and_tray_action_live(self):
         """Every way of triggering an update check -- Settings' own button,
         the tray action, the console command -- must agree with the toggle.
@@ -1276,24 +1239,6 @@ class PttWarmStartTests(unittest.TestCase):
         app._apply_settings(enabled)
         app.updater.set_enabled.assert_called_once_with(True)
         app.act_check_update.setEnabled.assert_called_once_with(True)
-
-    def test_enabling_enhanced_preview_reports_hardware_limits(self):
-        from dataclasses import replace
-
-        app, main = self._app()
-        enabled = replace(app.settings, enhanced_preview_enabled=True)
-
-        with patch.object(main, "preview_hardware", return_value=(4, 8.0, True)):
-            app._apply_settings(enabled)
-
-        app.bar.notify.assert_called_once_with(
-            "Enhanced preview may be slow.",
-            tone="info",
-            on_click=None,
-            duration_ms=5000,
-        )
-        app.tray.showMessage.assert_not_called()
-        self.assertTrue(app._enhanced_benchmark_pending)
 
     def test_windows_notifications_use_the_same_notice_text(self):
         app, main = self._app()
@@ -1615,6 +1560,8 @@ class ConsoleCommandTests(unittest.TestCase):
         app.qt = Mock()
         app.bridge = Mock()
         app._reload_pending = False
+        app._dictation_active = False
+        app._ptt_preload_pending = False
         app._show_settings = Mock()
         return app, main
 
@@ -1684,9 +1631,6 @@ class StopListeningTests(unittest.TestCase):
         app.cues = Mock()
         app.bar = Mock()
         app.meter_timer = Mock()
-        app.live_preview_timer = Mock()
-        app._preview_generation = 0
-        app._preview_running = False
         app.lock_limit_timer = Mock()
         app.hotkeys = Mock()
         app.engine = Mock()
@@ -1763,131 +1707,6 @@ class StopListeningTests(unittest.TestCase):
 
         app.bar.set_state.assert_called_once_with("transcribing")
         self.assertTrue(app._busy)
-
-
-class LivePreviewTests(unittest.TestCase):
-    @staticmethod
-    def _app():
-        import main
-
-        app = main.App.__new__(main.App)
-        app._dictation_active = True
-        app._preview_generation = 4
-        app._preview_running = False
-        app._preview_last_request_at = 0.0
-        app._preview_last_voice_at = 0.0
-        app._preview_was_speaking = False
-        app._enhanced_benchmark_pending = False
-        app.settings = config.Settings()
-        app.mic = Mock()
-        app.mic.latest_window.return_value = np.ones(512, dtype=np.float32) * 0.2
-        app.engine = Mock()
-        app.preview_engine = Mock()
-        app.bar = Mock()
-        app.bridge = Mock()
-        app.tray = Mock()
-        return app, main
-
-    def test_current_preview_reaches_the_integrated_bar_card(self):
-        app, _main = self._app()
-        app._preview_running = True
-
-        app._on_live_preview(4, "smooth words")
-
-        self.assertFalse(app._preview_running)
-        app.bar.set_live_text.assert_called_once_with("smooth words")
-
-    def test_preview_from_a_finished_recording_is_ignored(self):
-        app, _main = self._app()
-        app._preview_running = True
-        app._preview_generation = 5
-
-        app._on_live_preview(4, "stale words")
-
-        app.bar.set_live_text.assert_not_called()
-
-    def test_only_one_preview_inference_can_be_in_flight(self):
-        app, _main = self._app()
-        app._preview_running = True
-
-        app._request_live_preview()
-
-        app.mic.snapshot.assert_not_called()
-        app.engine.transcribe_preview.assert_not_called()
-
-    def test_pause_edge_requests_a_preview_before_the_regular_interval(self):
-        app, main = self._app()
-        now = time.perf_counter()
-        app._preview_last_request_at = now - 0.30
-        app._preview_last_voice_at = now - 0.20
-        app._preview_was_speaking = True
-        app.mic.latest_window.return_value = np.zeros(512, dtype=np.float32)
-        app.mic.snapshot.return_value = np.ones(
-            int(audio.SAMPLE_RATE * 0.8), dtype=np.float32
-        ) * 0.2
-
-        class ImmediateThread:
-            def __init__(self, target, daemon=True):
-                self.target = target
-
-            def start(self):
-                self.target()
-
-        app.engine.transcribe_preview.return_value = "pause words"
-        with patch.object(main.threading, "Thread", ImmediateThread):
-            app._request_live_preview()
-
-        app.engine.transcribe_preview.assert_called_once()
-        app.bridge.live_preview.emit.assert_called_once()
-
-    def test_enhanced_preview_uses_the_dedicated_engine(self):
-        app, main = self._app()
-        app.settings.enhanced_preview_enabled = True
-        app._preview_last_request_at = time.perf_counter() - 1.0
-        app.mic.snapshot.return_value = np.ones(
-            int(audio.SAMPLE_RATE * 0.8), dtype=np.float32
-        ) * 0.2
-        app.preview_engine.transcribe.return_value = ("enhanced words", 0.3)
-
-        class ImmediateThread:
-            def __init__(self, target, daemon=True):
-                self.target = target
-
-            def start(self):
-                self.target()
-
-        with patch.object(main.threading, "Thread", ImmediateThread):
-            app._request_live_preview()
-
-        app.preview_engine.transcribe.assert_called_once()
-        app.engine.transcribe_preview.assert_not_called()
-        app.bridge.live_preview.emit.assert_called_once_with(
-            4, "enhanced words", 0.3, True
-        )
-
-    def test_slow_enhanced_benchmark_shows_a_hardware_limit_notification(self):
-        app, _main = self._app()
-        app._preview_running = True
-        app._enhanced_benchmark_pending = True
-
-        app._on_live_preview(4, "words", 1.2, True)
-
-        app.bar.notify.assert_called_once_with(
-            "Enhanced preview may be slow.",
-            tone="info",
-            on_click=None,
-            duration_ms=5000,
-        )
-        app.tray.showMessage.assert_not_called()
-
-    def test_disabled_preview_never_reads_the_live_microphone_buffer(self):
-        app, _main = self._app()
-        app.settings.live_preview_enabled = False
-
-        app._request_live_preview()
-
-        app.mic.snapshot.assert_not_called()
-        app.engine.transcribe_preview.assert_not_called()
 
 
 class LastDictationTests(unittest.TestCase):
@@ -1975,6 +1794,30 @@ class UiTests(unittest.TestCase):
         self.assertNotIn("QWidget#root { background: transparent; }", dark)
         self.assertNotIn("rgba(43, 43, 43, 174)", dark)
 
+    def test_scroll_settle_is_small_and_only_follows_a_person_gesture(self):
+        import settings_window
+
+        scroll = settings_window.SettlingScrollArea()
+        page = settings_window.QWidget()
+        page.setMinimumHeight(900)
+        scroll.setWidget(page)
+        scroll.resize(320, 240)
+        scroll.show()
+        self.app.processEvents()
+        bar = scroll.verticalScrollBar()
+        bar.setValue(100)
+
+        scroll._note_scroll_delta(12)
+        scroll._settle_timer.stop()
+        scroll._play_scroll_settle()
+
+        first = scroll._settle_motion.animationAt(0)
+        self.assertIsNotNone(first)
+        self.assertEqual(first.endValue(), 102)
+        self.assertEqual(scroll._settle_motion.animationAt(1).endValue(), 100)
+        scroll._settle_motion.stop()
+        scroll.close()
+
     def test_apply_native_chrome_sets_only_color_and_corner_attributes(self):
         import settings_window
 
@@ -2046,12 +1889,9 @@ class UiTests(unittest.TestCase):
         self.assertEqual(window.mode_box.currentText(), "Everyday (recommended)")
         self.assertGreaterEqual(window.mode_box.findData("max"), 0)
         self.assertIn("Default", window.sleep_slider.value_label.text())
-        self.assertTrue(window.sleep_slider.reset_btn.isHidden())
+        self.assertFalse(hasattr(window.sleep_slider, "reset_btn"))
         window.sleep_slider.setValue(30)
         self.assertIn("Default: 10 min", window.sleep_slider.value_label.text())
-        self.assertFalse(window.sleep_slider.reset_btn.isHidden())
-        window.sleep_slider.reset_btn.click()
-        self.assertEqual(window.sleep_slider.value(), 10)
         self.assertTrue(window.advanced_panel.isHidden())
         window.advanced_btn.click()
         self.assertFalse(window.advanced_panel.isHidden())
@@ -2061,7 +1901,7 @@ class UiTests(unittest.TestCase):
         self.assertFalse(hasattr(window, "space_check"))
         self.assertEqual(window.ptt_edit.text(), "F9")
         self.assertEqual(window.hotkey_edit.text(), "Ctrl + Alt + D")
-        self.assertTrue(window.live_preview_check.isChecked())
+        self.assertFalse(hasattr(window, "live_preview_check"))
         self.assertEqual(first_run.input_device, microphone.key)
         privacy_text = " ".join(label.text() for label in privacy.findChildren(QLabel))
         self.assertIn("Your voice stays on this PC", privacy_text)
@@ -2072,6 +1912,7 @@ class UiTests(unittest.TestCase):
         privacy.close()
         first_run.close()
         window.close()
+
 
     def test_words_i_use_dialog_keeps_one_clean_phrase_per_line(self):
         import settings_window
@@ -2159,60 +2000,6 @@ class UiTests(unittest.TestCase):
         self.assertEqual(dummy.preload_calls, 1)
         window.close()
 
-    def test_live_preview_toggle_saves_and_collects_off(self):
-        import engine
-        import settings_window
-
-        class DummyEngine:
-            state = engine.UNLOADED
-            active_device = ""
-
-            def preload(self):
-                pass
-
-        with (
-            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
-            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
-            patch.object(settings_window.config, "save") as save,
-        ):
-            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
-            window.live_preview_check.setChecked(False)
-            window._save_timer.stop()
-            window._save_now()
-
-            self.assertFalse(window._settings.live_preview_enabled)
-            self.assertFalse(window._collect_settings().live_preview_enabled)
-            save.assert_called_once()
-        window.close()
-
-    def test_enhanced_preview_is_nested_under_and_disabled_with_live_preview(self):
-        import engine
-        import settings_window
-
-        class DummyEngine:
-            state = engine.UNLOADED
-            active_device = ""
-
-            def preload(self):
-                pass
-
-        with (
-            patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
-            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
-        ):
-            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
-
-        self.assertTrue(window.enhanced_preview_check.isEnabled())
-        self.assertIn(
-            "Enhanced preview (Alpha)",
-            [label.text() for label in window.findChildren(settings_window.QLabel)],
-        )
-        window.enhanced_preview_check.setChecked(True)
-        self.assertTrue(window._collect_settings().enhanced_preview_enabled)
-        window.live_preview_check.setChecked(False)
-        self.assertFalse(window.enhanced_preview_check.isEnabled())
-        window.close()
-
     def test_color_mode_control_persists_and_applies_a_solid_panel(self):
         import engine
         import settings_window
@@ -2272,6 +2059,7 @@ class UiTests(unittest.TestCase):
         self.assertFalse(window.download_overview_details.isHidden())
         self.assertFalse(window.download_overview_progress.isHidden())
         self.assertEqual(window.download_overview_progress.value(), 42)
+        self.assertEqual(window.download_overview.parent().objectName(), "navRail")
         with patch.object(window, "_scroll_to_widget") as scroll_to:
             window.download_overview.click()
         scroll_to.assert_called_once_with(window.model_download_row)
@@ -2298,7 +2086,7 @@ class UiTests(unittest.TestCase):
         self.assertIn("downloads", window.device_desc_label.text().lower())
         window.close()
 
-    def test_download_overview_opens_gpu_setup_from_the_header(self):
+    def test_download_overview_opens_gpu_setup_from_the_rail(self):
         import engine
         import settings_window
 
@@ -2321,8 +2109,9 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual(window._download_focus, "gpu")
         self.assertEqual(window._download_overview_mode, "ready")
-        self.assertEqual(window.download_overview_title.text(), "GPU acceleration ready")
-        self.assertTrue(window.download_overview_details.isHidden())
+        self.assertEqual(window.download_overview_title.text(), "GPU available")
+        self.assertEqual(window.download_overview_detail.text(), "Set up acceleration")
+        self.assertFalse(window.download_overview_details.isHidden())
         with (
             patch.object(window, "_scroll_to_widget") as scroll_to,
             patch.object(settings_window.QTimer, "singleShot") as schedule,
@@ -2516,7 +2305,38 @@ class UiTests(unittest.TestCase):
             ),
         )
         window._privacy_page.back.emit()
-        self.assertIs(window._pages.currentWidget(), window._pages.widget(0))
+        self.assertIs(window._pages.currentWidget(), window._settings_page)
+        self.assertEqual(window._page_slide.startValue(), settings_window.QPoint(-16, 0))
+        window.close()
+
+    def test_settings_navigation_surfaces_activity_bar_controls(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=False),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            window = settings_window.SettingsWindow(
+                config.Settings(bar_width=240), DummyEngine()
+            )
+
+        self.assertEqual(window.width_slider.value(), 240)
+        self.assertIs(window.privacy_btn, window._nav_buttons["privacy"])
+        window._nav_buttons["activity"].click()
+        self.assertIs(window._pages.currentWidget(), window._activity_page)
+        self.assertIs(window._page_slide.targetObject(), window._activity_page)
+        self.assertEqual(window.activity_header.text(), "Activity bar")
+        self.assertEqual(window._collect_settings().bar_width, 240)
         window.close()
 
     def test_github_button_opens_the_public_repo(self):
@@ -2539,6 +2359,7 @@ class UiTests(unittest.TestCase):
             window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
             window.github_btn.click()
 
+        self.assertEqual(window.github_btn.parent().objectName(), "navRail")
         open_url.assert_called_once()
         self.assertEqual(
             open_url.call_args[0][0].toString(), "https://github.com/PLEXFX/dictate"
@@ -2596,6 +2417,53 @@ class UiTests(unittest.TestCase):
             self.assertTrue(window.update_progress.isHidden())
         window.close()
 
+    def test_rail_update_control_downloads_then_restarts_from_real_states(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+
+            def preload(self):
+                pass
+
+        dummy_updater = Mock()
+        dummy_updater.last_status = (
+            updater.AVAILABLE,
+            "Update 9.9.9 is available",
+            None,
+        )
+        dummy_updater.start_update.return_value = True
+        dummy_updater.restart_to_install.return_value = True
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=False),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            window = settings_window.SettingsWindow(
+                config.Settings(), DummyEngine(), dummy_updater
+            )
+            window.refresh_status()
+
+        self.assertEqual(window.download_overview_title.text(), "Update available")
+        self.assertEqual(window.download_overview_detail.text(), "Click to download")
+        window.download_overview.click()
+        dummy_updater.start_update.assert_called_once_with()
+
+        dummy_updater.last_status = (
+            updater.READY_TO_RESTART,
+            "Update 9.9.9 is verified and ready to restart",
+            None,
+        )
+        window.refresh_status()
+        self.assertEqual(window.download_overview_title.text(), "Restart to finish")
+        self.assertEqual(window.update_btn.text(), "Restart now")
+        window.download_overview.click()
+        dummy_updater.restart_to_install.assert_called_once_with()
+        window.close()
+
     def test_check_for_updates_button_hidden_without_an_updater(self):
         import engine
         import settings_window
@@ -2625,6 +2493,8 @@ class UiTests(unittest.TestCase):
         # assertion for the wrong reason.
         no_updater.show()
         with_updater.show()
+        no_updater._navigate_to_section("updates")
+        with_updater._navigate_to_section("updates")
         self.assertFalse(no_updater.update_btn.isVisible())
         self.assertTrue(with_updater.update_btn.isVisible())
         no_updater.close()
@@ -2704,7 +2574,16 @@ class UiTests(unittest.TestCase):
         )
         self.assertEqual(window._advanced_height_anim.duration(), bar_mod.ENTER_MS)
 
+        # A reversal follows the live layout constraint, not QWidget.height(),
+        # which may still be from the prior event-loop pass.
+        window._advanced_motion.stop()
+        window.advanced_panel.setMaximumHeight(73)
+        window._advanced_opacity.setOpacity(0.37)
+        window.advanced_btn.chevron.setRotation(47.0)
         window.advanced_btn.setChecked(False)
+        self.assertEqual(window._advanced_height_anim.startValue(), 73)
+        self.assertEqual(window._advanced_fade_anim.startValue(), 0.37)
+        self.assertEqual(window._advanced_chevron_anim.startValue(), 47.0)
         self.assertEqual(window._advanced_height_anim.endValue(), 0)
         self.assertEqual(window._advanced_fade_anim.endValue(), 0.0)
         self.assertEqual(
@@ -2913,103 +2792,75 @@ class BarClickTests(unittest.TestCase):
 
         self.assertTrue((b._morph_from == 0.3).all())
 
-    def test_listening_starts_as_a_small_empty_connected_card(self):
+    def test_listening_keeps_the_activity_bar_waveform_only(self):
         import bar as bar_mod
 
         b = bar_mod.Bar(config.Settings())
         b._apply_state("listening", "")
-
-        self.assertTrue(b._card_active)
-        self.assertEqual(b._card_target, 0.0)
-        self.assertEqual((b._text_top, b._text_bottom), ("", ""))
-
-    def test_transcript_and_bar_use_one_connected_outer_silhouette(self):
-        import bar as bar_mod
-        from PySide6.QtCore import QPointF
-
-        path = bar_mod._surface_path(bar_mod.CARD_FULL_H)
-        centre_x = bar_mod.SHADOW_PAD + bar_mod.PILL_W / 2
-
-        self.assertTrue(
-            path.contains(QPointF(centre_x, bar_mod.PILL_TOP + bar_mod.PILL_H / 2))
-        )
-        self.assertTrue(
-            path.contains(
-                QPointF(centre_x, bar_mod.PILL_TOP - bar_mod.CARD_FULL_H / 2)
-            )
-        )
-        # The overlap itself belongs to the same path, so no internal border
-        # or shadow can be painted through the card-to-pill connection.
-        self.assertTrue(
-            path.contains(QPointF(centre_x, bar_mod.PILL_TOP + 1))
-        )
-
-    def test_disabled_live_preview_has_no_card_or_text(self):
-        import bar as bar_mod
-
-        b = bar_mod.Bar(config.Settings(live_preview_enabled=False))
-        b._apply_state("listening", "")
-        b.set_live_text("this must remain hidden")
+        b.set_live_text("provisional words must not appear")
 
         self.assertFalse(b._card_active)
         self.assertEqual(b._card_target, 0.0)
         self.assertEqual(b._text_to, ("", ""))
 
-    def test_live_text_expands_into_only_the_newest_two_rows(self):
+    def test_always_visible_setting_enters_and_exits_the_idle_bar_immediately(self):
+        """A toggle change must not wait for a future dictation cycle."""
         import bar as bar_mod
 
-        b = bar_mod.Bar(config.Settings())
-        b._apply_state("listening", "")
-        b.set_live_text(
-            "This is enough dictated text to wrap across several narrow preview rows "
-            "while the person continues speaking"
-        )
+        b = bar_mod.Bar(config.Settings(always_visible=False))
+        b.show_bar()
+        b._reveal_anim.stop()
+        b._reveal = 1.0
 
-        self.assertEqual(b._card_target, 1.0)
-        self.assertIsNotNone(b._text_elapsed)
-        self.assertTrue(b._text_to[1])
-        # The UI contract is two rows, not an accumulating transcript view.
-        self.assertEqual(len(b._text_to), 2)
+        b.update_settings(config.Settings(always_visible=False))
 
-    def test_one_line_uses_the_compact_height_then_grows_for_a_second(self):
+        self.assertEqual(b._reveal_anim.endValue(), 0.0)
+
+        b._hide_timer.start(600)
+        b.update_settings(config.Settings(always_visible=True))
+
+        self.assertFalse(b._hide_timer.isActive())
+        self.assertEqual(b._reveal_anim.endValue(), 1.0)
+
+    def test_width_preview_resizes_the_bar_without_changing_its_bar_count(self):
         import bar as bar_mod
 
-        b = bar_mod.Bar(config.Settings())
-        b._apply_state("listening", "")
-        b.set_live_text("one short line")
-        one_line_target = b._card_target
+        b = bar_mod.Bar(config.Settings(bar_width=200))
+        original_count = len(b._drawn)
+        b.preview_width(180)
 
-        self.assertGreater(one_line_target, 0.0)
-        self.assertLess(one_line_target, 1.0)
-        b._text_top, b._text_bottom = b._text_to
-        b._text_elapsed = None
-        b.set_live_text(
-            "one short line with enough extra spoken words to need the history row"
-        )
-        self.assertEqual(b._card_target, 1.0)
+        self.assertEqual(b._width_target, 180.0)
+        self.assertTrue(b._width_timer.isActive())
+        b._width_last_tick -= 0.016
+        b._tick_width()
+        self.assertLess(b._pill_width, 200.0)
+        velocity = b._width_velocity
+        b.preview_width(280)
+        self.assertEqual(b._width_target, 280.0)
+        self.assertEqual(b._width_velocity, velocity)
+        b._set_pill_width(180)
+        self.assertEqual(b.pill_geometry().width(), 180)
+        self.assertEqual(len(b._drawn), original_count)
+        self.assertGreater(b._bar_gap(), 0.0)
 
-    def test_latest_preview_words_remain_tentative(self):
+    def test_margin_preview_retargets_one_continuous_spring(self):
         import bar as bar_mod
 
-        b = bar_mod.Bar(config.Settings())
-        b._apply_state("listening", "")
-        b.set_live_text("these settled words may still change")
+        b = bar_mod.Bar(config.Settings(bar_margin=8))
+        b.preview_margin(64)
 
-        self.assertLess(b._text_confirmed_to[1], len(b._text_to[1]))
+        self.assertEqual(b._margin_target, 64.0)
+        self.assertTrue(b._margin_timer.isActive())
+        b._margin_last_tick -= 0.016
+        b._tick_margin()
+        self.assertGreater(b._margin_value, 8.0)
+        self.assertLess(b._margin_value, 64.0)
+        velocity = b._margin_velocity
 
-    def test_a_new_wrapped_row_uses_the_upward_line_transition(self):
-        import bar as bar_mod
+        b.preview_margin(24)
 
-        b = bar_mod.Bar(config.Settings())
-        b._apply_state("listening", "")
-        b.set_live_text("first short line")
-        b._text_top, b._text_bottom = b._text_to
-        b._text_elapsed = None
-        b.set_live_text(
-            "first short line followed by enough additional words to create another row"
-        )
-
-        self.assertTrue(b._text_advancing)
+        self.assertEqual(b._margin_target, 24.0)
+        self.assertEqual(b._margin_velocity, velocity)
 
 
 class ToastWidthTests(unittest.TestCase):
@@ -3138,9 +2989,6 @@ class BarClickWiringTests(unittest.TestCase):
         app.bar = Mock()
         app.lock_limit_timer = Mock()
         app.meter_timer = Mock()
-        app.live_preview_timer = Mock()
-        app._preview_generation = 0
-        app._preview_running = False
         app.mic = Mock()
         app.cues = Mock()
         app._dictation_active = True
@@ -3628,6 +3476,27 @@ class UpdateCleanupTests(unittest.TestCase):
 class UpdaterFlowTests(unittest.TestCase):
     SIGNER = "A" * 40
 
+    def setUp(self):
+        self._pending_temp = tempfile.TemporaryDirectory()
+        pending_dir = Path(self._pending_temp.name) / "pending-update"
+        self._pending_patch = patch.object(
+            updater, "_pending_update_dir", return_value=pending_dir
+        )
+        self._pending_patch.start()
+
+    def tearDown(self):
+        self._pending_patch.stop()
+        self._pending_temp.cleanup()
+
+    @staticmethod
+    def _wait_for_state(instance, state, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if instance.last_status[0] == state:
+                return True
+            time.sleep(0.01)
+        return False
+
     @staticmethod
     def _info(**overrides):
         info = {
@@ -3666,7 +3535,7 @@ class UpdaterFlowTests(unittest.TestCase):
             finally:
                 u.shutdown()
 
-    def test_start_update_downloads_verifies_and_installs(self):
+    def test_start_update_stages_then_restart_revalidates_and_installs(self):
         available = threading.Event()
         installing = threading.Event()
         installing_args = []
@@ -3696,6 +3565,9 @@ class UpdaterFlowTests(unittest.TestCase):
                 self.assertTrue(available.wait(timeout=5))
                 self.assertEqual(u.last_status[0], updater.AVAILABLE)
                 self.assertTrue(u.start_update())
+                self.assertTrue(self._wait_for_state(u, updater.READY_TO_RESTART))
+                popen.assert_not_called()
+                self.assertTrue(u.restart_to_install())
                 self.assertTrue(installing.wait(timeout=5))
             finally:
                 u.shutdown()
@@ -3723,7 +3595,6 @@ class UpdaterFlowTests(unittest.TestCase):
         """A second click (bar toast and Settings button both wired to the
         same Updater) must not start a second overlapping download."""
         available = threading.Event()
-        installing = threading.Event()
         download_started = threading.Event()
         release_download = threading.Event()
 
@@ -3740,7 +3611,6 @@ class UpdaterFlowTests(unittest.TestCase):
         ):
             u = updater.Updater(
                 on_available=lambda version, notes: available.set(),
-                on_installing=lambda version, installer_pid: installing.set(),
                 current_version="0.1.0-beta.2",
                 check_interval=9999,
                 trusted_signer_thumbprint=self.SIGNER,
@@ -3751,7 +3621,7 @@ class UpdaterFlowTests(unittest.TestCase):
                 self.assertTrue(download_started.wait(timeout=5))
                 self.assertFalse(u.start_update())  # the duplicate click
                 release_download.set()
-                self.assertTrue(installing.wait(timeout=5))
+                self.assertTrue(self._wait_for_state(u, updater.READY_TO_RESTART))
             finally:
                 u.shutdown()
 
@@ -3783,10 +3653,80 @@ class UpdaterFlowTests(unittest.TestCase):
             try:
                 self.assertTrue(available.wait(timeout=5))
                 self.assertTrue(u.start_update())
+                self.assertTrue(self._wait_for_state(u, updater.READY_TO_RESTART))
+                self.assertTrue(u.restart_to_install())
                 self.assertTrue(installing.wait(timeout=5))
             finally:
                 u.shutdown()
         verify_authenticode.assert_not_called()
+
+    def test_verified_pending_update_survives_a_reopen(self):
+        available = threading.Event()
+        with (
+            patch.object(updater, "_fetch_latest_release", return_value=self._info()),
+            patch.object(
+                updater,
+                "_download",
+                side_effect=lambda url, dest, cb: dest.write_bytes(b"12345"),
+            ),
+        ):
+            first = updater.Updater(
+                on_available=lambda version, notes: available.set(),
+                current_version="0.1.0-beta.2",
+                check_interval=9999,
+                trusted_signer_thumbprint="",
+            )
+            try:
+                self.assertTrue(available.wait(timeout=5))
+                self.assertTrue(first.start_update())
+                self.assertTrue(self._wait_for_state(first, updater.READY_TO_RESTART))
+            finally:
+                first.shutdown()
+
+            reopened = updater.Updater(
+                current_version="0.1.0-beta.2",
+                check_interval=9999,
+                trusted_signer_thumbprint="",
+            )
+            try:
+                self.assertEqual(reopened.last_status[0], updater.READY_TO_RESTART)
+                self.assertTrue(Path(reopened._pending["installer_path"]).is_file())
+            finally:
+                reopened.shutdown()
+
+    def test_restart_refuses_a_tampered_staged_installer(self):
+        available = threading.Event()
+        errored = threading.Event()
+        with (
+            patch.object(updater, "_fetch_latest_release", return_value=self._info()),
+            patch.object(
+                updater,
+                "_download",
+                side_effect=lambda url, dest, cb: dest.write_bytes(b"12345"),
+            ),
+            patch.object(updater.subprocess, "Popen") as popen,
+        ):
+            instance = updater.Updater(
+                on_available=lambda version, notes: available.set(),
+                on_error=lambda message: errored.set(),
+                current_version="0.1.0-beta.2",
+                check_interval=9999,
+                trusted_signer_thumbprint="",
+            )
+            try:
+                self.assertTrue(available.wait(timeout=5))
+                self.assertTrue(instance.start_update())
+                self.assertTrue(
+                    self._wait_for_state(instance, updater.READY_TO_RESTART)
+                )
+                Path(instance._pending["installer_path"]).write_bytes(b"54321")
+                self.assertTrue(instance.restart_to_install())
+                self.assertTrue(errored.wait(timeout=5))
+                self.assertEqual(instance.last_status[0], updater.ERROR)
+                self.assertFalse(updater._pending_update_dir().exists())
+                popen.assert_not_called()
+            finally:
+                instance.shutdown()
 
     def test_start_update_reports_an_error_on_a_bad_checksum(self):
         """A download/verify failure during start_update() must always be

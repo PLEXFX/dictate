@@ -21,3 +21,6 @@ outputs/
 CLAUDE.md
 
 AGENTS.md
+
+# Local release-note preview output. The changelog remains the publishable source.
+release-notes.md

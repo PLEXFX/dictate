@@ -100,6 +100,7 @@ For security-sensitive reports, please follow [SECURITY.md](SECURITY.md) rather 
 - The default `small.en` model balances accuracy and responsiveness; additional model and processing choices live in **Advanced settings**.
 - Model files live under `%APPDATA%\dictate\models`, separate from the source folder.
 - GPU support is optional. If it is not installed, Dictate safely stays on CPU.
+- NOTE: Some older version may not update or see updates due to broken functionality, From doing performance and optimization tweaks. 
 
 ## License
 

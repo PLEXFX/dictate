@@ -7,6 +7,27 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.0-beta.1] - 2026-08-19
+
+### Added
+
+- Every version change now opens its bundled release notes once after launch,
+  including upgrades installed manually instead of through Dictate's updater.
+- Settings now has a permanent **What's new** footer button above GitHub. It
+  opens the current version's notes in a theme-matched modal with a clear
+  **Close** action.
+
+### Changed
+
+- Aligned the version label with the What's new and GitHub footer text in
+  Settings.
+
+### Fixed
+
+- The in-app updater now runs its progress window from a temporary copy, so
+  Windows no longer blocks Setup from replacing `dictate-updater.exe` with an
+  access-denied prompt during installation.
+
 ## [1.1.0-beta.1] - 2026-08-19
 
 ### Changed

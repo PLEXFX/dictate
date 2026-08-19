@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 from dataclasses import asdict, replace
 
 from PySide6.QtCore import (
@@ -1117,31 +1118,52 @@ def _release_note_groups(notes: str) -> list[tuple[str, list[str]]]:
             heading = line.lstrip("#").strip() or heading
             entries = []
             continue
-        if line.startswith(("- ", "* ")):
+        is_bullet = line.startswith(("- ", "* "))
+        if is_bullet:
             line = line[2:].strip()
         if line:
-            entries.append(line)
+            # QLabel is intentionally plain text. Remove the small Markdown
+            # subset GitHub release bodies commonly use instead of showing
+            # raw asterisks, backticks, or link targets in the native dialog.
+            line = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", line)
+            line = line.replace("**", "").replace("__", "").replace("`", "")
+            if is_bullet or not entries:
+                entries.append(line)
+            else:
+                # CHANGELOG wraps long bullets for source readability. Keep
+                # those continuation lines in one native row instead of
+                # turning every source-code line into a separate change.
+                entries[-1] = f"{entries[-1]} {line}"
     if entries:
         groups.append((heading, entries))
     return groups or [("Changes in this version", ["Dictate has the latest improvements and fixes."])]
 
 
 class UpdateCompleteDialog(QDialog):
-    """A version-specific Windows 11-style receipt after an update restarts."""
+    """Reusable Windows 11-style What's New window for the current version."""
 
     # Emitted after the dialog has entered the event loop and had a chance to
     # paint. main.py uses this to release the standalone update splash only
     # once a person can actually see the newly updated app.
     presented = Signal()
 
-    def __init__(self, version: str, notes: str, parent: QWidget | None = None):
+    def __init__(
+        self,
+        version: str,
+        notes: str,
+        parent: QWidget | None = None,
+        *,
+        dark: bool | None = None,
+    ):
         super().__init__(parent)
         self._presented = False
+        self._dark = system_is_dark() if dark is None else dark
         self.setObjectName("root")
         self.setWindowTitle("What's new in Dictate")
-        self.setStyleSheet(stylesheet())
-        self.setMinimumSize(520, 390)
-        self.resize(560, 500)
+        self.setModal(True)
+        self.setStyleSheet(stylesheet(self._dark))
+        self.setMinimumSize(540, 420)
+        self.resize(600, 560)
         base = QFont("Segoe UI Variable Text", 9)
         self.setFont(base if base.exactMatch() else QFont("Segoe UI", 9))
 
@@ -1153,16 +1175,13 @@ class UpdateCompleteDialog(QDialog):
         hero_layout = QVBoxLayout(hero)
         hero_layout.setContentsMargins(16, 14, 16, 14)
         hero_layout.setSpacing(3)
-        title = QLabel("Dictate is up to date")
+        title = QLabel("What's new in Dictate")
         title.setProperty("role", "header")
         hero_layout.addWidget(title)
-        version_label = QLabel(f"Version {version} is ready to use.")
+        version_label = QLabel(f"Version {version}")
         version_label.setProperty("role", "desc")
         hero_layout.addWidget(version_label)
         col.addWidget(hero)
-        heading = QLabel("What changed")
-        heading.setProperty("role", "section")
-        col.addWidget(heading)
         scroll = SettlingScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1181,15 +1200,17 @@ class UpdateCompleteDialog(QDialog):
         col.addWidget(scroll, 1)
         row = QHBoxLayout()
         row.addStretch(1)
-        done = QPushButton("Done")
+        done = QPushButton("Close")
         done.setObjectName("apply")
+        done.setDefault(True)
+        done.setAccessibleName("Close What's New")
         done.clicked.connect(self.accept)
         row.addWidget(done)
         col.addLayout(row)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        apply_native_chrome(int(self.winId()))
+        apply_native_chrome(int(self.winId()), self._dark)
         QTimer.singleShot(50, self._emit_presented)
 
     def _emit_presented(self) -> None:
@@ -1352,12 +1373,16 @@ class SettingsWindow(QWidget):
         settings: config.Settings,
         engine: engine_mod.Engine,
         updater=None,
+        whats_new_version: str = VERSION,
+        whats_new_notes: str = "",
     ):
         super().__init__(None)
         self._settings = settings
         self._vocabulary = list(settings.vocabulary)
         self._engine = engine
         self._updater = updater
+        self._whats_new_version = whats_new_version
+        self._whats_new_notes = whats_new_notes
         self._loading = True
         self._pending_reload = False
         self._has_cuda = engine_mod.cuda_available()
@@ -1750,15 +1775,25 @@ class SettingsWindow(QWidget):
         nav_divider.setFixedHeight(1)
         nav_col.addWidget(nav_divider)
         nav_col.addSpacing(5)
+        self.whats_new_btn = QPushButton("What's new")
+        self.whats_new_btn.setObjectName("navFooterLink")
+        self.whats_new_btn.setCursor(Qt.PointingHandCursor)
+        self.whats_new_btn.setToolTip(f"See what changed in Dictate {self._whats_new_version}")
+        self.whats_new_btn.clicked.connect(self._show_whats_new)
+        nav_col.addWidget(self.whats_new_btn)
         self.github_btn = QPushButton("GitHub")
         self.github_btn.setObjectName("navFooterLink")
         self.github_btn.setCursor(Qt.PointingHandCursor)
         self.github_btn.clicked.connect(self._open_github)
         nav_col.addWidget(self.github_btn)
         nav_col.addSpacing(5)
-        nav_status = QLabel(f"Version {VERSION}")
-        nav_status.setProperty("role", "status")
-        nav_col.addWidget(nav_status)
+        self.version_label = QLabel(f"Version {VERSION}")
+        self.version_label.setProperty("role", "status")
+        # Footer buttons draw their text eight pixels inside the rail edge.
+        # Match that optical start line so the version no longer sits left
+        # of What's new and GitHub.
+        self.version_label.setContentsMargins(8, 0, 0, 0)
+        nav_col.addWidget(self.version_label)
         self.save_status = QLabel()
         self.save_status.setProperty("role", "status")
         self.save_status.setWordWrap(True)
@@ -2644,6 +2679,16 @@ class SettingsWindow(QWidget):
 
     def _open_github(self) -> None:
         QDesktopServices.openUrl(QUrl("https://github.com/PLEXFX/dictate"))
+
+    def _show_whats_new(self) -> None:
+        """Open the current release notes without leaving Settings."""
+        dialog = UpdateCompleteDialog(
+            self._whats_new_version,
+            self._whats_new_notes,
+            self,
+            dark=self._selected_dark(),
+        )
+        dialog.exec()
 
     def _check_for_updates(self) -> None:
         if self._updater is None or not self.auto_update_check.isChecked():

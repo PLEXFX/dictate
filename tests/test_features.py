@@ -1290,9 +1290,11 @@ class PttWarmStartTests(unittest.TestCase):
         app._apply_settings = Mock()
         app._show_settings = Mock()
 
-        with patch.object(main, "FirstRunDialog", return_value=dialog), patch.object(
-            main.config, "save"
-        ) as save:
+        with (
+            patch.object(main, "FirstRunDialog", return_value=dialog),
+            patch.object(main.config, "save") as save,
+            patch.object(main.updater_mod, "mark_whats_new_seen") as mark_seen,
+        ):
             app._show_first_run()
 
         saved = save.call_args.args[0]
@@ -1302,10 +1304,14 @@ class PttWarmStartTests(unittest.TestCase):
         app._apply_settings.assert_called_once_with(saved)
         app._show_settings.assert_called_once()
         app.engine.preload.assert_called_once()
+        mark_seen.assert_called_once_with(main.VERSION)
 
     def test_update_completion_connects_the_rendered_window_signal(self):
         app, main = self._app()
-        app._update_notice = "A few fixes."
+        app._whats_new_notes = "A few fixes."
+        app.settings_window = Mock()
+        app._show_settings = Mock()
+        app.theme_watcher = Mock(dark=False)
         dialog = Mock()
 
         with patch.object(
@@ -1313,8 +1319,15 @@ class PttWarmStartTests(unittest.TestCase):
         ) as update_dialog:
             app._show_update_complete()
 
-        update_dialog.assert_called_once_with(main.VERSION, "A few fixes.")
-        dialog.presented.connect.assert_called_once_with(main._signal_updated_window_ready)
+        app._show_settings.assert_called_once_with()
+        update_dialog.assert_called_once_with(
+            main.VERSION,
+            "A few fixes.",
+            app.settings_window,
+            dark=False,
+        )
+        dialog.presented.connect.assert_any_call(main._signal_updated_window_ready)
+        dialog.presented.connect.assert_any_call(app._mark_current_version_seen)
         dialog.exec.assert_called_once()
 
     def test_failed_microphone_does_not_warm_the_model(self):
@@ -2360,6 +2373,8 @@ class UiTests(unittest.TestCase):
             window.github_btn.click()
 
         self.assertEqual(window.github_btn.parent().objectName(), "navRail")
+        self.assertEqual(window.whats_new_btn.parent().objectName(), "navRail")
+        self.assertEqual(window.version_label.contentsMargins().left(), 8)
         open_url.assert_called_once()
         self.assertEqual(
             open_url.call_args[0][0].toString(), "https://github.com/PLEXFX/dictate"
@@ -2416,6 +2431,81 @@ class UiTests(unittest.TestCase):
             self.assertIn("42%", window.save_status.text())
             self.assertTrue(window.update_progress.isHidden())
         window.close()
+
+    def test_whats_new_footer_button_opens_current_notes_inside_settings(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+
+            def preload(self):
+                pass
+
+        dialog = Mock()
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=False),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+            patch.object(settings_window, "UpdateCompleteDialog", return_value=dialog) as popup,
+        ):
+            window = settings_window.SettingsWindow(
+                config.Settings(),
+                DummyEngine(),
+                whats_new_version="2.0.0",
+                whats_new_notes="A cleaner update flow.",
+            )
+            window.whats_new_btn.click()
+
+        popup.assert_called_once_with(
+            "2.0.0",
+            "A cleaner update flow.",
+            window,
+            dark=window._selected_dark(),
+        )
+        dialog.exec.assert_called_once_with()
+        window.close()
+
+    def test_whats_new_window_has_clean_release_copy_and_a_close_action(self):
+        from PySide6.QtWidgets import QLabel, QPushButton
+
+        import settings_window
+
+        dialog = settings_window.UpdateCompleteDialog(
+            "2.0.0",
+            "### Added\n- **Cleaner** updates with the [release page](https://example.com).",
+            dark=True,
+        )
+        copy = " ".join(label.text() for label in dialog.findChildren(QLabel))
+        buttons = [button.text() for button in dialog.findChildren(QPushButton)]
+
+        self.assertIn("What's new in Dictate", copy)
+        self.assertIn("Cleaner updates with the release page.", copy)
+        self.assertNotIn("**", copy)
+        self.assertIn("Close", buttons)
+        dialog.close()
+
+    def test_whats_new_keeps_wrapped_changelog_bullets_in_one_row(self):
+        import settings_window
+
+        groups = settings_window._release_note_groups(
+            "### Fixed\n- The updater now runs from a temporary copy,\n"
+            "  leaving every installed file available to replace."
+        )
+
+        self.assertEqual(
+            groups,
+            [
+                (
+                    "Fixed",
+                    [
+                        "The updater now runs from a temporary copy, leaving every "
+                        "installed file available to replace."
+                    ],
+                )
+            ],
+        )
 
     def test_rail_update_control_downloads_then_restarts_from_real_states(self):
         import engine
@@ -3452,8 +3542,44 @@ class UpdateNoticeTests(unittest.TestCase):
             with patch.object(updater, "_update_notice_path", return_value=path):
                 self.assertIsNone(updater.consume_update_notice("0.2.2-beta.1"))
 
+    def test_whats_new_seen_marker_is_version_specific(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "whats-new-seen.json"
+            with patch.object(updater, "_whats_new_seen_path", return_value=path):
+                self.assertTrue(updater.whats_new_is_unseen("1.0.0"))
+                updater.mark_whats_new_seen("1.0.0")
+                self.assertFalse(updater.whats_new_is_unseen("1.0.0"))
+                self.assertTrue(updater.whats_new_is_unseen("1.0.1"))
+
 
 class UpdateCleanupTests(unittest.TestCase):
+    def test_stages_the_complete_splash_outside_the_install_directory(self):
+        with (
+            tempfile.TemporaryDirectory() as source_root,
+            tempfile.TemporaryDirectory() as temp_root,
+        ):
+            source = Path(source_root) / "updater"
+            (source / "_internal").mkdir(parents=True)
+            (source / "dictate-updater.exe").write_bytes(b"splash")
+            (source / "_internal" / "runtime.dll").write_bytes(b"runtime")
+            staging_root = Path(temp_root) / "copy"
+            staging_root.mkdir()
+            with patch.object(updater.tempfile, "mkdtemp", return_value=str(staging_root)):
+                staged = updater.stage_update_splash(source)
+
+            self.assertIsNotNone(staged)
+            self.assertNotEqual(staged.parent, source)
+            self.assertEqual(staged.read_bytes(), b"splash")
+            self.assertTrue((staged.parent / "_internal" / "runtime.dll").is_file())
+
+    def test_cleanup_leaves_a_recent_running_splash_copy_alone(self):
+        with tempfile.TemporaryDirectory() as fake_temp:
+            active = Path(fake_temp) / f"{updater._SPLASH_TEMP_PREFIX}active"
+            active.mkdir()
+            with patch.object(updater.tempfile, "gettempdir", return_value=fake_temp):
+                updater.cleanup_stale_downloads()
+            self.assertTrue(active.exists())
+
     def test_removes_stale_download_folders(self):
         with tempfile.TemporaryDirectory() as fake_temp:
             stale = Path(fake_temp) / f"{updater._DOWNLOAD_TEMP_PREFIX}abc123"
@@ -3537,6 +3663,7 @@ class UpdaterFlowTests(unittest.TestCase):
 
     def test_start_update_stages_then_restart_revalidates_and_installs(self):
         available = threading.Event()
+        prepared = threading.Event()
         installing = threading.Event()
         installing_args = []
 
@@ -3556,6 +3683,7 @@ class UpdaterFlowTests(unittest.TestCase):
         ):
             u = updater.Updater(
                 on_available=lambda version, notes: available.set(),
+                on_prepare_installing=prepared.set,
                 on_installing=on_installing,
                 current_version="0.1.0-beta.2",
                 check_interval=9999,
@@ -3569,6 +3697,7 @@ class UpdaterFlowTests(unittest.TestCase):
                 popen.assert_not_called()
                 self.assertTrue(u.restart_to_install())
                 self.assertTrue(installing.wait(timeout=5))
+                self.assertTrue(prepared.is_set())
             finally:
                 u.shutdown()
 

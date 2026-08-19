@@ -25,4 +25,5 @@ Dictate is a minimal Windows 11 utility. The interface should feel at home besid
 ## Update notes
 
 - The post-update page is version-specific and presents the GitHub release body for the version just installed.
+- A version change opens What's New once over Settings. The same theme-matched modal remains available from a quiet footer link directly above GitHub and ends with one explicit Close action.
 - `CHANGELOG.md` is the release-note source. Prepare the GitHub release body with `prepare-release-notes.bat`; do not hand-maintain a second list inside the app.

@@ -37,6 +37,7 @@ import engine as engine_mod
 import gpu_runtime
 import hotkeys as hotkeys_mod
 import inject
+import release_notes as release_notes_mod
 import sounds as sounds_mod
 import startup
 import updater as updater_mod
@@ -92,9 +93,27 @@ CONSOLE_COMMANDS: list[tuple[str, str]] = [
 # temp extraction dir for onefile -- and is the documented way to find them
 # rather than guessing the layout ourselves.
 if getattr(sys, "frozen", False):
-    ICON_PATH = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)) / "icon.ico"
+    BUNDLE_DATA_PATH = Path(
+        getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)
+    )
+    ICON_PATH = BUNDLE_DATA_PATH / "icon.ico"
 else:
-    ICON_PATH = Path(__file__).resolve().parent / "icon.ico"
+    BUNDLE_DATA_PATH = Path(__file__).resolve().parent
+    ICON_PATH = BUNDLE_DATA_PATH / "icon.ico"
+CHANGELOG_PATH = BUNDLE_DATA_PATH / "CHANGELOG.md"
+
+
+def current_release_notes() -> str:
+    """Read this build's one bundled changelog section.
+
+    The in-app updater still carries GitHub's matching release body through
+    the restart. This bundled source covers manual installer upgrades and the
+    permanent Settings button without maintaining a second list.
+    """
+    try:
+        return release_notes_mod.notes_for_version(VERSION, CHANGELOG_PATH)
+    except (OSError, ValueError):
+        return "Dictate has the latest improvements and fixes."
 
 
 def already_running() -> bool:
@@ -252,6 +271,15 @@ class App:
         self._update_notice = (
             updater_mod.consume_update_notice(VERSION) if self._updated_restart else None
         )
+        self._whats_new_notes = (
+            self._update_notice
+            if self._update_notice is not None
+            else current_release_notes()
+        )
+        self._show_whats_new_after_start = self.settings.onboarding_complete and (
+            self._updated_restart or updater_mod.whats_new_is_unseen(VERSION)
+        )
+        self._prepared_update_splash: Path | None = None
         # A successful update never comes back to delete its own ~1 GB
         # temp download once it hands off to the installer -- do it here
         # instead, once per launch, so old downloads don't pile up in %TEMP%.
@@ -324,6 +352,7 @@ class App:
         self._start_command_listener()
         self.updater = updater_mod.Updater(
             on_available=self.bridge.update_available.emit,
+            on_prepare_installing=self._prepare_update_splash,
             on_installing=self.bridge.update_installing.emit,
             on_error=self.bridge.update_error.emit,
             on_up_to_date=self.bridge.update_current.emit,
@@ -338,7 +367,7 @@ class App:
             self.bar.show_bar()
         if not self.settings.onboarding_complete:
             QTimer.singleShot(0, self._show_first_run)
-        elif self._updated_restart:
+        elif self._show_whats_new_after_start:
             QTimer.singleShot(300, self._show_update_complete)
         else:
             # Skipped on first run (the welcome dialog already greets them)
@@ -676,6 +705,7 @@ class App:
             onboarding_complete=True,
         ).clamped()
         config.save(completed)
+        updater_mod.mark_whats_new_seen(VERSION)
         self._apply_settings(completed)
         # A fresh install should begin the default model download right after
         # setup, not make the first actual dictation discover it. The engine
@@ -748,7 +778,13 @@ class App:
 
     def _show_settings(self) -> None:
         if self.settings_window is None:
-            self.settings_window = SettingsWindow(self.settings, self.engine, self.updater)
+            self.settings_window = SettingsWindow(
+                self.settings,
+                self.engine,
+                self.updater,
+                VERSION,
+                self._whats_new_notes,
+            )
             self.settings_window.changed.connect(self._apply_settings)
             self.settings_window.capture_active.connect(self.hotkeys.set_capture_active)
             self.settings_window.margin_preview.connect(self.bar.preview_margin)
@@ -758,9 +794,23 @@ class App:
         self.settings_window.activateWindow()
 
     def _show_update_complete(self) -> None:
-        dialog = UpdateCompleteDialog(VERSION, self._update_notice or "")
+        # Keep Settings as the stable parent surface. The release notes are a
+        # focused modal on top, and the same window remains available later
+        # from the rail's permanent What's new button.
+        self._show_settings()
+        dark = resolve_dark(self.settings.theme_mode, self.theme_watcher.dark)
+        dialog = UpdateCompleteDialog(
+            VERSION,
+            self._whats_new_notes,
+            self.settings_window,
+            dark=dark,
+        )
         dialog.presented.connect(_signal_updated_window_ready)
+        dialog.presented.connect(self._mark_current_version_seen)
         dialog.exec()
+
+    def _mark_current_version_seen(self) -> None:
+        updater_mod.mark_whats_new_seen(VERSION)
 
     # --- open/already-running notices ---
 
@@ -934,6 +984,14 @@ class App:
         if self.updater.restart_to_install():
             self._notify("Verifying update before restart…", tone="info")
 
+    def _prepare_update_splash(self) -> None:
+        """Stage the progress helper before Setup can touch its install dir."""
+        self._prepared_update_splash = None
+        if not getattr(sys, "frozen", False):
+            return
+        installed_updater = Path(sys.executable).resolve().parent / "updater"
+        self._prepared_update_splash = updater_mod.stage_update_splash(installed_updater)
+
     def _on_update_installing(self, version: str, installer_pid: int) -> None:
         # The installer is already launched and waiting for this process to
         # exit before it can overwrite these files -- nothing left to ask.
@@ -955,10 +1013,9 @@ class App:
         must never block the actual update, which is already verified and
         already launched by this point.
         """
-        if not getattr(sys, "frozen", False):
-            return
-        splash_exe = Path(sys.executable).resolve().parent / "updater" / "dictate-updater.exe"
-        if not splash_exe.exists():
+        splash_exe = self._prepared_update_splash
+        self._prepared_update_splash = None
+        if splash_exe is None or not splash_exe.exists():
             return
         try:
             subprocess.Popen([str(splash_exe), "--installer-pid", str(installer_pid)])

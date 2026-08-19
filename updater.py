@@ -266,6 +266,8 @@ def _verify_authenticode(path: Path, trusted_thumbprint: str) -> bool:
 
 
 _DOWNLOAD_TEMP_PREFIX = "dictate-update-"
+_SPLASH_TEMP_PREFIX = "dictate-update-splash-"
+_SPLASH_STALE_AFTER_SECONDS = 10 * 60
 _PENDING_METADATA_NAME = "pending-update.json"
 
 
@@ -359,6 +361,32 @@ def _persist_pending_update(info: dict, verified_installer: Path) -> dict:
     return metadata
 
 
+def stage_update_splash(source_dir: Path) -> Optional[Path]:
+    """Copy the installed splash out of the directory Setup will replace.
+
+    Windows locks a running executable. Launching the splash directly from
+    ``{app}/updater`` therefore makes Inno Setup fail when it reaches that
+    same file. A complete temporary onedir copy keeps the progress window
+    alive without holding any installed file open.
+    """
+    source_dir = Path(source_dir)
+    source_exe = source_dir / "dictate-updater.exe"
+    if not source_exe.is_file():
+        return None
+    root = Path(tempfile.mkdtemp(prefix=_SPLASH_TEMP_PREFIX))
+    target_dir = root / "updater"
+    try:
+        shutil.copytree(source_dir, target_dir)
+    except OSError:
+        shutil.rmtree(root, ignore_errors=True)
+        return None
+    target_exe = target_dir / source_exe.name
+    if not target_exe.is_file():
+        shutil.rmtree(root, ignore_errors=True)
+        return None
+    return target_exe
+
+
 def cleanup_stale_downloads() -> None:
     """Remove temp folders a past update download left behind.
 
@@ -368,10 +396,9 @@ def cleanup_stale_downloads() -> None:
     never comes back to clean up its own download. Left alone, every
     applied update leaves another full installer sitting in %TEMP% forever.
 
-    Safe to sweep unconditionally at startup: whatever process created one
-    of these folders has already finished with it (or crashed) by the time
-    a *new* instance is starting, since a fresh app owns its own updater
-    and always downloads fresh rather than resuming a prior temp file.
+    Installer downloads can be swept at startup. Temporary splash copies are
+    different: the newly updated app starts while its splash is still alive,
+    so recent copies stay in place and are retired by a later launch.
     """
     base = Path(tempfile.gettempdir())
     try:
@@ -379,6 +406,15 @@ def cleanup_stale_downloads() -> None:
     except OSError:
         return
     for folder in candidates:
+        if folder.name.startswith(_SPLASH_TEMP_PREFIX):
+            # The newly updated app starts while its temporary splash is
+            # still waiting for the What's New window. Leave recent copies
+            # alone; a later launch safely retires them.
+            try:
+                if time.time() - folder.stat().st_mtime < _SPLASH_STALE_AFTER_SECONDS:
+                    continue
+            except OSError:
+                continue
         shutil.rmtree(folder, ignore_errors=True)
 
 
@@ -414,6 +450,32 @@ def consume_update_notice(version: str) -> Optional[str]:
     return notes if isinstance(notes, str) else ""
 
 
+def _whats_new_seen_path() -> Path:
+    return _app_data_dir() / "whats-new-seen.json"
+
+
+def whats_new_is_unseen(version: str) -> bool:
+    """Whether this installed version has completed its What's New view."""
+    try:
+        data = json.loads(_whats_new_seen_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    return not isinstance(data, dict) or data.get("version") != version
+
+
+def mark_whats_new_seen(version: str) -> None:
+    """Persist only the public version string after the window is visible."""
+    path = _whats_new_seen_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(".tmp")
+        temp_path.write_text(json.dumps({"version": version}), encoding="utf-8")
+        os.replace(temp_path, path)
+    except OSError:
+        # Missing this marker only means the window may appear again.
+        pass
+
+
 class Updater:
     """Owns the background check cycle, and the download+restart pipeline
     once a person explicitly asks for it via start_update().
@@ -427,6 +489,7 @@ class Updater:
     def __init__(
         self,
         on_available: Optional[Callable[[str, str], None]] = None,
+        on_prepare_installing: Optional[Callable[[], None]] = None,
         on_installing: Optional[Callable[[str, int], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
         on_up_to_date: Optional[Callable[[], None]] = None,
@@ -437,6 +500,7 @@ class Updater:
         enabled: bool = True,
     ):
         self._on_available = on_available or (lambda version, notes: None)
+        self._on_prepare_installing = on_prepare_installing or (lambda: None)
         self._on_installing = on_installing or (lambda version, installer_pid: None)
         self._on_error = on_error or (lambda message: None)
         self._on_up_to_date = on_up_to_date or (lambda: None)
@@ -706,6 +770,14 @@ class Updater:
                 print(f"[dictate] pending update verification detail: {exc}")
                 return
 
+            # This must finish before Setup starts. The progress helper is an
+            # onedir app, and launching its installed exe would lock the exact
+            # file the installer is about to replace (Windows error code 5).
+            # A missing splash is cosmetic; the verified update still runs.
+            try:
+                self._on_prepare_installing()
+            except Exception as exc:
+                print(f"[dictate] could not prepare update splash: {exc}")
             _write_update_notice(info["version"], info["release_notes"])
             try:
                 installer_process = subprocess.Popen(

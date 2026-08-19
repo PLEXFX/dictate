@@ -1,0 +1,52 @@
+name: Bug report
+description: Tell us about something in Dictate that is not working as expected.
+title: "[Bug]: "
+labels: [bug, beta-feedback]
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks for helping test Dictate. Please remove dictated text, recordings, and private information."
+  - type: input
+    id: version
+    attributes:
+      label: Dictate version
+      placeholder: e.g. 1.2.1-beta.1
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: e.g. Windows 11 24H2
+    validations:
+      required: true
+  - type: dropdown
+    id: processing
+    attributes:
+      label: Processing mode
+      options: [CPU, GPU, Automatic, Not sure]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant diagnostics (optional)
+      description: Paste only non-sensitive output from run-dictate-debug.bat.

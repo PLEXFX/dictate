@@ -1,0 +1,24 @@
+name: Feature or improvement
+description: Suggest a focused way to make Dictate clearer, faster, safer, or less distracting.
+title: "[Idea]: "
+labels: [enhancement, beta-feedback]
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks for the idea. Describe the user problem first; solutions are easier to assess in context."
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Your proposed direction
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered (optional)

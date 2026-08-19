@@ -1,287 +1,106 @@
 # Dictate
 
-Hold a key anywhere in Windows, speak, release. The text appears in whatever
-you were typing in. Transcription runs on this machine — no account and no
-cloud transcription. Speech-model files may download the first time they are used.
+> A local, push-to-talk transcription tool that feels at home on Windows 11.
 
-## What's new in v1.2.1-beta.1
+[![Latest beta](https://img.shields.io/github/v/release/PLEXFX/dictate?include_prereleases&label=beta&color=0078D4)](https://github.com/PLEXFX/dictate/releases) [![Platform](https://img.shields.io/badge/platform-Windows%2011-0078D4)](https://www.microsoft.com/windows/windows-11) [![License](https://img.shields.io/badge/license-MIT-107C10)](LICENSE)
 
-Dictate checks for a new release when it opens and shows a clickable activity-
-bar notification when one is ready. Settings now marks that same download
-action with a clear orange status dot. This release also includes the installer
-asset the updater needs to discover and install the new version.
+Hold a key anywhere in Windows, speak, and release. Dictate transcribes on your PC and inserts the result wherever your cursor is—no account, no cloud transcription service, and no transcript history.
 
-See [CHANGELOG.md](CHANGELOG.md) for the complete version history.
-Read [PRIVACY.md](PRIVACY.md) for exactly what Dictate processes and what its
-optional downloads contact.
+Dictate is currently a **public beta**. It is built for everyday use, but behavior, settings, and installer details may change as it matures. Please report rough edges through [GitHub Issues](https://github.com/PLEXFX/dictate/issues).
 
-A small Windows 11 flyout appears centred just above the taskbar while you
-talk. One hairline runs its width and never moves: in silence that is all you
-see, speaking grows slim capsules out of it that scroll a history of how loud
-you have been, a model loading sinks them back into the line while two accent
-segments sweep along it, and transcribing undulates them with two waves
-crossing in opposite directions so the line never repeats a pattern.
-States morph into one another rather than swapping, each capsule starting a
-beat after its neighbour so the change ripples across, and it takes its colour
-from your Windows accent, glowing a little brighter the louder you speak. It
-draws at your display's refresh rate, is built for whatever scale factor
-that display uses, and stops entirely once nothing is moving.
+## What it feels like
 
-## Install
+Dictate lives quietly in the system tray. While you speak, a small Windows 11-style activity bar appears above the taskbar using your system accent color. Its waveform gives immediate feedback without covering what you are working on. Settings use a familiar Windows-style navigation rail, automatic saving, light/dark surfaces, and plain-language controls.
 
-Download the latest `Dictate-Setup-*.exe` from
-[Releases](https://github.com/PLEXFX/dictate/releases/latest) and run it — no
-Python or setup needed. It's unsigned, so Windows SmartScreen will show an
-"unrecognized publisher" warning the first time; click **More info → Run
-anyway**. If Setup detects a supported NVIDIA graphics card, it offers a
-checkbox to enable GPU acceleration — Setup then downloads those optional
-files with a real progress bar, while machines without a card never download
-them at all. If you skip it, GPU setup stays a clear manual **Download now**
-choice in Settings. There's also a checkbox for whether Dictate should check
-GitHub for new versions in the background afterward — on by default, and also
-changeable later from Settings. When you uninstall, Dictate asks whether to
-keep your downloaded models, GPU files, and settings for a later reinstall.
+## Windows 11, at a glance
 
-## Running it
-
-Double-click `run-dictate.bat`. It lives in the tray; there is no main window
-and no console window either. The first launch explains the core controls and
-lets you choose a microphone.
-
-- **Hold F9** — talk. Release and the text is pasted where your cursor is.
-- **Tap F9** — for anything longer than a sentence. Recording stays on with your
-  hands free; tap again to finish, or press Esc to throw it away. A short level
-  tone marks the moment it locks, and the bar staying on screen after you let go
-  is the other half of that signal. A locked recording stops itself after five
-  minutes so a forgotten one cannot run all day.
-- **Ctrl+Alt+D** — settings.
-- Tray icon — left click for settings, right click for a menu (load model now,
-  copy the last dictation, undo the last dictation, unload model, quit).
-
-Use `run-dictate-debug.bat` instead when something is wrong; it keeps a
-console open so `[dictate]` status lines and errors are visible, and you can
-type commands into it — `help` lists them (model loading, status, GPU and
-version info, and a settings/update shortcut).
-
-## Settings
-
-Settings uses a persistent Windows-style navigation rail with separate
-Dictation, Activity bar, Appearance, Updates, and Privacy pages. Changes save
-automatically, and preferences are stored in the normal Windows per-user
-app-data folder rather than beside the source code.
-
-| Setting | What it does |
+| Dictation settings | Updates, on your terms |
 | --- | --- |
-| Microphone | Windows default or a specific available microphone |
-| Hold to talk | Click and press the key or mouse button to hold, default `f9`. Hold inputs together to record a combination such as `ctrl+mouse4`. An empty or unusable binding falls back to `f9`. |
-| Tap to keep recording | On by default. Tapping the talk key instead of holding it locks recording on until you tap again. Turn it off to make the key hold-only. |
-| Transcription mode | Everyday, Fast response, Best accuracy, or Max accuracy without model jargon |
-| Words I use | Local names, brands, and terms that help Dictate recognize uncommon words |
-| Sleep when idle / Sleep after | Release model memory after a clear slider-controlled delay |
-| Sounds | A short rising tone when the mic opens, a falling one when it starts transcribing |
-| Start with Windows | Launch Dictate silently when the current user signs in |
+| ![Dictate Settings in dark mode, showing microphone, hold-to-talk, dictation, and startup controls](docs/images/dictate-settings-dark.png) | ![Dictate Updates page in dark mode, showing automatic update preferences and a Check for updates button](docs/images/dictate-updates-dark.png) |
 
-**Advanced settings** contains the raw controls:
+<p align="center">
+  <img src="docs/images/dictate-activity-bar.png" alt="Dictate's compact blue waveform activity bar above the Windows taskbar" width="448">
+</p>
 
-| Setting | What it does |
-| --- | --- |
-| Processing | CPU, GPU, or automatic. If installed without GPU support, switching to GPU downloads the acceleration files first (about 1.3 GB from PyPI). |
-| Speech model | `tiny.en` through `large-v3-turbo`; `small.en` is the default. **Open model folder** shows Dictate's private model cache. |
-| Open settings | Click and press a keyboard or mouse combination, default `ctrl+alt+d` |
+<p align="center"><em>Quiet when idle. Clear while listening. Out of the way when you are done.</em></p>
 
-**Activity bar** keeps its display choices together:
+## Get started
 
-| Setting | What it does |
-| --- | --- |
-| Bar width | Live 180–280 px control; 200 px is the compact default and changes animate smoothly |
-| Always show / Distance from taskbar | Control when and where the bar appears |
-| Stay after finishing | Set how long completed feedback remains visible |
+1. Download the latest `Dictate-Setup-*.exe` from [Releases](https://github.com/PLEXFX/dictate/releases).
+2. Run Setup and choose whether to enable optional NVIDIA GPU acceleration.
+3. Open Dictate from Start. On first launch, choose a microphone and follow the short welcome flow.
+4. Hold `F9`, speak, then release—the text is pasted into the focused app.
 
-Dictate always pastes the result and adds one separating space. Those are
-consistent app behaviors rather than settings. Slider values show the default
-and offer a Reset control whenever they move away from it.
+There is no Python or manual setup required for the installer.
 
-**Undo last dictation** in the tray menu takes back the text Dictate just
-pasted, and refuses whenever it cannot be confident that text is still the last
-thing to have changed. It will not act if you have typed or clicked in that
-window since, if the window has closed, if more than 30 seconds have passed, or
-if the window will not come back to the front. It is offered once per dictation.
-Dictate cannot read another application's undo history, so refusing on any doubt
-is the only safe rule: a refused undo costs you one re-selection, while a wrong
-one would destroy work Dictate never wrote.
+> **Windows SmartScreen:** Dictate is not code-signed yet, so Windows may show an “unrecognized publisher” warning on first install. Select **More info** → **Run anyway** only after downloading from this repository’s official Releases page.
 
-The tray menu can copy the most recent dictation again. It keeps that one
-result in memory only; choosing it temporarily replaces the clipboard, then
-restores what was there after 5 seconds. If you copy anything in that window,
-Dictate leaves your newer clipboard item alone.
+## Everyday controls
 
-A Notifications section on the Appearance page has one toggle, "Also show Windows
-notifications" — off by default. Dictate's own floating-bar notification
-always shows for everything it raises (opening, an update, a second launch
-attempt); turning this on also mirrors each one as a normal Windows
-notification.
-
-The Updates page has its own toggle,
-"Check for updates automatically" — on by default, and also set at install
-time. Turning it off stops the daily background check and disables the
-manual "Check for updates" button; Dictate makes no GitHub request at all
-while it's off. Finding a newer version never downloads it automatically —
-the Settings rail and bar show an "Update available" action. Clicking it
-downloads and verifies the installer without closing Dictate. The rail then
-changes to "Restart to finish"; only that explicit second click revalidates
-the staged installer, launches it, and restarts the app. The verified state
-survives closing and reopening Dictate.
-
-The Privacy page in the Settings rail explains microphone use, local
-transcription, model downloads, clipboard behavior, and diagnostics in plain
-language. Debug output reports activity and errors without printing dictated text.
-
-## Preparing release notes
-
-The post-update page automatically shows the GitHub release body for the exact
-version that was installed. `CHANGELOG.md` is the single source for that text:
-move the finished entries from **Unreleased** under the new version heading,
-then double-click `prepare-release-notes.bat`. It checks that the app,
-package, and installer versions match, copies that version's notes to the
-clipboard, and opens a readable copy. Paste the copied text into the matching
-GitHub release—no separate in-app notes to maintain.
-
-## Sounds
-
-Three cues, on by default and switchable off under Sounds in Settings: a rising
-pair of notes when the microphone opens, the same two notes falling when it
-closes and transcription begins, and the same pair at one pitch — neither rising
-nor falling — when a tap locks recording on. They are the same idea heard three
-ways, so they read as "open", "close" and "staying open" rather than as
-unrelated beeps.
-
-No cue can be louder than the others. Each is normalised to a shared peak and
-then held to a shared RMS, because peak alone does not settle how loud something
-sounds: the lock cue's two same-pitch notes overlap constructively where a rising
-pair does not, and matching only their peaks left it audibly the loudest of the
-three.
-
-They are synthesised rather than shipped as files — `sounddevice` and numpy
-are already here for capture and the waveform. Each is about 150 ms and begins
-and ends at exactly zero amplitude, because a waveform that starts or stops
-away from zero is a click, and a click is the most fatiguing thing a sound you
-hear on every single use can have. Volume is one constant, `CUE_VOLUME` in
-`sounds.py`; pitch, spacing and decay are constants beside it.
-
-Playback goes through Qt's `QSoundEffect`, which decodes each cue once and
-keeps a warm pipeline. An earlier version opened a fresh output stream per cue
-and dropped them at random: this machine's default output reports 90 ms of
-buffering before a newly opened stream makes any sound, and an HDMI or
-DisplayPort endpoint waking from idle on top of that can swallow a 150 ms clip
-whole. The generated WAVs are cached in the app-data folder under a name
-containing a hash of the recipe, so retuning any constant writes new files
-instead of leaving a stale cue behind.
-
-The opening cue plays just after the microphone stream opens, so if you are on
-speakers rather than headphones it is audible to the microphone. It is short
-and quiet enough that transcription is unaffected in practice; if it ever is,
-the fix is to drop the first ~150 ms of each clip.
-
-## What it costs
-
-Measured on this machine (RTX 4070 SUPER, Ryzen 7 9700X) with `small.en`,
-against 4-second sentences.
-
-| | CPU (int8) | GPU (float16) |
+| Action | Default | Result |
 | --- | --- | --- |
-| Time per 4s utterance | ~0.9 s | ~0.19 s |
-| Speed vs realtime | 0.24x | 0.05x |
-| Word accuracy on the test set | 97% | 100% |
-| RAM with model loaded | 582 MB | 449 MB |
-| VRAM with model loaded | 0 MB | 766 MB |
+| Dictate | Hold `F9` | Record while held; release to transcribe and paste |
+| Longer dictation | Tap `F9` | Lock recording on; tap again to finish or `Esc` to cancel |
+| Open Settings | `Ctrl` + `Alt` + `D` | Adjust microphone, shortcuts, appearance, updates, and privacy |
+| Tray icon | Left/right click | Open Settings or access quick actions such as copy, undo, unload, and quit |
 
-Idle, with the model asleep and the bar hidden, the app sits at **71 MB of RAM
-and no VRAM at all**. The bar costs about 0.2 ms per frame — about 1% of one core
-at 60 Hz and 2% at 144 Hz, and only while it is actually on screen: an idle
-bar stops its clock and costs nothing. Its shadow is rendered once per display
-scale factor and cached, and a capsule sitting flush in the hairline is
-skipped rather than drawn, so silence is close to free.
+Dictate automatically adds one separating space after an inserted result. **Undo last dictation** is deliberately cautious: it only acts when the app can be confident it will undo its own most recent insertion.
 
-**CPU is the default, deliberately.** It never touches the GPU, and 0.9 s for a
-sentence is below the threshold where you would sit waiting. Switch to GPU if
-you dictate long passages and want them near-instant.
+## Local by design
 
-One honest caveat on the GPU path: sleeping releases the model's VRAM but not
-the CUDA context, which holds roughly 200 MB for as long as the app runs. Only
-quitting gives that back. On CPU, sleep really does return everything.
+- Microphone audio and dictated text stay on your device.
+- Dictate does not save recordings or maintain a transcript history.
+- Speech models download locally on first use. Optional GPU runtime files download only if you choose GPU acceleration.
+- Update checks contact the official GitHub repository only when enabled.
 
-## How it fits together
+Read the full [privacy statement](PRIVACY.md).
 
-| File | Job |
-| --- | --- |
-| `main.py` | Wiring, tray icon, and the thread policy for the whole app |
-| `engine.py` | faster-whisper with load/unload/device-switch lifecycle |
-| `audio.py` | Mic capture and the FFT the waveform is drawn from |
-| `bar.py` | The floating bar above the taskbar |
-| `settings_window.py` | Essential and Advanced settings in a Windows 11 layout |
-| `startup.py` | Current-user Windows startup registration |
-| `toggle.py` | Windows 11 toggle switch |
-| `hotkeys.py` | Global hold-to-talk and the settings combo |
-| `inject.py` | Getting text into the focused window |
-| `sounds.py` | The two synthesised cues and their playback |
-| `config.py` | Settings defaults, load, save, and clamping |
-| `updater.py` | Background GitHub Releases check, download, and verification |
-| `release_notes.py` | Extracts the current version's GitHub release body from `CHANGELOG.md` |
-| `gpu_runtime.py` | On-demand CUDA compute DLL download from PyPI for an installed build |
+## Thoughtful Windows 11 details
 
-Three threads matter: the Qt UI thread, pynput's listener thread, and a
-short-lived worker per utterance. Every hop between them goes through the
-`Bridge` signals in `main.py`.
+- A compact, system-accent activity bar above the taskbar—smooth feedback, no distracting main window.
+- Familiar Settings pages for Dictation, Activity bar, Appearance, Updates, and Privacy.
+- Light/dark appearance with Windows Acrylic when transparency effects are enabled.
+- Configurable keyboard or mouse hold-to-talk shortcuts, microphone selection, sleep behavior, sounds, and startup.
+- Background update checks with a visible, user-initiated download and verified installer before restart.
+- CPU-first operation; optional NVIDIA GPU acceleration for faster long-form dictation.
 
-Transcription is [faster-whisper](https://github.com/SYSTRAN/faster-whisper),
-which runs on CTranslate2 rather than PyTorch. That is why there is no `torch`
-in the dependency list — it would be about 2.5 GB of install for one
-`cuda.is_available()` call. CUDA support comes from the much smaller
-`nvidia-cublas-cu12` and `nvidia-cudnn-cu12` wheels.
+## Updates and beta releases
 
-## Setup from scratch
+Dictate can check GitHub for updates at launch and periodically in the background. It never installs or restarts without your action: when an update is available, choose it from the activity bar or Settings; after the installer is downloaded and verified, choose **Restart to finish**.
 
-Needs [uv](https://docs.astral.sh/uv/). Models download themselves on first use
-and cache in `%APPDATA%\dictate\models`, separate from other apps.
+Every release has notes in [CHANGELOG.md](CHANGELOG.md). The current beta, **v1.2.1-beta.1**, improves update discovery and makes update availability clearer in Settings.
 
-```
+## Run from source
+
+Dictate targets Windows 11 and Python 3.12. [uv](https://docs.astral.sh/uv/) is required for local development.
+
+```powershell
 uv venv --python 3.12 .venv
 uv pip install --python .venv\Scripts\python.exe -r pyproject.toml
+.\run-dictate-debug.bat
 ```
 
-## If something goes wrong
+Use `run-dictate.bat` for normal tray operation. `run-dictate-debug.bat` keeps a diagnostic console open and supports `help` for useful local commands.
 
-**Nothing happens when I hold F9.** Check the tray icon is there. Some
-full-screen games and elevated windows (Task Manager, anything running as
-administrator) swallow global hotkeys — Windows blocks a normal-privilege app
-from seeing keys pressed over an elevated one.
+Run the test suite with:
 
-**"Python Launcher is sorry to say ... No Python at ...".** This is uv's venv
-launcher shim failing to start an interpreter that is present and working — it
-has been seen on this machine across several uv venvs, not just this project.
-
-Both launchers handle it automatically: they test the shim first and, if it
-fails, run the base interpreter directly with the venv's packages on
-`PYTHONPATH`. Same result, nothing in between to break.
-`run-dictate-debug.bat` prints which route it took.
-
-If you see the message anyway, the environment is genuinely missing. Rebuild it:
-
-```
-uv venv --python 3.12 .venv
-uv pip install --python .venv\Scripts\python.exe -r pyproject.toml
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Downloads are cached, so a rebuild is much faster than the first install.
+## Contributing
 
-**Text pastes into the wrong place.** The paste goes wherever the cursor is
-when you release the key. Click into the field first.
+Bug reports, usability feedback, and small focused improvements are welcome during beta. Start with [CONTRIBUTING.md](CONTRIBUTING.md), search existing issues before opening a new one, and keep proposals grounded in the app’s [Windows 11 design direction](DESIGN.md).
 
-**"cublas64_12.dll is not found".** The GPU support wheels are missing or the
-venv is broken; reinstall with the command above. The app falls back to CPU
-rather than failing outright, so this shows up as unexpectedly slower
-transcription rather than an error.
+For security-sensitive reports, please follow [SECURITY.md](SECURITY.md) rather than opening a public issue.
 
-**It feels slow on the first utterance after a break.** That is the model
-reloading after sleeping. Either raise the sleep timer or turn sleep off in
-settings.
+## Project notes
+
+- Dictate uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on CTranslate2 rather than PyTorch.
+- The default `small.en` model balances accuracy and responsiveness; additional model and processing choices live in **Advanced settings**.
+- Model files live under `%APPDATA%\dictate\models`, separate from the source folder.
+- GPU support is optional. If it is not installed, Dictate safely stays on CPU.
+
+## License
+
+Dictate is available under the [MIT License](LICENSE).

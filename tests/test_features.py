@@ -1409,6 +1409,50 @@ class PttWarmStartTests(unittest.TestCase):
         dialog.presented.connect.assert_any_call(app._mark_current_version_seen)
         dialog.exec.assert_called_once()
 
+    def test_update_splash_launch_passes_the_real_app_directory_when_frozen(self):
+        """The splash always runs from a temporary staged copy, so it can
+        never work out {app} -- where dictate.exe would need to be
+        relaunched from after a failed install -- on its own. A frozen
+        build must hand it the real install directory explicitly."""
+        app, main = self._app()
+        splash_exe = Path(r"C:\Users\me\AppData\Local\Temp\dictate-splash\updater\dictate-updater.exe")
+        app._prepared_update_splash = splash_exe
+
+        with (
+            patch.object(main, "sys") as fake_sys,
+            patch.object(main.subprocess, "Popen") as popen,
+            patch.object(main.Path, "exists", return_value=True),
+        ):
+            fake_sys.frozen = True
+            fake_sys.executable = r"C:\Program Files\Dictate\dictate.exe"
+            app._launch_update_splash(4321)
+
+        popen.assert_called_once_with(
+            [
+                str(splash_exe),
+                "--installer-pid",
+                "4321",
+                "--app-dir",
+                str(Path(r"C:\Program Files\Dictate")),
+            ]
+        )
+        self.assertIsNone(app._prepared_update_splash)
+
+    def test_update_splash_launch_skips_app_dir_in_dev_mode(self):
+        app, main = self._app()
+        splash_exe = Path(r"C:\Users\me\AppData\Local\Temp\dictate-splash\updater\dictate-updater.exe")
+        app._prepared_update_splash = splash_exe
+
+        with (
+            patch.object(main, "sys") as fake_sys,
+            patch.object(main.subprocess, "Popen") as popen,
+            patch.object(main.Path, "exists", return_value=True),
+        ):
+            fake_sys.frozen = False
+            app._launch_update_splash(4321)
+
+        popen.assert_called_once_with([str(splash_exe), "--installer-pid", "4321"])
+
     def test_failed_microphone_does_not_warm_the_model(self):
         app, main = self._app()
         app.engine.state = main.engine_mod.UNLOADED
@@ -4111,6 +4155,7 @@ class UpdateSplashTests(unittest.TestCase):
             splash.decide_next_action(
                 exit_code=None,
                 elapsed_seconds=1.0,
+                success_elapsed_seconds=None,
                 updated_window_ready=False,
             ),
             splash.WAITING,
@@ -4123,6 +4168,7 @@ class UpdateSplashTests(unittest.TestCase):
             splash.decide_next_action(
                 exit_code=1,
                 elapsed_seconds=1.0,
+                success_elapsed_seconds=None,
                 updated_window_ready=False,
             ),
             splash.RELAUNCH_AND_CLOSE,
@@ -4135,6 +4181,7 @@ class UpdateSplashTests(unittest.TestCase):
             splash.decide_next_action(
                 exit_code=0,
                 elapsed_seconds=20.0,
+                success_elapsed_seconds=1.0,
                 updated_window_ready=False,
             ),
             splash.SUCCESS_GRACE,
@@ -4147,6 +4194,7 @@ class UpdateSplashTests(unittest.TestCase):
             splash.decide_next_action(
                 exit_code=0,
                 elapsed_seconds=2.0,
+                success_elapsed_seconds=0.5,
                 updated_window_ready=True,
             ),
             splash.CLOSE,
@@ -4159,6 +4207,7 @@ class UpdateSplashTests(unittest.TestCase):
             splash.decide_next_action(
                 exit_code=None,
                 elapsed_seconds=splash.SAFETY_TIMEOUT_SECONDS,
+                success_elapsed_seconds=None,
                 updated_window_ready=False,
             ),
             splash.CLOSE,
@@ -4169,21 +4218,60 @@ class UpdateSplashTests(unittest.TestCase):
             splash.decide_next_action(
                 exit_code=0,
                 elapsed_seconds=splash.SAFETY_TIMEOUT_SECONDS,
+                success_elapsed_seconds=1.0,
                 updated_window_ready=True,
             ),
             splash.CLOSE,
         )
 
-    def test_relaunch_target_is_one_level_up_from_the_updater_subfolder(self):
-        """Matches installer/dictate.iss's layout: {app}\\dictate.exe next to
-        {app}\\updater\\dictate-updater.exe."""
+    def test_success_grace_timeout_closes_without_waiting_for_the_full_ceiling(self):
+        """A ready-signal that never arrives (a protocol mismatch between the
+        splash's own shipped version and the version that just installed,
+        for example) must not strand the splash for the full 90s safety
+        window -- only a few seconds past a successful install."""
         import update_splash as splash
 
-        splash_exe = Path(r"C:\Program Files\Dictate\updater\dictate-updater.exe")
         self.assertEqual(
-            splash.relaunch_target_path(splash_exe),
+            splash.decide_next_action(
+                exit_code=0,
+                elapsed_seconds=15.0,
+                success_elapsed_seconds=splash.SUCCESS_GRACE_TIMEOUT_SECONDS,
+                updated_window_ready=False,
+            ),
+            splash.CLOSE,
+        )
+        # Just under the grace ceiling still waits.
+        self.assertEqual(
+            splash.decide_next_action(
+                exit_code=0,
+                elapsed_seconds=15.0,
+                success_elapsed_seconds=splash.SUCCESS_GRACE_TIMEOUT_SECONDS - 0.1,
+                updated_window_ready=False,
+            ),
+            splash.SUCCESS_GRACE,
+        )
+
+    def test_relaunch_target_is_dictate_exe_in_the_real_app_directory(self):
+        """The splash always runs from a temporary staged copy (see
+        stage_update_splash), never from the real {app}\\updater\\ -- so the
+        real install directory must be passed in explicitly, not derived
+        from this process's own exe path."""
+        import update_splash as splash
+
+        app_dir = Path(r"C:\Program Files\Dictate")
+        self.assertEqual(
+            splash.relaunch_target_path(app_dir),
             Path(r"C:\Program Files\Dictate\dictate.exe"),
         )
+
+    def test_parse_app_dir_reads_the_flag(self):
+        import update_splash as splash
+
+        self.assertEqual(
+            splash._parse_app_dir(["--installer-pid", "123", "--app-dir", r"C:\Dictate"]),
+            Path(r"C:\Dictate"),
+        )
+        self.assertIsNone(splash._parse_app_dir(["--installer-pid", "123"]))
 
 
 class CorruptSettingsTests(unittest.TestCase):

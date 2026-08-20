@@ -615,10 +615,20 @@ class App:
             # started.
             self.hotkeys.cancel_lock()
             return
+        # Shown before anything else so the press always has instant visual
+        # feedback, even when opening the audio device is slow (worst on a
+        # cold first press, since PortAudio has not touched the driver yet).
+        # ``_dictation_active`` also has to flip here, not after mic.start()
+        # succeeds: engine LOADING (e.g. a first-run model download) can fire
+        # in between and would otherwise steal the bar back to "loading"
+        # before the listening state ever became visible.
+        self._dictation_active = True
+        self.bar.set_state("listening")
         self.meter.reset()
         try:
             self.mic.start()
         except Exception as exc:
+            self._dictation_active = False
             self.hotkeys.cancel_lock()
             self.bar.set_state("error", "No microphone")
             print(f"[dictate] mic error: {exc}")
@@ -632,11 +642,9 @@ class App:
         # cold-start cost with the user's speech instead of making them wait
         # after release. ``preload`` is asynchronous and ``ensure_loaded``
         # deduplicates a model that is already resident.
-        self._dictation_active = True
         if self.engine.state != engine_mod.READY:
             self._ptt_preload_pending = True
             self.engine.preload()
-        self.bar.set_state("listening")
         self.meter_timer.start()
 
     def _on_talk_locked(self) -> None:
@@ -1138,8 +1146,15 @@ class App:
         self._prepared_update_splash = None
         if splash_exe is None or not splash_exe.exists():
             return
+        args = [str(splash_exe), "--installer-pid", str(installer_pid)]
+        # The splash always runs from a temporary staged copy (see
+        # stage_update_splash), so it can never work out {app} -- where the
+        # real dictate.exe it may need to relaunch after a failed install
+        # lives -- from its own exe path. Pass it explicitly.
+        if getattr(sys, "frozen", False):
+            args += ["--app-dir", str(Path(sys.executable).resolve().parent)]
         try:
-            subprocess.Popen([str(splash_exe), "--installer-pid", str(installer_pid)])
+            subprocess.Popen(args)
         except OSError as exc:
             print(f"[dictate] could not launch update splash: {exc}")
 

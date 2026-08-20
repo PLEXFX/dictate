@@ -7,6 +7,21 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.3-beta.1] - 2026-08-20
+
+### Fixed
+
+- The update progress window no longer lingers on screen after the updated
+  app has already opened. It now gives up waiting for the app's ready
+  signal after a few seconds of a confirmed-successful install, instead of
+  the full 90-second safety window.
+- Fixed the update progress window's recovery relaunch: after an install
+  failure it now finds the real Dictate install to reopen, instead of
+  looking next to its own temporary progress-window copy.
+- Holding the talk key now shows the activity bar instantly, even on the
+  very first press after launch. It no longer waits for the microphone
+  device to finish opening before giving any visual feedback.
+
 ## [1.2.2-beta.1] - 2026-08-20
 
 ### Fixed

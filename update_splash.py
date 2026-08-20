@@ -69,6 +69,13 @@ FADE_OUT_MS = 150
 POLL_INTERVAL_MS = 300
 FAILURE_HOLD_SECONDS = 2.0
 SAFETY_TIMEOUT_SECONDS = 90.0
+# Once the installer itself has already exited 0, the only thing left to
+# wait for is the new app's window rendering -- normally a couple of
+# seconds. Capping that wait far below the overall safety ceiling means a
+# broken or mismatched ready-signal (e.g. the handoff protocol changing
+# between the version this splash shipped with and the version that just
+# installed) fails fast instead of sitting on screen for the full 90s.
+SUCCESS_GRACE_TIMEOUT_SECONDS = 12.0
 # Must stay byte-for-byte identical to main.py's UPDATED_WINDOW_READY_EVENT --
 # the two processes find each other by this name and nothing else.
 UPDATE_READY_EVENT = "Local\\DictateUpdatedWindowReady"
@@ -92,6 +99,7 @@ def decide_next_action(
     *,
     exit_code: Optional[int],
     elapsed_seconds: float,
+    success_elapsed_seconds: Optional[float],
     updated_window_ready: bool,
 ) -> str:
     """The splash's whole state machine, as one pure function.
@@ -104,6 +112,14 @@ def decide_next_action(
     That removes the blank gap that arose when merely seeing dictate.exe start
     was treated as proof that the replacement UI was on screen. The safety
     ceiling still wins over everything, so this can never wait forever.
+
+    ``success_elapsed_seconds`` is the time since ``exit_code`` first became
+    0 (None until then). Once the installer itself is done, rendering a
+    window normally takes a couple of seconds, not the full safety ceiling
+    -- SUCCESS_GRACE_TIMEOUT_SECONDS bounds that specific wait so a broken
+    ready-signal handoff (for example the event name changing between the
+    version this splash shipped with and the version that just installed)
+    still closes promptly instead of sitting on screen for up to 90s.
     """
     if elapsed_seconds >= SAFETY_TIMEOUT_SECONDS:
         return CLOSE
@@ -111,15 +127,24 @@ def decide_next_action(
         return RELAUNCH_AND_CLOSE
     if updated_window_ready:
         return CLOSE
+    if (
+        success_elapsed_seconds is not None
+        and success_elapsed_seconds >= SUCCESS_GRACE_TIMEOUT_SECONDS
+    ):
+        return CLOSE
     return SUCCESS_GRACE if exit_code == 0 else WAITING
 
 
-def relaunch_target_path(splash_exe_path: Path) -> Path:
-    """Where the previous dictate.exe should be, given this splash's own
-    installed location: {app}\\updater\\dictate-updater.exe -> {app}\\dictate.exe
-    (see installer/dictate.iss's Files section for that layout).
+def relaunch_target_path(app_dir: Path) -> Path:
+    """Where the previous dictate.exe lives, given the app's real install
+    directory ({app}\\dictate.exe).
+
+    This splash always runs from a temporary staged copy, never from
+    {app}\\updater\\ itself (see stage_update_splash's own docstring for why),
+    so {app} can never be derived from this process's own exe path -- the
+    caller passes it explicitly via --app-dir.
     """
-    return splash_exe_path.resolve().parent.parent / "dictate.exe"
+    return Path(app_dir) / "dictate.exe"
 
 
 # --- thin OS wrappers ----------------------------------------------------
@@ -269,11 +294,13 @@ def _progress_style(dark: bool) -> str:
 
 
 class SplashWindow(QWidget):
-    def __init__(self, installer_pid: int) -> None:
+    def __init__(self, installer_pid: int, app_dir: Optional[Path] = None) -> None:
         super().__init__()
         self._installer_pid = installer_pid
+        self._app_dir = app_dir
         self._handle = _open_process(installer_pid)
         self._exit_code: Optional[int] = None
+        self._success_at: Optional[float] = None
         self._start = time.monotonic()
         self._ready_event = _create_update_ready_event()
         self._done = False
@@ -370,13 +397,18 @@ class SplashWindow(QWidget):
                 self._exit_code = code
                 print(f"[dictate-updater] installer exited with code {code}")
                 if code == 0:
+                    self._success_at = time.monotonic()
                     self._title.setText("Starting the updated Dictate…")
 
         elapsed = time.monotonic() - self._start
+        success_elapsed = (
+            time.monotonic() - self._success_at if self._success_at is not None else None
+        )
 
         action = decide_next_action(
             exit_code=self._exit_code,
             elapsed_seconds=elapsed,
+            success_elapsed_seconds=success_elapsed,
             updated_window_ready=_update_window_ready(self._ready_event),
         )
         if action in (WAITING, SUCCESS_GRACE):
@@ -389,6 +421,11 @@ class SplashWindow(QWidget):
         else:
             if elapsed >= SAFETY_TIMEOUT_SECONDS:
                 print("[dictate-updater] safety timeout reached -- closing")
+            elif success_elapsed is not None and success_elapsed >= SUCCESS_GRACE_TIMEOUT_SECONDS:
+                print(
+                    "[dictate-updater] no ready signal from the updated app after "
+                    f"{SUCCESS_GRACE_TIMEOUT_SECONDS:.0f}s -- closing anyway"
+                )
             else:
                 print("[dictate-updater] updated Dictate window is visible -- closing")
             self._start_fade_out()
@@ -398,14 +435,17 @@ class SplashWindow(QWidget):
         if self._taskbar is not None:
             self._taskbar.error()
         self._title.setText("Update failed — reopening Dictate")
-        target = relaunch_target_path(Path(sys.argv[0]))
-        try:
-            if target.exists():
-                subprocess.Popen([str(target)])
-            else:
-                print(f"[dictate-updater] relaunch target missing: {target}")
-        except OSError as exc:
-            print(f"[dictate-updater] could not relaunch Dictate: {exc}")
+        if self._app_dir is None:
+            print("[dictate-updater] no app directory known -- cannot relaunch Dictate")
+        else:
+            target = relaunch_target_path(self._app_dir)
+            try:
+                if target.exists():
+                    subprocess.Popen([str(target)])
+                else:
+                    print(f"[dictate-updater] relaunch target missing: {target}")
+            except OSError as exc:
+                print(f"[dictate-updater] could not relaunch Dictate: {exc}")
         QTimer.singleShot(int(FAILURE_HOLD_SECONDS * 1000), self._start_fade_out)
 
     def _start_fade_out(self) -> None:
@@ -432,15 +472,26 @@ def _parse_installer_pid(argv: list[str]) -> Optional[int]:
         return None
 
 
+def _parse_app_dir(argv: list[str]) -> Optional[Path]:
+    if "--app-dir" not in argv:
+        return None
+    idx = argv.index("--app-dir")
+    if idx + 1 >= len(argv):
+        return None
+    return Path(argv[idx + 1])
+
+
 def main() -> int:
-    installer_pid = _parse_installer_pid(sys.argv[1:])
+    argv = sys.argv[1:]
+    installer_pid = _parse_installer_pid(argv)
     if installer_pid is None:
         print("[dictate-updater] no --installer-pid given, exiting")
         return 1
+    app_dir = _parse_app_dir(argv)
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
-    window = SplashWindow(installer_pid)
+    window = SplashWindow(installer_pid, app_dir)
     window.show()
     return app.exec()
 

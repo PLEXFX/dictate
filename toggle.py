@@ -25,6 +25,7 @@ class ToggleSwitch(QWidget):
         self._checked = checked
         self._slide = 1.0 if checked else 0.0
         self._hover = False
+        self._dark: bool | None = None
 
         self.setFixedSize(W, H)
         self.setCursor(Qt.PointingHandCursor)
@@ -55,6 +56,19 @@ class ToggleSwitch(QWidget):
     def _toggle(self) -> None:
         self.setChecked(not self._checked)
 
+    def set_dark(self, dark: bool) -> None:
+        """Follow the app's resolved Light/Dark/System choice, not raw OS state.
+
+        Settings applies a System/Light/Dark override on top of the Windows
+        setting; without this the switch ignored that override and always
+        painted from system_is_dark(), leaving it mismatched to the rest of
+        the page whenever the override disagreed with the OS.
+        """
+        if dark == self._dark:
+            return
+        self._dark = dark
+        self.update()
+
     # --- input ---
 
     def mousePressEvent(self, event) -> None:
@@ -80,14 +94,15 @@ class ToggleSwitch(QWidget):
     def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        palette = colors(system_is_dark())
+        dark = system_is_dark() if self._dark is None else self._dark
+        palette = colors(dark)
         enabled = self.isEnabled()
         track = QRectF(0.5, 0.5, W - 1, H - 1)
         radius = track.height() / 2
 
         if self._checked:
-            accent = QColor(0, 120, 212) if not system_is_dark() else QColor(76, 194, 255)
-            accent_hover = QColor(0, 108, 190) if not system_is_dark() else QColor(96, 205, 255)
+            accent = QColor(0, 120, 212) if not dark else QColor(76, 194, 255)
+            accent_hover = QColor(0, 108, 190) if not dark else QColor(96, 205, 255)
             fill = accent_hover if (self._hover and enabled) else accent
             if not enabled:
                 fill = palette["disabled"]

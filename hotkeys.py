@@ -167,7 +167,9 @@ class Hotkeys:
         self._watched = None            # window whose input we are counting
         self._watched_foreground = None  # callable giving the focused window
         self._watched_hits = 0
-        self._lock = threading.Lock()
+        # Reentrant: _press decides a whole gesture under this lock and can
+        # call cancel_lock() from inside it, which needs the lock as well.
+        self._lock = threading.RLock()
         self._listener: keyboard.Listener | None = None
         self._mouse_listener: mouse.Listener | None = None
 
@@ -251,12 +253,13 @@ class Hotkeys:
         actually open the microphone -- otherwise a tap would lock a recording
         that was never running, and the bar would sit there capturing nothing.
         """
-        was_locked = self._locked
-        self._locked = False
-        self._lockable = False
-        if was_locked:
-            self._talking = False
-            self._on_talk_cancel()
+        with self._lock:
+            was_locked = self._locked
+            self._locked = False
+            self._lockable = False
+            if was_locked:
+                self._talking = False
+                self._on_talk_cancel()
 
     def release_lock(self) -> None:
         """End a locked recording as though the user had pressed the key.
@@ -264,11 +267,12 @@ class Hotkeys:
         The app calls this when a locked recording hits its time limit, so the
         audio so far is transcribed rather than discarded.
         """
-        if not self._locked:
-            return
-        self._locked = False
-        self._talking = False
-        self._on_talk_end(time.monotonic() - self._press_time)
+        with self._lock:
+            if not self._locked:
+                return
+            self._locked = False
+            self._talking = False
+            self._on_talk_end(time.monotonic() - self._press_time)
 
     def start(self) -> None:
         self._listener = keyboard.Listener(
@@ -307,43 +311,50 @@ class Hotkeys:
         self._note_activity()
         if self._suppressed or self._capture_active or not name:
             return
+        # The whole decision runs under the lock, not just the pressed-key set.
+        # Two listener threads deliver into here -- keyboard and mouse -- so a
+        # binding spanning both (ctrl+mouse4) had both of them reading and
+        # writing _talking/_locked/_press_time concurrently, which could start
+        # or end a recording twice.
         with self._lock:
             first_press = name not in self._pressed
             self._pressed.add(name)
             pressed = set(self._pressed)
 
-        combo = parse_combo(self._settings.settings_hotkey)
-        if combo and combo <= pressed:
-            if not self._combo_latched:
-                self._combo_latched = True
-                self._on_settings()
-            return
+            combo = parse_combo(self._settings.settings_hotkey)
+            if combo and combo <= pressed:
+                if not self._combo_latched:
+                    self._combo_latched = True
+                    self._on_settings()
+                return
 
-        ptt = parse_combo(self._settings.ptt_key)
+            ptt = parse_combo(self._settings.ptt_key)
 
-        # Esc abandons a locked recording -- unless Esc is itself part of the
-        # talk binding, where ending the recording normally is what was meant.
-        if self._locked and name == CANCEL_KEY and CANCEL_KEY not in ptt:
-            self.cancel_lock()
-            return
+            # Esc abandons a locked recording -- unless Esc is itself part of
+            # the talk binding, where ending the recording normally is what
+            # was meant.
+            if self._locked and name == CANCEL_KEY and CANCEL_KEY not in ptt:
+                self.cancel_lock()
+                return
 
-        if not (ptt and ptt <= pressed and first_press):
-            return
+            if not (ptt and ptt <= pressed and first_press):
+                return
 
-        if self._locked:
-            # Any press of the talk key ends a locked recording. The duration
-            # runs from the original press, so the whole capture counts.
-            self._locked = False
-            self._talking = False
-            self._ending_lock = True
-            self._on_talk_end(time.monotonic() - self._press_time)
-            return
+            if self._locked:
+                # Any press of the talk key ends a locked recording. The
+                # duration runs from the original press, so the whole capture
+                # counts.
+                self._locked = False
+                self._talking = False
+                self._ending_lock = True
+                self._on_talk_end(time.monotonic() - self._press_time)
+                return
 
-        if not self._talking:
-            self._talking = True
-            self._lockable = True
-            self._press_time = time.monotonic()
-            self._on_talk_start()
+            if not self._talking:
+                self._talking = True
+                self._lockable = True
+                self._press_time = time.monotonic()
+                self._on_talk_start()
 
     def _release(self, name: str) -> None:
         if self._suppressed or self._capture_active or not name:
@@ -352,29 +363,29 @@ class Hotkeys:
             self._pressed.discard(name)
             pressed = set(self._pressed)
 
-        combo = parse_combo(self._settings.settings_hotkey)
-        if self._combo_latched and not (combo <= pressed):
-            self._combo_latched = False
+            combo = parse_combo(self._settings.settings_hotkey)
+            if self._combo_latched and not (combo <= pressed):
+                self._combo_latched = False
 
-        ptt = parse_combo(self._settings.ptt_key)
-        still_held = not ptt or ptt <= pressed
-        if still_held:
-            return
+            ptt = parse_combo(self._settings.ptt_key)
+            still_held = not ptt or ptt <= pressed
+            if still_held:
+                return
 
-        if self._ending_lock:
-            # Letting go of the press that finished a locked recording. The
-            # capture already ended on the press; there is nothing to end here.
-            self._ending_lock = False
-            return
+            if self._ending_lock:
+                # Letting go of the press that finished a locked recording.
+                # The capture already ended on the press; nothing to end here.
+                self._ending_lock = False
+                return
 
-        if not self._talking:
-            return
+            if not self._talking:
+                return
 
-        held = time.monotonic() - self._press_time
-        if held < MIN_HOLD_SECONDS and self._lockable and self.lock_enabled():
-            self._locked = True
-            self._on_talk_lock()
-            return
+            held = time.monotonic() - self._press_time
+            if held < MIN_HOLD_SECONDS and self._lockable and self.lock_enabled():
+                self._locked = True
+                self._on_talk_lock()
+                return
 
-        self._talking = False
-        self._on_talk_end(held)
+            self._talking = False
+            self._on_talk_end(held)

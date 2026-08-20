@@ -69,7 +69,9 @@ FADE_OUT_MS = 150
 POLL_INTERVAL_MS = 300
 FAILURE_HOLD_SECONDS = 2.0
 SAFETY_TIMEOUT_SECONDS = 90.0
-UPDATE_READY_EVENT = "Global\\DictateUpdatedWindowReady"
+# Must stay byte-for-byte identical to main.py's UPDATED_WINDOW_READY_EVENT --
+# the two processes find each other by this name and nothing else.
+UPDATE_READY_EVENT = "Local\\DictateUpdatedWindowReady"
 _WAIT_OBJECT_0 = 0
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000

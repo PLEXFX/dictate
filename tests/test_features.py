@@ -82,10 +82,20 @@ class _Controller:
 
 
 class ClipboardTests(unittest.TestCase):
+    @staticmethod
+    def _borrowable(value: bool):
+        """Pin the Windows-level clipboard-format check.
+
+        Without this these tests read the real clipboard of whatever machine
+        is running them, so a screenshot sitting in it would decide the result.
+        """
+        return patch.object(inject, "clipboard_is_borrowable", return_value=value)
+
     def test_empty_clipboard_is_restored_after_paste(self):
         copied: list[str] = []
         controller = _Controller()
         with (
+            self._borrowable(True),
             patch.object(inject.pyperclip, "paste", return_value=""),
             patch.object(inject.pyperclip, "copy", side_effect=copied.append),
             patch.object(inject.time, "sleep"),
@@ -97,21 +107,59 @@ class ClipboardTests(unittest.TestCase):
         self.assertEqual(controller.pressed_keys, ["v"])
         self.assertEqual(controller.released_keys, ["v"])
 
-    def test_failed_clipboard_read_does_not_overwrite_with_fake_backup(self):
+    def test_failed_clipboard_read_refuses_to_overwrite_clipboard(self):
         copied: list[str] = []
         with (
+            self._borrowable(True),
             patch.object(inject.pyperclip, "paste", side_effect=RuntimeError("busy")),
             patch.object(inject.pyperclip, "copy", side_effect=copied.append),
             patch.object(inject.time, "sleep"),
             patch.object(inject, "_controller", _Controller()),
         ):
-            inject.send("hello", "paste")
+            with self.assertRaisesRegex(
+                inject.ClipboardUnavailable, "preserve the clipboard"
+            ):
+                inject.send("hello", "paste")
 
-        self.assertEqual(copied, ["hello"])
+        self.assertEqual(copied, [])
+
+    def test_non_text_clipboard_is_never_overwritten_by_a_paste(self):
+        """An image or file selection reads back as "" and must not be lost.
+
+        pyperclip cannot see those formats, so it reports success and an empty
+        string -- indistinguishable from an empty clipboard without asking
+        Windows which formats are actually present.
+        """
+        copied: list[str] = []
+        with (
+            self._borrowable(False),
+            patch.object(inject.pyperclip, "paste", return_value=""),
+            patch.object(inject.pyperclip, "copy", side_effect=copied.append),
+            patch.object(inject.time, "sleep"),
+            patch.object(inject, "_controller", _Controller()),
+        ):
+            with self.assertRaises(inject.ClipboardUnavailable):
+                inject.send("hello", "paste")
+
+        self.assertEqual(copied, [])
+
+    def test_clipboard_is_borrowable_only_for_empty_or_text(self):
+        cases = [(0, False, True), (3, True, True), (3, False, False)]
+        for formats, has_text, expected in cases:
+            user32 = Mock()
+            user32.CountClipboardFormats.return_value = formats
+            user32.IsClipboardFormatAvailable.return_value = has_text
+            with patch.object(inject, "_user32", return_value=user32):
+                self.assertIs(inject.clipboard_is_borrowable(), expected)
+
+        # Fails closed when Windows cannot be asked at all.
+        with patch.object(inject, "_user32", return_value=None):
+            self.assertFalse(inject.clipboard_is_borrowable())
 
     def test_temporary_copy_restores_the_previous_clipboard_after_the_window(self):
         copied: list[str] = []
         with (
+            self._borrowable(True),
             patch.object(inject.pyperclip, "paste", return_value="before"),
             patch.object(inject.pyperclip, "copy", side_effect=copied.append),
             patch.object(inject, "_clipboard_sequence", side_effect=[42, 42]),
@@ -125,6 +173,7 @@ class ClipboardTests(unittest.TestCase):
     def test_temporary_copy_never_restores_over_a_new_user_clipboard_item(self):
         copied: list[str] = []
         with (
+            self._borrowable(True),
             patch.object(inject.pyperclip, "paste", return_value="before"),
             patch.object(inject.pyperclip, "copy", side_effect=copied.append),
             patch.object(inject, "_clipboard_sequence", side_effect=[42, 43]),
@@ -136,8 +185,22 @@ class ClipboardTests(unittest.TestCase):
         self.assertEqual(copied, ["dictated words"])
 
     def test_temporary_copy_refuses_to_touch_an_unreadable_clipboard(self):
-        with patch.object(inject.pyperclip, "paste", side_effect=RuntimeError("busy")):
+        with (
+            self._borrowable(True),
+            patch.object(inject.pyperclip, "paste", side_effect=RuntimeError("busy")),
+        ):
             self.assertIsNone(inject.copy_temporarily("dictated words"))
+
+    def test_temporary_copy_refuses_when_the_clipboard_holds_non_text(self):
+        copied: list[str] = []
+        with (
+            self._borrowable(False),
+            patch.object(inject.pyperclip, "paste", return_value=""),
+            patch.object(inject.pyperclip, "copy", side_effect=copied.append),
+        ):
+            self.assertIsNone(inject.copy_temporarily("dictated words"))
+
+        self.assertEqual(copied, [])
 
 
 class VocabularyTests(unittest.TestCase):
@@ -349,6 +412,7 @@ class EngineGpuDownloadTests(unittest.TestCase):
         eng._progress = None
         eng._on_state = lambda *a, **k: None
         eng._gpu_download_thread = None
+        eng._gpu_download_guard = threading.Lock()
         eng._gpu_downloading = False
         eng._gpu_progress = None
         eng._on_gpu_status = lambda *a, **k: None
@@ -1795,12 +1859,16 @@ class LastDictationTests(unittest.TestCase):
     def test_copy_last_refuses_when_the_existing_clipboard_cannot_be_protected(self):
         app, main = self._app()
         app._last_dictation = "hello there"
+        app._notify = Mock()
         with patch.object(main.inject, "copy_temporarily", return_value=None):
             app._copy_last_dictation()
 
-        app.bar.set_state.assert_called_once_with(
-            "error", "Couldn't safely protect your clipboard"
+        # Reported through the same toast as every other outcome of this menu
+        # item, not by poking a raw bar state that carries no message.
+        app._notify.assert_called_once_with(
+            "Couldn't safely protect your clipboard.", tone="error"
         )
+        self.assertIsNone(app._clipboard_restore)
 
 
 class UiTests(unittest.TestCase):
@@ -2055,6 +2123,39 @@ class UiTests(unittest.TestCase):
         self.assertIn("QFrame#settingsGroup { background: #FFFFFF;", window.styleSheet())
         window.close()
 
+    def test_toggle_switches_follow_the_selected_appearance_not_raw_system_state(self):
+        import engine
+        import settings_window
+        from toggle import ToggleSwitch
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=False),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+            patch.object(settings_window, "system_is_dark", return_value=True),
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+            toggles = window.findChildren(ToggleSwitch)
+            self.assertTrue(toggles)
+            for toggle in toggles:
+                self.assertTrue(toggle._dark)
+
+            # Overriding to Light must repaint every toggle to match, even
+            # though the OS is still reporting dark — this is the appearance
+            # mismatch the toggles used to ignore.
+            window.theme_box.setCurrentIndex(window.theme_box.findData("light"))
+            for toggle in toggles:
+                self.assertFalse(toggle._dark)
+        window.close()
+
     def test_first_model_download_is_visible_in_settings_without_a_settings_reload(self):
         import engine
         import settings_window
@@ -2194,7 +2295,10 @@ class UiTests(unittest.TestCase):
                 pass
 
             def start_gpu_download(self):
+                # Mirrors the real Engine's contract: True once a download is
+                # actually running, so the button knows to stay disabled.
                 DummyEngine.start_calls += 1
+                return True
 
         with (
             patch.object(settings_window.engine_mod, "cuda_available", return_value=True),
@@ -2903,11 +3007,15 @@ class BarClickTests(unittest.TestCase):
 
         b = bar_mod.Bar(config.Settings())
         b._apply_state("listening", "")
-        b.set_live_text("provisional words must not appear")
+        height_before = b.height()
 
-        self.assertFalse(b._card_active)
-        self.assertEqual(b._card_target, 0.0)
-        self.assertEqual(b._text_to, ("", ""))
+        # The transcript preview is deliberately absent (see DESIGN.md), so a
+        # stray call must change nothing: no geometry change, and no card
+        # surface reintroduced for text to be painted into.
+        self.assertIsNone(b.set_live_text("provisional words must not appear"))
+        self.assertEqual(b.height(), height_before)
+        self.assertFalse(hasattr(b, "_paint_transcript_card"))
+        self.assertFalse(hasattr(b, "_card_active"))
 
     def test_always_visible_setting_enters_and_exits_the_idle_bar_immediately(self):
         """A toggle change must not wait for a future dictation cycle."""
@@ -3429,6 +3537,23 @@ class UpdaterReleaseFetchTests(unittest.TestCase):
             info = updater._fetch_latest_release()
         self.assertEqual(info["version"], "0.2.0-beta.2")
         self.assertEqual(info["installer_url"], new_url)
+
+    def test_skips_an_incomplete_newer_release_for_the_latest_valid_one(self):
+        old_assets, old_url, _ = _installer_assets("v0.2.0-beta.2")
+        # A release created before its installer has finished uploading must
+        # not make the established release invisible to existing installs.
+        payload = json.dumps(
+            [
+                _release("v0.3.0-beta.1", []),
+                _release("v0.2.0-beta.2", old_assets),
+            ]
+        ).encode("utf-8")
+        with patch.object(
+            updater.urllib.request, "urlopen", return_value=_fake_response(payload)
+        ):
+            info = updater._fetch_latest_release()
+        self.assertEqual(info["version"], "0.2.0-beta.2")
+        self.assertEqual(info["installer_url"], old_url)
 
     def test_ignores_prerelease_flag(self):
         # This is the actual bug: GitHub's /releases/latest endpoint hides
@@ -4059,6 +4184,258 @@ class UpdateSplashTests(unittest.TestCase):
             splash.relaunch_target_path(splash_exe),
             Path(r"C:\Program Files\Dictate\dictate.exe"),
         )
+
+
+class CorruptSettingsTests(unittest.TestCase):
+    """load() runs before there is a QApplication to report anything with.
+
+    Anything it raises is an app that silently never appears -- no window, no
+    tray icon, no error -- so every one of these has to clamp to a default
+    instead.
+    """
+
+    BAD_VALUES = [
+        {"bar_width": "wide"},
+        {"bar_width": None},
+        {"bar_margin": [1, 2]},
+        {"bar_linger_ms": "soon"},
+        {"sleep_after_minutes": None},
+        {"sleep_after_minutes": "ten"},
+        {"sleep_after_minutes": float("nan")},
+        {"model_size": ["a", "b"]},       # unhashable: `in {...}` raises
+        {"device": {"x": 1}},
+        {"theme_mode": [1]},
+        {"input_device": 5},
+        {"ptt_key": 12},
+        {"vocabulary": "not a list"},
+    ]
+
+    def _load(self, raw: dict) -> config.Settings:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            with (
+                patch.object(config, "CONFIG_DIR", Path(folder)),
+                patch.object(config, "CONFIG_PATH", path),
+            ):
+                return config.load()
+
+    def test_wrong_types_fall_back_to_defaults_without_raising(self):
+        defaults = config.Settings()
+        for raw in self.BAD_VALUES:
+            with self.subTest(raw=raw):
+                loaded = self._load(raw)
+                field = next(iter(raw))
+                self.assertEqual(getattr(loaded, field), getattr(defaults, field))
+
+    def test_valid_values_still_survive_the_clamp(self):
+        loaded = self._load(
+            {"device": "cuda", "model_size": "medium.en", "theme_mode": "light",
+             "bar_width": 240, "sleep_after_minutes": 3}
+        )
+        self.assertEqual(loaded.device, "cuda")
+        self.assertEqual(loaded.model_size, "medium.en")
+        self.assertEqual(loaded.theme_mode, "light")
+        self.assertEqual(loaded.bar_width, 240)
+        self.assertEqual(loaded.sleep_after_minutes, 3.0)
+
+    def test_out_of_range_numbers_are_still_clamped_to_the_bounds(self):
+        self.assertEqual(self._load({"bar_width": 9999}).bar_width, 280)
+        self.assertEqual(self._load({"bar_width": 1}).bar_width, 180)
+        self.assertEqual(self._load({"sleep_after_minutes": 0}).sleep_after_minutes, 0.5)
+
+
+class BarAccentTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication(
+            ["dictate-tests", "-platform", "offscreen"]
+        )
+
+    def test_saving_settings_keeps_the_light_mode_accent(self):
+        """A settings save must not repaint the bar in the dark-mode accent.
+
+        system_accent() defaults to dark=True, so calling it bare during a save
+        swapped a light-mode bar to the lighter, lower-contrast variant and
+        left it there -- set_theme() early-returns when the theme has not
+        actually changed, so nothing put it back.
+        """
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings(theme_mode="light"))
+        b.set_theme(False)
+        light_accent = bar_mod.system_accent(False)
+        self.assertEqual(b._accent.name(), light_accent.name())
+
+        b.update_settings(config.Settings(theme_mode="light", bar_linger_ms=900))
+
+        self.assertEqual(b._accent.name(), light_accent.name())
+        self.assertNotEqual(
+            bar_mod.system_accent(False).name(), bar_mod.system_accent(True).name()
+        )
+
+    def test_saving_settings_rereads_a_changed_windows_accent(self):
+        """The cache key is ("accent", dark); popping a bare "accent" hit nothing.
+
+        With the wrong key the pop matched no entry, so a Windows accent
+        change stayed invisible until the app restarted.
+        """
+        from PySide6.QtGui import QColor
+
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        b.set_theme(True)
+        stale = QColor(255, 0, 255)
+        bar_mod._CACHE[("accent", True)] = stale
+        bar_mod._CACHE[("accent", False)] = stale
+
+        b.update_settings(config.Settings())
+
+        self.assertNotEqual(b._accent.name(), stale.name())
+        self.assertEqual(b._accent.name(), bar_mod.system_accent(True).name())
+
+
+class DictationDeliveryTests(unittest.TestCase):
+    """A finished transcription must never be the thing that gets lost."""
+
+    @staticmethod
+    def _app():
+        import main
+
+        app = main.App.__new__(main.App)
+        app._busy = False
+        app._dictation_active = False
+        app.engine = Mock()
+        app.engine.transcribe.return_value = "hello there"
+        app.hotkeys = Mock()
+        app.bridge = Mock()
+        return app, main
+
+    def test_paste_failure_falls_back_to_typing(self):
+        app, main = self._app()
+        sent: list[tuple[str, str]] = []
+
+        def fake_send(payload, mode):
+            if mode == "paste":
+                raise main.inject.ClipboardUnavailable("nope")
+            sent.append((payload, mode))
+
+        with (
+            patch.object(main.inject, "send", side_effect=fake_send),
+            patch.object(main.inject, "foreground_window", return_value=99),
+        ):
+            app._work(np.ones(10, dtype=np.float32))
+
+        # Typed, not dropped -- and reported as a normal success.
+        self.assertEqual(sent, [("hello there ", "type")])
+        app.bridge.finished.emit.assert_called_once_with("done", "hello there")
+
+    def test_the_text_is_kept_even_when_insertion_fails_entirely(self):
+        """"Copy last dictation" is the user's only recovery, so it must arm."""
+        app, main = self._app()
+        with (
+            patch.object(main.inject, "send", side_effect=RuntimeError("no input")),
+            patch.object(main.inject, "foreground_window", return_value=99),
+        ):
+            app._work(np.ones(10, dtype=np.float32))
+
+        app.bridge.dictated.emit.assert_called_once_with("hello there")
+        app.bridge.finished.emit.assert_called_once_with("error", "no input")
+
+    def test_a_key_press_during_transcription_leaves_the_bar_alone(self):
+        """_start_listening declines while busy, so the release has nothing to end.
+
+        Falling through reset the bar to idle underneath a dictation that was
+        still running.
+        """
+        import main
+
+        app = main.App.__new__(main.App)
+        app._busy = True
+        app._dictation_active = False
+        app.bar = Mock()
+        app.mic = Mock()
+        app.meter_timer = Mock()
+        app.lock_limit_timer = Mock()
+
+        app._stop_listening(1.0)
+
+        app.bar.set_state.assert_not_called()
+        app.mic.stop.assert_not_called()
+
+
+class ManualUpdateCheckTests(unittest.TestCase):
+    """A check the user asked for must always answer, even when it declines."""
+
+    @staticmethod
+    def _updater(**kwargs):
+        up = updater.Updater.__new__(updater.Updater)
+        up._enabled = True
+        up._available = None
+        up._pending = None
+        up._busy = threading.Lock()
+        up._revert_timer = None
+        up._status_state = updater.IDLE
+        up._status_detail = ""
+        up._status_progress = None
+        up._on_status_change = Mock()
+        up._on_available = Mock()
+        for name, value in kwargs.items():
+            setattr(up, name, value)
+        return up
+
+    def test_check_now_reports_whether_it_actually_started(self):
+        up = self._updater()
+        with patch.object(updater.threading, "Thread") as thread:
+            self.assertTrue(up.check_now(silent=False))
+        thread.assert_called_once()
+
+        up._enabled = False
+        self.assertFalse(up.check_now(silent=False))
+
+    def test_a_manual_check_re_announces_an_update_it_already_found(self):
+        """Otherwise the tray item and console command did nothing at all."""
+        info = {"version": "9.9.9", "release_notes": "notes"}
+        up = self._updater(_available=info)
+
+        self.assertFalse(up.check_now(silent=False))
+
+        self.assertEqual(up._status_state, updater.AVAILABLE)
+        up._on_available.assert_called_once_with("9.9.9", "notes")
+
+    def test_the_background_cadence_stays_quiet_when_it_declines(self):
+        up = self._updater(_available={"version": "9.9.9", "release_notes": ""})
+
+        self.assertFalse(up.check_now(silent=True))
+
+        self.assertEqual(up._status_state, updater.IDLE)
+        up._on_available.assert_not_called()
+
+    def test_a_silent_check_still_signals_that_it_finished(self):
+        """A UI that disabled its button on click needs one signal to re-enable it."""
+        up = self._updater()
+        with patch.object(updater, "_fetch_latest_release", return_value=None):
+            up._busy.acquire()
+            up._check(silent=True)
+
+        up._on_status_change.assert_called_once()
+        self.assertEqual(up._status_state, updater.IDLE)
+
+    def test_a_thread_that_cannot_start_does_not_strand_the_busy_lock(self):
+        up = self._updater()
+        with patch.object(
+            updater.threading, "Thread", side_effect=RuntimeError("no threads")
+        ):
+            # Reported, never raised: _loop() calls this too, and an exception
+            # there would end the background cadence for the whole session.
+            self.assertFalse(up.check_now(silent=False))
+
+        # Still acquirable: a stranded lock would disable every future check,
+        # download, and restart for the life of the process.
+        self.assertTrue(up._busy.acquire(blocking=False))
 
 
 if __name__ == "__main__":

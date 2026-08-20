@@ -45,11 +45,15 @@ def notes_for_version(version: str, changelog: Path = CHANGELOG) -> str:
 
 
 def version_mismatches() -> list[str]:
-    """Catch the three version strings that packaging still requires in sync."""
+    """Catch the version strings packaging requires to match version.py.
+
+    version.py is the reference, so it is not itself listed -- comparing
+    VERSION against VERSION could never report anything.
+    """
     pyproject_version = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]["version"]
     installer_match = INSTALLER_VERSION.search(INSTALLER.read_text(encoding="utf-8"))
     installer_version = installer_match.group("version") if installer_match else "missing"
-    sources = {"version.py": VERSION, "pyproject.toml": pyproject_version, "installer/dictate.iss": installer_version}
+    sources = {"pyproject.toml": pyproject_version, "installer/dictate.iss": installer_version}
     return [f"{name} is {value!r}, expected {VERSION!r}" for name, value in sources.items() if value != VERSION]
 
 

@@ -1423,6 +1423,8 @@ class SettingsWindow(QWidget):
         self.setStyleSheet(stylesheet(dark))
         apply_native_chrome(int(self.winId()), dark)
         self._paint_chevron(dark)
+        for toggle in self.findChildren(ToggleSwitch):
+            toggle.set_dark(dark)
 
     def set_theme(self, system_dark: bool) -> None:
         """Apply a Windows change, respecting any local appearance override."""
@@ -2495,11 +2497,24 @@ class SettingsWindow(QWidget):
                 )
 
     def _start_gpu_download_clicked(self) -> None:
+        """Start the GPU-runtime download, and put the button back if it can't.
+
+        ``start_gpu_download`` returns False as a no-op (no real GPU, or the
+        files are already on disk). Discarding that answer left the button
+        disabled and reading "Downloading…" with nothing running, and
+        ``_refresh_gpu_download_status`` returns early without a GPU, so
+        nothing ever restored it.
+        """
+        start = getattr(self._engine, "start_gpu_download", None)
+        if start is None:
+            return
         self.gpu_download_btn.setEnabled(False)
         self.gpu_download_btn.setText("Downloading…")
-        start = getattr(self._engine, "start_gpu_download", None)
-        if start is not None:
-            start()
+        if not start():
+            self._refresh_gpu_download_status()
+            if not self.gpu_download_btn.isEnabled():
+                self.gpu_download_btn.setEnabled(True)
+                self.gpu_download_btn.setText("Download now")
 
     def _update_gpu_download_visibility(self) -> None:
         """Show the dedicated GPU row only while there's something to act
@@ -2706,15 +2721,23 @@ class SettingsWindow(QWidget):
         # own busy guard, which read as the button "randomly" not doing
         # anything. Qt never delivers a second click to a widget this
         # handler already disabled -- it processes one click at a time.
+        # Each branch puts the button back itself when the updater declines.
+        # Every one of these calls can legitimately no-op (the background
+        # cadence holding the same busy lock is the common case), and a
+        # declined call produces no status change to react to, so a button
+        # disabled on click would otherwise sit there reading "Checking…"
+        # until something unrelated refreshed it.
         u_state, _u_detail, _u_progress = self._updater.last_status
         if u_state == updater_mod.AVAILABLE:
             self.update_btn.setEnabled(False)
             self.update_btn.setText("Downloading…")
-            self._updater.start_update()
+            if not self._updater.start_update():
+                self.refresh_status()
         elif u_state == updater_mod.READY_TO_RESTART:
             self.update_btn.setEnabled(False)
             self.update_btn.setText("Verifying…")
-            self._updater.restart_to_install()
+            if not self._updater.restart_to_install():
+                self.refresh_status()
         elif u_state in (
             updater_mod.CHECKING,
             updater_mod.DOWNLOADING,
@@ -2725,7 +2748,8 @@ class SettingsWindow(QWidget):
         else:
             self.update_btn.setEnabled(False)
             self.update_btn.setText("Checking…")
-            self._updater.check_now(silent=False)
+            if not self._updater.check_now(silent=False):
+                self.refresh_status()
 
     def refresh_status(self) -> None:
         """Finish model-change feedback without a permanent status badge.
@@ -2872,7 +2896,9 @@ class SettingsWindow(QWidget):
             sleep_after_minutes=self.sleep_slider.value(),
             ptt_key=self.ptt_edit.binding() or config.DEFAULT_PTT_KEY,
             tap_to_lock=self.tap_lock_check.isChecked(),
-            settings_hotkey=self.hotkey_edit.binding() or "ctrl+alt+d",
+            settings_hotkey=(
+                self.hotkey_edit.binding() or config.DEFAULT_SETTINGS_HOTKEY
+            ),
             vocabulary=self._vocabulary,
             always_visible=self.visible_check.isChecked(),
             bar_width=self.width_slider.value(),

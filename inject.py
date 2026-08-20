@@ -17,6 +17,7 @@ from __future__ import annotations
 import ctypes
 import time
 from collections.abc import Callable
+from ctypes import wintypes
 
 import pyperclip
 from pynput import keyboard
@@ -30,12 +31,76 @@ PASTE_SETTLE = 0.18
 TEMPORARY_COPY_SECONDS = 5
 FOCUS_SETTLE = 0.12  # Windows switches the foreground window asynchronously
 
+CF_UNICODETEXT = 13
+
+_user32_lib = None
+_user32_ready = False
+
+
+def _user32():
+    """user32 with real signatures, or None where it cannot be loaded.
+
+    Window handles are pointer-sized. ctypes assumes a C ``int`` return without
+    a declared restype, which truncates and sign-extends an HWND -- so the
+    handle undo is anchored to could come back as a different number from the
+    one Windows handed out.
+    """
+    global _user32_lib, _user32_ready
+    if _user32_ready:
+        return _user32_lib
+    _user32_ready = True
+    try:
+        lib = ctypes.WinDLL("user32")
+    except (AttributeError, OSError):
+        return None
+    lib.GetForegroundWindow.restype = wintypes.HWND
+    lib.GetForegroundWindow.argtypes = ()
+    lib.SetForegroundWindow.restype = wintypes.BOOL
+    lib.SetForegroundWindow.argtypes = (wintypes.HWND,)
+    lib.IsWindow.restype = wintypes.BOOL
+    lib.IsWindow.argtypes = (wintypes.HWND,)
+    lib.GetClipboardSequenceNumber.restype = wintypes.DWORD
+    lib.GetClipboardSequenceNumber.argtypes = ()
+    lib.CountClipboardFormats.restype = ctypes.c_int
+    lib.CountClipboardFormats.argtypes = ()
+    lib.IsClipboardFormatAvailable.restype = wintypes.BOOL
+    lib.IsClipboardFormatAvailable.argtypes = (wintypes.UINT,)
+    _user32_lib = lib
+    return lib
+
 
 def _read_clipboard() -> tuple[bool, str]:
     try:
         return True, pyperclip.paste()
     except Exception:
         return False, ""
+
+
+def clipboard_is_borrowable() -> bool:
+    """True when borrowing the clipboard would not destroy anything.
+
+    ``pyperclip.paste()`` cannot answer this on its own. It reads only
+    CF_UNICODETEXT and returns an empty string for anything else, so a
+    clipboard holding a screenshot or a set of copied files looks exactly like
+    an empty one -- and "restoring" an empty string over the user's screenshot
+    is the very loss the caller is trying to avoid.
+
+    Windows can tell the two apart without opening the clipboard at all:
+    ``CountClipboardFormats() == 0`` is genuinely empty, and the Unicode-text
+    format being present means there is text to put back. Anything else means
+    some other program owns data here that Dictate cannot preserve.
+
+    Fails closed: if the question cannot be answered, the answer is no.
+    """
+    try:
+        user32 = _user32()
+        if user32 is None:
+            return False
+        if int(user32.CountClipboardFormats()) == 0:
+            return True  # nothing there to lose
+        return bool(user32.IsClipboardFormatAvailable(CF_UNICODETEXT))
+    except Exception:
+        return False
 
 
 def _clipboard_sequence() -> int | None:
@@ -46,8 +111,10 @@ def _clipboard_sequence() -> int | None:
     is only a fallback: the user may deliberately copy the same words again.
     """
     try:
-        value = int(ctypes.windll.user32.GetClipboardSequenceNumber())
-        return value or None
+        user32 = _user32()
+        if user32 is None:
+            return None
+        return int(user32.GetClipboardSequenceNumber()) or None
     except Exception:
         return None
 
@@ -61,6 +128,10 @@ def copy_temporarily(text: str) -> Callable[[], bool] | None:
     risking an image, file list, or another app's private clipboard payload.
     """
     if not text:
+        return None
+    # Same reason as send(): a read alone cannot tell an empty clipboard from
+    # one holding an image or copied files, and both read back as "".
+    if not clipboard_is_borrowable():
         return None
     previous_read, previous = _read_clipboard()
     if not previous_read:
@@ -97,14 +168,20 @@ def foreground_window() -> int | None:
     handle is the only reliable identity for "the app Dictate just typed into".
     """
     try:
-        return int(ctypes.windll.user32.GetForegroundWindow()) or None
+        user32 = _user32()
+        if user32 is None:
+            return None
+        return int(user32.GetForegroundWindow() or 0) or None
     except Exception:
         return None
 
 
 def window_is_alive(handle: int) -> bool:
     try:
-        return bool(ctypes.windll.user32.IsWindow(ctypes.c_void_p(handle)))
+        user32 = _user32()
+        if user32 is None:
+            return False
+        return bool(user32.IsWindow(handle))
     except Exception:
         return False
 
@@ -120,7 +197,8 @@ def undo_in(handle: int) -> bool:
     if not window_is_alive(handle):
         return False
     try:
-        if not ctypes.windll.user32.SetForegroundWindow(ctypes.c_void_p(handle)):
+        user32 = _user32()
+        if user32 is None or not user32.SetForegroundWindow(handle):
             return False
     except Exception:
         return False
@@ -135,6 +213,15 @@ def undo_in(handle: int) -> bool:
     return True
 
 
+class ClipboardUnavailable(RuntimeError):
+    """Raised when pasting would destroy clipboard content Dictate can't restore.
+
+    Distinct from a generic failure so the caller can respond by typing the
+    text instead, which touches no clipboard at all. Losing a dictation is a
+    worse outcome than a slower insertion.
+    """
+
+
 def send(text: str, mode: str = "paste") -> None:
     if not text:
         return
@@ -142,7 +229,15 @@ def send(text: str, mode: str = "paste") -> None:
         _controller.type(text)
         return
 
+    # Checked before reading, because reading cannot distinguish an empty
+    # clipboard from one holding an image or a file selection -- both come
+    # back as "". Copying over either of those destroys them.
+    if not clipboard_is_borrowable():
+        raise ClipboardUnavailable("Couldn't safely preserve the clipboard")
     previous_read, previous = _read_clipboard()
+    if not previous_read:
+        # Another program is holding the clipboard open right now.
+        raise ClipboardUnavailable("Couldn't safely preserve the clipboard")
     try:
         pyperclip.copy(text)
         time.sleep(CLIPBOARD_SETTLE)
@@ -151,11 +246,10 @@ def send(text: str, mode: str = "paste") -> None:
             _controller.release("v")
         time.sleep(PASTE_SETTLE)
     finally:
-        # Restore the prior text even when it was an empty string. The old
-        # truthiness check left the dictated text behind whenever the clipboard
-        # started empty.
+        # Restore the prior text even when it was an empty string. A
+        # truthiness check here would leave the dictated text on the clipboard
+        # whenever the clipboard started empty.
         try:
-            if previous_read:
-                pyperclip.copy(previous)
+            pyperclip.copy(previous)
         except Exception:
             pass

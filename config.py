@@ -127,6 +127,40 @@ def valid_combo(text: object) -> bool:
     return isinstance(text, str) and any(part.strip() for part in text.split("+"))
 
 
+def _as_float(value: object, default: float) -> float:
+    """Coerce a stored value to a float, falling back to the default.
+
+    A hand-edited settings file can hold anything at all -- a string, null, a
+    list. Whatever it is, it must clamp to something usable rather than raise:
+    load() runs before Qt exists, so an exception here means the app dies with
+    no window and no message.
+    """
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    # NaN survives min/max untouched and would poison every later comparison.
+    return default if number != number else number
+
+
+def _as_int(value: object, default: int) -> int:
+    """Coerce a stored value to an int, falling back to the default."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_choice(value: object, allowed: set[str], default: str) -> str:
+    """Pick a stored value only when it is one of the known options.
+
+    The isinstance check matters as much as the membership test: an unhashable
+    value (a list, say) raises TypeError from ``in`` rather than simply
+    failing it.
+    """
+    return value if isinstance(value, str) and value in allowed else default
+
+
 @dataclass
 class Settings:
     # --- model ---
@@ -175,12 +209,20 @@ class Settings:
         Guards against a hand-edited settings file putting the app into a state
         the UI can't represent (a 0-minute sleep timer would unload the model
         between every single utterance).
+
+        Every field is coerced, not just range-checked. A settings file holding
+        the wrong *type* -- ``"bar_width": "wide"``, a null sleep timer, a list
+        where a name belongs -- has to end up at its default rather than raise.
+        load() runs as the very first statement of App.__init__, before there is
+        a QApplication to show anything, so an exception raised here is an app
+        that silently never appears.
         """
         out = Settings(**asdict(self))
-        if out.device not in {d[0] for d in DEVICES}:
-            out.device = "cpu"
-        if out.model_size not in {m[0] for m in MODELS}:
-            out.model_size = "small.en"
+        fallback = Settings()
+        out.device = _as_choice(out.device, {d[0] for d in DEVICES}, fallback.device)
+        out.model_size = _as_choice(
+            out.model_size, {m[0] for m in MODELS}, fallback.model_size
+        )
         if not isinstance(out.input_device, str):
             out.input_device = ""
         if not valid_combo(out.ptt_key):
@@ -193,13 +235,19 @@ class Settings:
         out.sound_cues = bool(out.sound_cues)
         out.auto_update_enabled = bool(out.auto_update_enabled)
         out.system_notifications_enabled = bool(out.system_notifications_enabled)
-        if out.theme_mode not in {"system", "light", "dark"}:
-            out.theme_mode = "system"
+        out.theme_mode = _as_choice(
+            out.theme_mode, {"system", "light", "dark"}, fallback.theme_mode
+        )
         out.onboarding_complete = bool(out.onboarding_complete)
-        out.sleep_after_minutes = min(max(float(out.sleep_after_minutes), 0.5), 240.0)
-        out.bar_width = min(max(int(out.bar_width), 180), 280)
-        out.bar_margin = min(max(int(out.bar_margin), 0), 400)
-        out.bar_linger_ms = min(max(int(out.bar_linger_ms), 400), 4000)
+        out.sleep_after_minutes = min(
+            max(_as_float(out.sleep_after_minutes, fallback.sleep_after_minutes), 0.5),
+            240.0,
+        )
+        out.bar_width = min(max(_as_int(out.bar_width, fallback.bar_width), 180), 280)
+        out.bar_margin = min(max(_as_int(out.bar_margin, fallback.bar_margin), 0), 400)
+        out.bar_linger_ms = min(
+            max(_as_int(out.bar_linger_ms, fallback.bar_linger_ms), 400), 4000
+        )
         return out
 
 

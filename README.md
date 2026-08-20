@@ -68,7 +68,7 @@ Read the full [privacy statement](PRIVACY.md).
 
 Dictate can check GitHub for updates at launch and periodically in the background. It never installs or restarts without your action: when an update is available, choose it from the activity bar or Settings; after the installer is downloaded and verified, choose **Restart to finish**.
 
-Every release has notes in [CHANGELOG.md](CHANGELOG.md). The current beta, **v1.2.1-beta.1**, improves update discovery and makes update availability clearer in Settings.
+Every release has notes in [CHANGELOG.md](CHANGELOG.md). The current beta, **v1.2.2-beta.1**, is a stability and reliability pass: a corrupt settings file can no longer prevent launch, dictations are no longer discarded when the clipboard is unavailable, and the appearance and update controls in Settings behave correctly.
 
 ## Run from source
 

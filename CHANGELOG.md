@@ -7,6 +7,29 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.2-beta.1] - 2026-08-20
+
+### Fixed
+
+- Dictate no longer fails to launch, with no window and no error, when the
+  settings file holds an invalid value — every setting now falls back to its
+  default instead.
+- Saving a setting while in Light mode no longer briefly repaints the
+  activity bar with the Dark accent color.
+- Settings' toggle switches now follow the selected Light/Dark/System color
+  mode instead of always following the raw Windows theme, so they no longer
+  mismatch the rest of the page under a Light or Dark override.
+- A dictation that cannot use the clipboard for paste is now typed instead of
+  silently discarded.
+- "Check for updates" now always confirms the result, including when an
+  update was already found or already staged.
+- Settings' Update and GPU-download buttons no longer get stuck on
+  "Checking…" or "Downloading…" indefinitely.
+- Undo no longer blocks the interface while it settles focus on the
+  previous app.
+- Dictate now starts correctly for a second signed-in Windows user on the
+  same PC.
+
 ## [1.2.1-beta.1] - 2026-08-19
 
 ### Changed

@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from ctypes import wintypes
 from dataclasses import replace
 from pathlib import Path
 
@@ -47,15 +48,22 @@ from settings_window import FirstRunDialog, SettingsWindow, UpdateCompleteDialog
 from version import VERSION
 
 APP_NAME = "Dictate"
-MUTEX_NAME = "Global\\DictateSingleInstance"
+# All three named objects live in the per-session "Local\\" namespace, not
+# "Global\\". Dictate installs per user, keeps its settings in %APPDATA%, and
+# every process that needs to find these is in the same signed-in session. A
+# Global name is shared across every session on the machine, so a second
+# signed-in Windows user could not start Dictate at all while the first had it
+# open -- the single-instance mutex would already be held by someone else's
+# session, and the running-notice event would be raised in it.
+MUTEX_NAME = "Local\\DictateSingleInstance"
 # A second launch attempt sets this; the running instance polls it rather
 # than running a message-pump listener for a second, unrelated purpose.
-RUNNING_NOTICE_EVENT = "Global\\DictateShowRunningNotice"
+RUNNING_NOTICE_EVENT = "Local\\DictateShowRunningNotice"
 # The updater splash creates this manual-reset event before the silent
 # installer starts. The freshly updated app signals it only after its visible
 # "What's new" window has had a chance to render, which keeps the splash on
 # screen through the otherwise blank handoff between two executables.
-UPDATED_WINDOW_READY_EVENT = "Global\\DictateUpdatedWindowReady"
+UPDATED_WINDOW_READY_EVENT = "Local\\DictateUpdatedWindowReady"
 
 # Longest a locked (tap-started) recording runs before Dictate stops it and
 # transcribes what it has. A hold is bounded by the user's finger; a lock is
@@ -116,47 +124,86 @@ def current_release_notes() -> str:
         return "Dictate has the latest improvements and fixes."
 
 
+ERROR_ALREADY_EXISTS = 183
+WAIT_OBJECT_0 = 0
+
+
+def _load_kernel32():
+    """kernel32 with real signatures, or None where it cannot be loaded.
+
+    Declaring these matters: without a restype, ctypes assumes a C ``int`` and
+    truncates every returned HANDLE to 32 bits, and without argtypes it guesses
+    at what to pass one back as. ``use_last_error`` matters for the same kind
+    of reason -- it gives ctypes its own copy of the thread's error value, so
+    ``get_last_error()`` reports what CreateMutexW actually set rather than
+    whatever the next Windows call happened to leave behind.
+    """
+    try:
+        lib = ctypes.WinDLL("kernel32", use_last_error=True)
+    except (AttributeError, OSError):
+        return None
+    lib.CreateMutexW.restype = wintypes.HANDLE
+    lib.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+    lib.CreateEventW.restype = wintypes.HANDLE
+    lib.CreateEventW.argtypes = (
+        wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR,
+    )
+    lib.SetEvent.argtypes = (wintypes.HANDLE,)
+    lib.ResetEvent.argtypes = (wintypes.HANDLE,)
+    lib.CloseHandle.argtypes = (wintypes.HANDLE,)
+    lib.WaitForSingleObject.restype = wintypes.DWORD
+    lib.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    lib.SetConsoleTitleW.argtypes = (wintypes.LPCWSTR,)
+    return lib
+
+
+_kernel32 = _load_kernel32()
+
+
 def already_running() -> bool:
     """True when another copy holds the named mutex.
 
     Two instances would both grab the hotkey and both paste, so the second one
     exits rather than fighting the first.
+
+    The handle is deliberately never closed: holding it open for the life of
+    the process is what keeps the name claimed.
     """
+    if _kernel32 is None:
+        return False
     try:
-        handle = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
-        return handle != 0 and ctypes.windll.kernel32.GetLastError() == 183
+        handle = _kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        return bool(handle) and ctypes.get_last_error() == ERROR_ALREADY_EXISTS
     except Exception:
         return False
 
 
-def _signal_running_notice() -> None:
-    """Wake the already-running instance's "still open" bar notification.
+def _signal_named_event(name: str) -> None:
+    """Raise a named manual-reset event, creating it if it does not exist.
 
-    CreateEventW is idempotent -- this opens the primary instance's own
-    named event rather than needing its window handle -- so a second launch
-    attempt can raise the flag with no IPC channel of its own beyond the
-    name both processes already agree on.
+    CreateEventW is idempotent -- it opens the existing event when one is
+    already there -- so this reaches the other process with no IPC channel
+    beyond the name both sides already agree on.
     """
+    if _kernel32 is None:
+        return
     try:
-        handle = ctypes.windll.kernel32.CreateEventW(None, True, False, RUNNING_NOTICE_EVENT)
+        handle = _kernel32.CreateEventW(None, True, False, name)
         if handle:
-            ctypes.windll.kernel32.SetEvent(handle)
-            ctypes.windll.kernel32.CloseHandle(handle)
+            _kernel32.SetEvent(handle)
+            _kernel32.CloseHandle(handle)
     except Exception:
         pass
+
+
+def _signal_running_notice() -> None:
+    """Wake the already-running instance's "still open" bar notification."""
+    _signal_named_event(RUNNING_NOTICE_EVENT)
 
 
 def _signal_updated_window_ready() -> None:
     """Tell a running update splash that the new Dictate window is visible."""
-    try:
-        handle = ctypes.windll.kernel32.CreateEventW(
-            None, True, False, UPDATED_WINDOW_READY_EVENT
-        )
-        if handle:
-            ctypes.windll.kernel32.SetEvent(handle)
-            ctypes.windll.kernel32.CloseHandle(handle)
-    except Exception:
-        pass
+    _signal_named_event(UPDATED_WINDOW_READY_EVENT)
 
 
 def load_icon() -> QIcon:
@@ -219,6 +266,7 @@ class Bridge(QObject):
     update_status_changed = Signal()  # live status/progress text changed
     dictated = Signal(str)  # successfully inserted text, kept only in memory
     pasted_into = Signal(int)  # window handle the text landed in, for undo
+    undo_finished = Signal(bool)  # an undo attempt finished; True when it landed
 
 
 class App:
@@ -313,8 +361,10 @@ class App:
         # the only thing this app ever needs to hear from a second launch
         # attempt -- see _signal_running_notice() and already_running().
         try:
-            self._running_notice_handle = ctypes.windll.kernel32.CreateEventW(
-                None, True, False, RUNNING_NOTICE_EVENT
+            self._running_notice_handle = (
+                _kernel32.CreateEventW(None, True, False, RUNNING_NOTICE_EVENT)
+                if _kernel32 is not None
+                else None
             )
         except Exception:
             self._running_notice_handle = None
@@ -340,6 +390,7 @@ class App:
         self.bridge.update_status_changed.connect(self._on_update_status_changed)
         self.bridge.dictated.connect(self._remember_last_dictation)
         self.bridge.pasted_into.connect(self._offer_undo)
+        self.bridge.undo_finished.connect(self._on_undo_finished)
         self.bar.clicked.connect(self._on_bar_clicked)
 
         # Drives the waveform. Only runs while the mic is open.
@@ -397,9 +448,14 @@ class App:
         self.tray.setToolTip(_tray_tip(self.settings))
 
         menu = QMenu()
-        act_settings = QAction(f"Settings\t{self.settings.settings_hotkey}", menu)
-        act_settings.triggered.connect(self._show_settings)
-        menu.addAction(act_settings)
+        # format_combo, like every other person-facing surface: the raw stored
+        # binding is "ctrl+alt+d", which is a storage format, not a label.
+        # Kept live in _apply_settings so rebinding updates this menu too.
+        self.act_settings = QAction(
+            f"Settings\t{hotkeys_mod.format_combo(self.settings.settings_hotkey)}", menu
+        )
+        self.act_settings.triggered.connect(self._show_settings)
+        menu.addAction(self.act_settings)
         menu.addSeparator()
 
         act_load = QAction("Load model now", menu)
@@ -431,7 +487,7 @@ class App:
         # is.
         self.act_check_update = QAction("Check for updates", menu)
         self.act_check_update.setEnabled(self.settings.auto_update_enabled)
-        self.act_check_update.triggered.connect(lambda: self.updater.check_now(silent=False))
+        self.act_check_update.triggered.connect(self._check_for_updates)
         menu.addAction(self.act_check_update)
         menu.addSeparator()
 
@@ -463,7 +519,8 @@ class App:
         except Exception:
             return
         try:
-            ctypes.windll.kernel32.SetConsoleTitleW(f"{APP_NAME} — debug console")
+            if _kernel32 is not None:
+                _kernel32.SetConsoleTitleW(f"{APP_NAME} — debug console")
         except Exception:
             pass
         print(f"[dictate] {APP_NAME} {VERSION} — type 'help' for commands")
@@ -530,9 +587,13 @@ class App:
                     "[dictate] update checks are turned off "
                     "(Settings > Check for updates automatically)"
                 )
-            else:
+            # Printing "checking…" unconditionally was a lie whenever
+            # check_now declined -- report what actually happened instead.
+            elif self.updater.check_now(silent=False):
                 print("[dictate] checking GitHub for a new release…")
-                self.updater.check_now(silent=False)
+            else:
+                state, detail, _progress = self.updater.last_status
+                print(f"[dictate] {detail or 'no check started'} ({state})")
         elif text in ("open data", "open settings folder", "open folder"):
             try:
                 os.startfile(config.CONFIG_DIR)
@@ -623,6 +684,13 @@ class App:
         print("[dictate] recording cancelled")
 
     def _stop_listening(self, duration: float) -> None:
+        if self._busy:
+            # _start_listening declined this press because the previous
+            # dictation is still being transcribed and pasted, so there is no
+            # capture to end here. Returning early leaves that work's own
+            # "transcribing" bar state alone -- falling through reset the bar
+            # to idle underneath a dictation that was still running.
+            return
         self.lock_limit_timer.stop()
         self.meter_timer.stop()
         self.bar.set_clickable(False)
@@ -665,11 +733,23 @@ class App:
         # cannot move focus, but anything the user does next can, and this is
         # the identity the undo offer is anchored to.
         target = inject.foreground_window()
+        # Kept for the tray's "Copy last dictation" before any insertion is
+        # attempted. Whatever happens to the paste, the words the user just
+        # spoke must not be the thing that gets lost.
+        self.bridge.dictated.emit(text)
         try:
             # Stop our own listener from seeing the synthetic Ctrl+V, which
             # would otherwise leave 'ctrl' stuck in the pressed-key set.
             self.hotkeys.suppress(True)
-            inject.send(payload, "paste")
+            try:
+                inject.send(payload, "paste")
+            except inject.ClipboardUnavailable as exc:
+                # The clipboard holds something Dictate cannot put back, or
+                # another program is holding it open. Typing touches no
+                # clipboard at all, so it always works here -- slower, but the
+                # dictation still lands where the user was working.
+                print(f"[dictate] pasting unavailable ({exc}); typing instead")
+                inject.send(payload, "type")
         except Exception as exc:
             print(f"[dictate] inject error: {exc}")
             self.bridge.finished.emit("error", str(exc)[:40])
@@ -678,7 +758,6 @@ class App:
             self.hotkeys.suppress(False)
 
         preview = text if len(text) <= 18 else text[:17] + "…"
-        self.bridge.dictated.emit(text)
         if target is not None:
             self.bridge.pasted_into.emit(target)
         self.bridge.finished.emit("done", preview)
@@ -843,11 +922,11 @@ class App:
         late.
         """
         handle = getattr(self, "_running_notice_handle", None)
-        if handle is None:
+        if handle is None or _kernel32 is None:
             return
-        if ctypes.windll.kernel32.WaitForSingleObject(handle, 0) != 0:
+        if _kernel32.WaitForSingleObject(handle, 0) != WAIT_OBJECT_0:
             return
-        ctypes.windll.kernel32.ResetEvent(handle)
+        _kernel32.ResetEvent(handle)
         self._notify("Dictate is already open.", tone="info")
 
     def _apply_settings(self, settings: config.Settings) -> None:
@@ -859,6 +938,10 @@ class App:
         if settings.auto_update_enabled != old.auto_update_enabled:
             self.updater.set_enabled(settings.auto_update_enabled)
             self.act_check_update.setEnabled(settings.auto_update_enabled)
+        if settings.settings_hotkey != old.settings_hotkey:
+            self.act_settings.setText(
+                f"Settings\t{hotkeys_mod.format_combo(settings.settings_hotkey)}"
+            )
         self.mic.set_device(settings.input_device)
         self.engine.update_settings(settings)
         self.hotkeys.update_settings(settings)
@@ -917,6 +1000,15 @@ class App:
         # One use only. Withdrawing first means a failure part-way through
         # cannot leave a stale offer pointing at a window that has moved on.
         self._withdraw_undo()
+        # Off the UI thread: undo_in() refocuses the target window and then
+        # sleeps out Windows' asynchronous focus handover, which is exactly
+        # the blocking inject.py's module docstring says must never happen on
+        # this thread. Done here it froze the bar mid-animation for the whole
+        # settle, on the one action whose feedback is a bar notification.
+        threading.Thread(target=self._run_undo, args=(target,), daemon=True).start()
+
+    def _run_undo(self, target: int) -> None:
+        """Refocus the target window and send its undo. Worker thread only."""
         self.hotkeys.suppress(True)
         try:
             sent = inject.undo_in(target)
@@ -930,6 +1022,10 @@ class App:
             print("[dictate] undid the last dictation")
         else:
             print("[dictate] not undoing — could not focus that window again")
+        self.bridge.undo_finished.emit(sent)
+
+    def _on_undo_finished(self, sent: bool) -> None:
+        if not sent:
             self._notify("Can't undo: the app didn't respond.")
 
     def _remember_last_dictation(self, text: str) -> None:
@@ -948,7 +1044,9 @@ class App:
             self._restore_recovery_clipboard()
         restore = inject.copy_temporarily(self._last_dictation)
         if restore is None:
-            self.bar.set_state("error", "Couldn't safely protect your clipboard")
+            # _notify, like every other outcome this menu can produce -- a raw
+            # bar state skips the toast that actually carries the message.
+            self._notify("Couldn't safely protect your clipboard.", tone="error")
             return
         self._clipboard_restore = restore
         self._clipboard_restore_timer.start(inject.TEMPORARY_COPY_SECONDS * 1000)
@@ -975,6 +1073,29 @@ class App:
             tone="info",
             on_click=self._start_update,
         )
+
+    def _check_for_updates(self) -> None:
+        """Tray and console entry point for a manual check.
+
+        Always answers. ``check_now`` legitimately declines when an update is
+        already found or already downloaded -- but a menu item that does
+        nothing at all reads as broken, so the state that made it decline is
+        what gets shown instead.
+        """
+        if not self.settings.auto_update_enabled:
+            self._notify("Update checks are turned off in Settings.", tone="info")
+            return
+        state, _detail, _progress = self.updater.last_status
+        if state == updater_mod.READY_TO_RESTART:
+            self._notify(
+                "Update verified. Click to restart and finish.",
+                tone="success",
+                on_click=self._restart_update,
+                duration_ms=8000,
+            )
+            return
+        if self.updater.check_now(silent=False):
+            self._notify("Checking for updates…", tone="info")
 
     def _start_update(self) -> None:
         if self.updater.start_update():
@@ -1079,8 +1200,8 @@ class App:
         self.engine.shutdown()
         self.updater.shutdown()
         running_notice_handle = getattr(self, "_running_notice_handle", None)
-        if running_notice_handle:
-            ctypes.windll.kernel32.CloseHandle(running_notice_handle)
+        if running_notice_handle and _kernel32 is not None:
+            _kernel32.CloseHandle(running_notice_handle)
             self._running_notice_handle = None
         self.tray.hide()
         self.qt.quit()

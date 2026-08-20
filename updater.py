@@ -141,28 +141,6 @@ def _asset_sha256(asset: object) -> Optional[str]:
     return m.group(1).casefold()
 
 
-def _pick_latest(releases: object) -> Optional[dict]:
-    """Highest-parsed-version, non-draft entry in a /releases list response.
-
-    Picked by version rather than by list position or ``created_at`` so a
-    release published out of order (a hotfix, a re-run) can never be
-    shadowed by something merely newer on the clock.
-    """
-    if not isinstance(releases, list):
-        return None
-    best: Optional[dict] = None
-    best_key = (0, 0, 0, 0, 0)
-    for entry in releases:
-        if not isinstance(entry, dict) or entry.get("draft"):
-            continue
-        candidate = str(entry.get("tag_name", "")).strip().lstrip("vV")
-        key = parse_version(candidate)
-        if key > best_key:
-            best_key = key
-            best = entry
-    return best
-
-
 def _fetch_latest_release() -> Optional[dict]:
     """The latest GitHub release, or None on any failure -- offline, rate
     limited, malformed response, whatever. An update check must never be
@@ -178,34 +156,52 @@ def _fetch_latest_release() -> Optional[dict]:
     except Exception:
         return None
 
-    data = _pick_latest(releases)
-    if data is None:
+    if not isinstance(releases, list):
         return None
 
-    version = str(data.get("tag_name", "")).strip().lstrip("vV")
-    if not _VERSION_RE.fullmatch(version):
-        return None
-    installer_name = f"Dictate-Setup-{version}.exe"
-    assets = data.get("assets") or []
-    by_name = {
-        str(asset.get("name", "")): asset for asset in assets if isinstance(asset, dict)
-    }
-    installer = by_name.get(installer_name)
-    installer_url = _release_asset_url(installer)
-    installer_sha256 = _asset_sha256(installer)
-    if installer_url is None or installer_sha256 is None:
-        return None
-    size = installer.get("size") if isinstance(installer, dict) else None
-    if not isinstance(size, int) or size <= 0:
-        return None
-    return {
-        "version": version,
-        "installer_url": installer_url,
-        "installer_name": installer_name,
-        "installer_size": size,
-        "installer_sha256": installer_sha256,
-        "release_notes": str(data.get("body") or "").strip()[:_MAX_RELEASE_NOTES_CHARS],
-    }
+    # A release can be published before its installer asset finishes
+    # uploading.  Do not let that incomplete newest release hide the latest
+    # release that is already valid and safe to install.
+    candidates = sorted(
+        (
+            entry
+            for entry in releases
+            if isinstance(entry, dict) and not entry.get("draft")
+        ),
+        key=lambda entry: parse_version(str(entry.get("tag_name", ""))),
+        reverse=True,
+    )
+    for data in candidates:
+        version = str(data.get("tag_name", "")).strip().lstrip("vV")
+        if not _VERSION_RE.fullmatch(version):
+            continue
+        installer_name = f"Dictate-Setup-{version}.exe"
+        assets = data.get("assets") or []
+        by_name = {
+            str(asset.get("name", "")): asset
+            for asset in assets
+            if isinstance(asset, dict)
+        }
+        installer = by_name.get(installer_name)
+        installer_url = _release_asset_url(installer)
+        installer_sha256 = _asset_sha256(installer)
+        size = installer.get("size") if isinstance(installer, dict) else None
+        if (
+            installer_url is None
+            or installer_sha256 is None
+            or not isinstance(size, int)
+            or size <= 0
+        ):
+            continue
+        return {
+            "version": version,
+            "installer_url": installer_url,
+            "installer_name": installer_name,
+            "installer_size": size,
+            "installer_sha256": installer_sha256,
+            "release_notes": str(data.get("body") or "").strip()[:_MAX_RELEASE_NOTES_CHARS],
+        }
+    return None
 
 
 def _download(
@@ -601,7 +597,7 @@ class Updater:
         if enabled and not was_enabled:
             self.check_now()
 
-    def check_now(self, *, silent: bool = True) -> None:
+    def check_now(self, *, silent: bool = True) -> bool:
         """Kick off a check in the background. Never downloads anything.
 
         A no-op while checks are turned off in Settings, while a check is
@@ -612,16 +608,46 @@ class Updater:
         state. ``silent`` suppresses the "you're already up to date"
         notification for the automatic background cadence -- only a
         manually triggered check should ever say that out loud.
+
+        Returns whether a check actually started. A caller that offered the
+        person a button needs to know, because every no-op above is a click
+        that produced no visible response at all otherwise. A *non-silent*
+        no-op also re-announces the state that made it a no-op, so the answer
+        the person already has is put back in front of them rather than the
+        click appearing to do nothing.
         """
         if not self._enabled:
-            return
-        if (
-            self._available is not None
-            or self._pending is not None
-            or not self._busy.acquire(blocking=False)
-        ):
-            return
-        threading.Thread(target=self._check, args=(silent,), daemon=True).start()
+            return False
+        if self._available is not None:
+            if not silent:
+                self._set_status(
+                    AVAILABLE, f"Update {self._available['version']} is available"
+                )
+                self._on_available(
+                    self._available["version"], self._available["release_notes"]
+                )
+            return False
+        if self._pending is not None:
+            if not silent:
+                self._set_status(
+                    READY_TO_RESTART,
+                    f"Update {self._pending['version']} is verified and ready to restart",
+                )
+            return False
+        if not self._busy.acquire(blocking=False):
+            return False
+        try:
+            threading.Thread(target=self._check, args=(silent,), daemon=True).start()
+        except Exception as exc:
+            # Releasing here matters: _check owns the release once it runs, so
+            # a thread that never starts would strand the lock and quietly
+            # disable every future check and download for this session.
+            # Swallowed rather than raised because _loop() calls this too, and
+            # an exception there would end the background cadence for good.
+            self._busy.release()
+            print(f"[dictate] could not start update check: {exc}")
+            return False
+        return True
 
     def _check(self, silent: bool) -> None:
         # CHECKING/UP_TO_DATE stay behind `not silent` -- the automatic 24h
@@ -646,6 +672,11 @@ class Updater:
             self._on_available(info["version"], info["release_notes"])
         finally:
             self._busy.release()
+            # Fires even for a silent check that changed no status. A UI that
+            # disabled its own button on click needs one signal to re-enable
+            # it; without this, a click landing while the background cadence
+            # held the lock left the button reading "Checking…" forever.
+            self._on_status_change()
 
     def start_update(self) -> bool:
         """Download, verify, and stage the currently available release.
@@ -662,7 +693,9 @@ class Updater:
         if info is None or not self._busy.acquire(blocking=False):
             return False
         self._available = None
-        threading.Thread(target=self._download_and_prepare, args=(info,), daemon=True).start()
+        if not self._start_worker(self._download_and_prepare, info):
+            self._available = info
+            return False
         return True
 
     def restart_to_install(self) -> bool:
@@ -671,7 +704,22 @@ class Updater:
         if info is None or not self._busy.acquire(blocking=False):
             return False
         self._set_status(VERIFYING, "Verifying the downloaded update…")
-        threading.Thread(target=self._verify_and_install, args=(info,), daemon=True).start()
+        return self._start_worker(self._verify_and_install, info)
+
+    def _start_worker(self, target: Callable[[dict], None], info: dict) -> bool:
+        """Run one pipeline step on its own thread, owning the _busy handoff.
+
+        Each worker releases ``_busy`` in its own ``finally``, so a thread that
+        never starts would strand the lock and silently kill every future
+        check, download, and restart for the life of the process.
+        """
+        try:
+            threading.Thread(target=target, args=(info,), daemon=True).start()
+        except Exception as exc:
+            self._busy.release()
+            self._fail("The update could not be started")
+            print(f"[dictate] could not start update worker: {exc}")
+            return False
         return True
 
     def _fail(self, message: str) -> None:

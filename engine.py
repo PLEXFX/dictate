@@ -143,15 +143,38 @@ def _register_cuda_dlls() -> None:
                     pass
 
 
-def cuda_available() -> bool:
-    """True when CTranslate2 can actually see a usable CUDA device."""
-    try:
-        _register_cuda_dlls()
-        import ctranslate2
+_cuda_available: bool | None = None
+_cuda_probe_lock = threading.Lock()
 
-        return ctranslate2.get_cuda_device_count() > 0
-    except Exception:
-        return False
+
+def cuda_available() -> bool:
+    """True when CTranslate2 can actually see a usable CUDA device.
+
+    Cached after the first probe. The first call is genuinely expensive --
+    _register_cuda_dlls() loads cuBLAS and cuDNN, then CTranslate2 initialises
+    the CUDA driver -- and this runs on the Qt UI thread from both
+    update_settings() and SettingsWindow's constructor. Probing once keeps the
+    cost to the first Settings open rather than paying it again on every
+    settings change, and the lock stops two threads probing at once.
+
+    Whether a GPU exists does not change while the app runs; whether Dictate's
+    optional CUDA *runtime* is on disk does, and gpu_runtime.ready_for_cuda()
+    answers that separately with a cheap filesystem check.
+    """
+    global _cuda_available
+    if _cuda_available is not None:
+        return _cuda_available
+    with _cuda_probe_lock:
+        if _cuda_available is not None:
+            return _cuda_available
+        try:
+            _register_cuda_dlls()
+            import ctranslate2
+
+            _cuda_available = ctranslate2.get_cuda_device_count() > 0
+        except Exception:
+            _cuda_available = False
+        return _cuda_available
 
 
 def resolve_device(preference: str) -> str:
@@ -305,10 +328,12 @@ class Engine:
         self._last_used = time.monotonic()
 
         # GPU-runtime download state, tracked independently of the model's own
-        # LOADING/READY state -- see ensure_loaded()'s cuda branch. A dictation
-        # must never wait out this download, so it runs on its own detached
+        # LOADING/READY state. Started only by start_gpu_download(), which is
+        # Settings' explicit "Download now" button -- a dictation never
+        # triggers it and never waits on it, so this runs on its own detached
         # thread and is only ever polled, never awaited.
         self._gpu_download_thread: Optional[threading.Thread] = None
+        self._gpu_download_guard = threading.Lock()
         self._gpu_downloading = False
         self._gpu_progress: Optional[float] = None
         self._state = UNLOADED
@@ -484,21 +509,29 @@ class Engine:
     def _ensure_gpu_download_started(self) -> None:
         """Kick off the CUDA compute-DLL download on its own detached thread.
 
-        Idempotent -- a second call while one is already running (from a
-        dictation's own ensure_loaded() racing the Settings button, say) just
-        returns, since gpu_runtime.download_and_install() builds the whole
-        tree in a temp dir and only swaps it in atomically at the end, so
-        there's nothing a second concurrent run would add.
+        Idempotent, and the check-and-set is done under a lock. Two callers can
+        genuinely arrive at once (the Settings button and a dictation's own
+        load path), and an unsynchronised check let both pass it: two full
+        multi-gigabyte downloads, then two runs of download_and_install()
+        racing each other's ``rmtree``/``move`` over the same target folder --
+        which is exactly the half-populated tree that its temp-dir-then-swap
+        design exists to prevent.
         """
-        if self._gpu_download_thread is not None and self._gpu_download_thread.is_alive():
-            return
-        self._gpu_downloading = True
-        self._gpu_progress = 0.0
+        with self._gpu_download_guard:
+            if (
+                self._gpu_download_thread is not None
+                and self._gpu_download_thread.is_alive()
+            ):
+                return
+            self._gpu_downloading = True
+            self._gpu_progress = 0.0
+            self._gpu_download_thread = threading.Thread(
+                target=self._run_gpu_download, daemon=True
+            )
+            self._gpu_download_thread.start()
+        # Outside the guard: this calls into the UI, and holding a lock across
+        # a callback invites a deadlock against whatever that callback touches.
         self._on_gpu_status(True, 0.0)
-        self._gpu_download_thread = threading.Thread(
-            target=self._run_gpu_download, daemon=True
-        )
-        self._gpu_download_thread.start()
 
     def _run_gpu_download(self) -> None:
         """Fetch the CUDA compute DLLs a Core-only install doesn't ship with.

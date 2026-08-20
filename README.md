@@ -58,7 +58,7 @@ Read the full [privacy statement](PRIVACY.md).
 ## Thoughtful Windows 11 details
 
 - A compact, system-accent activity bar above the taskbar—smooth feedback, no distracting main window.
-- Familiar Settings pages for Dictation, Activity bar, Appearance, Updates, and Privacy.
+- Familiar Settings pages for Dictation, Activity bar, Appearance, Updates, and Privacy, with Fluent navigation icons, responsive rows, and deeper tools that stay inside the Settings window.
 - Light/dark appearance with Windows Acrylic when transparency effects are enabled.
 - Configurable keyboard or mouse hold-to-talk shortcuts, microphone selection, sleep behavior, sounds, and startup.
 - Background update checks with a visible, user-initiated download and verified installer before restart.
@@ -66,9 +66,9 @@ Read the full [privacy statement](PRIVACY.md).
 
 ## Updates and beta releases
 
-Dictate can check GitHub for updates at launch and periodically in the background. It never installs or restarts without your action: when an update is available, choose it from the activity bar or Settings; after the installer is downloaded and verified, choose **Restart to finish**.
+Dictate checks GitHub for updates at launch and every 24 hours while it is running. It never installs or restarts without your action: when an update is available, choose it from the activity bar or Settings; after the installer is downloaded and verified, choose the orange **Restart Dictate** action.
 
-Every release has notes in [CHANGELOG.md](CHANGELOG.md). The current beta, **v1.2.3-beta.1**, fixes the update progress window lingering after an update finishes and makes the activity bar respond instantly to the talk key, even on the very first press after launch.
+Every release has notes in [CHANGELOG.md](CHANGELOG.md). The current beta, **v1.3.0-beta.1**, refreshes Settings with responsive rows, Fluent navigation icons, clearer update controls, and a stable footer that no longer shifts when status text changes.
 
 ## Run from source
 

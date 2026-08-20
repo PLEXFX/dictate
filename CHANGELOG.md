@@ -7,6 +7,35 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0-beta.1] - 2026-08-20
+
+### Changed
+
+- Settings now opens with compact page headers instead of a repeated Dictate
+  banner, uses one responsive grouped-row layout throughout, and adds bundled
+  Microsoft Fluent icons to the navigation rail.
+- **Words I use** now opens as an in-place Settings page and saves changes
+  automatically. The Updates page now leads with one status message, version
+  and last-check information, and one primary update action, with release notes
+  and automatic-check details kept below it.
+- The Settings rail now hides its passive **Up to date** row and keeps only the
+  app version in the footer. The rail status returns when a download, update,
+  setup action, error, or restart needs attention.
+- Removed the separate transient message beneath the version, so saving,
+  model, and settings messages can no longer resize the rail footer. Relevant
+  progress and errors now stay beside the control they belong to.
+- Settings now states the 24-hour background update cadence directly, shows
+  every updater state in both the rail and Updates page, and turns the verified
+  **Restart Dictate** actions orange.
+
+### Fixed
+
+- The rail's update text now stays attached to its button while the Settings
+  window is moved or resized. Its nested opacity layers were removed so Qt no
+  longer leaves cached text behind while the rail control changes position.
+- An update that was already found remains downloadable from Settings after
+  automatic future checks are turned off.
+
 ## [1.2.3-beta.1] - 2026-08-20
 
 ### Fixed

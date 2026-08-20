@@ -44,6 +44,7 @@ datas += ctranslate2_datas
 datas += collect_data_files("faster_whisper")  # the bundled Silero VAD model
 datas += [("icon.ico", ".")]
 datas += [("CHANGELOG.md", ".")]
+datas += [("assets/fluent", "assets/fluent")]
 
 binaries = []
 binaries += ctranslate2_binaries

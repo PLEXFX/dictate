@@ -6,12 +6,15 @@ Dictate is a minimal Windows 11 utility. The interface should feel at home besid
 
 - Use Windows 11's visual vocabulary: Segoe UI Variable where available, system accent for primary actions, rounded 4–8 px controls, hairline separators, and restrained light/dark surfaces.
 - Organize settings by the decision a person is making. Keep a persistent left navigation rail and make Dictation, Activity bar, Appearance, Updates, and Privacy distinct content pages; place implementation detail behind one clearly named Advanced section.
-- Use grouped rows with separators for related settings. Do not turn every setting into an isolated card or add decorative dashboards, metrics, or icon grids.
+- Start each Settings destination with a compact page title and one sentence, not a second app-name hero. Use bundled Fluent icons beside the rail's text labels so recognition never depends on an icon alone.
+- Use one responsive grouped-row pattern with consistent 16 px horizontal and 12 px vertical padding. Keep controls right-aligned while space allows, then move them below the copy before text can clip. Do not turn every setting into an isolated card or add decorative dashboards, metrics, or icon grids.
+- Keep deeper tools such as Words I use inside the Settings window with a clear Back action and automatic saving. Reserve modal windows for short blocking decisions or version-specific release notes.
 - Keep copy short, concrete, and honest. Controls say what they do; descriptions explain a consequence only when one matters.
-- Changes save automatically. Always show a quiet, local confirmation rather than adding an Apply workflow.
+- Changes save automatically without adding an Apply workflow or a transient message beneath the version. Keep progress and recoverable errors beside the control that owns them so the rail footer never changes height for incidental text.
 - The activity bar is waveform-first feedback. Do not show partial transcript text until a future version can make it reliable, smooth, and representative of what is actually being said.
 - Keep activity-bar geometry adjustable without changing its visual language. Width changes preserve the waveform, tighten spacing instead of cropping bars, and animate from the current size rather than snapping.
-- Keep download and update state in one adaptive control at the bottom of the Settings rail, directly above GitHub. Its quiet state is one compact line; active work may expand to two lines and one thin progress rail. The control changes its action with the real state: open details, start a download, or restart to finish a verified update.
+- Keep download and update state in one adaptive control at the bottom of the Settings rail, directly above GitHub. Hide it when there is nothing to act on; the version footer already covers passive status. Show it for active work, available setup, errors, downloads, or restart, with a thin progress rail only while work is moving. A verified restart action turns orange in both the rail and Updates page so it cannot be mistaken for another passive status.
+- Lead the Updates page with one status symbol, one message, version and last-check information, and one primary action. Show progress only while work is active; keep release notes, cadence, and technical details in a quieter group below.
 - Never imply an update is ready to restart until its installer has been downloaded, checksum-verified, and persisted. A restart action must revalidate that staged file before launching it.
 
 ## Motion

@@ -2047,20 +2047,40 @@ class UiTests(unittest.TestCase):
         self.assertIn("Your voice stays on this PC", privacy_text)
         self.assertIn("Hugging Face", privacy_text)
         self.assertIn("does not print", privacy_text)
-        self.assertNotIn(str(config.CONFIG_PATH), window.save_status.text())
+        self.assertFalse(hasattr(window, "save_status"))
 
         privacy.close()
         first_run.close()
         window.close()
 
 
-    def test_words_i_use_dialog_keeps_one_clean_phrase_per_line(self):
+    def test_words_i_use_page_keeps_one_clean_phrase_per_line(self):
         import settings_window
 
-        dialog = settings_window.VocabularyDialog(["Northwind Studio", "CTranslate2"])
-        dialog.editor.setPlainText("Northwind   Studio\nnorthwind studio\nSpringfield")
-        self.assertEqual(dialog.vocabulary, ["Northwind Studio", "Springfield"])
-        dialog.close()
+        page = settings_window.VocabularyPage()
+        page.set_vocabulary(["Northwind Studio", "CTranslate2"])
+        page.editor.setPlainText("Northwind   Studio\nnorthwind studio\nSpringfield")
+        self.assertEqual(page.vocabulary, ["Northwind Studio", "Springfield"])
+        self.assertIn("2 entries", page.note.text())
+        page.close()
+
+    def test_settings_rows_stack_controls_only_when_space_is_tight(self):
+        import settings_window
+
+        control = settings_window.QPushButton("Choose")
+        row = settings_window.SettingsRow(
+            "A longer setting",
+            "Enough explanatory copy to exercise the responsive row layout.",
+            control,
+        )
+        row.resize(620, 80)
+        row.show()
+        self.app.processEvents()
+        self.assertFalse(row.is_stacked)
+        row.resize(420, 120)
+        self.app.processEvents()
+        self.assertTrue(row.is_stacked)
+        row.close()
 
     def test_keybind_controls_record_mouse_and_keyboard_combinations(self):
         from PySide6.QtCore import QEvent, Qt
@@ -2224,8 +2244,8 @@ class UiTests(unittest.TestCase):
         self.assertEqual(window.reload_progress.value(), 42)
         self.assertFalse(window.model_download_row.isHidden())
         self.assertEqual(window.model_download_progress.value(), 42)
-        self.assertIn("Small English", window.save_status.text())
-        self.assertNotIn("small.en", window.save_status.text())
+        self.assertIn("Small English", window.model_download_desc_label.text())
+        self.assertNotIn("small.en", window.model_download_desc_label.text())
         self.assertEqual(window._download_overview_mode, "active")
         self.assertEqual(window.download_overview_detail.text(), "Small English · 42%")
         self.assertTrue(window.download_overview_status.property("active"))
@@ -2570,7 +2590,7 @@ class UiTests(unittest.TestCase):
             window._pending_reload = True
 
             window.refresh_status()
-            self.assertIn("42%", window.save_status.text())
+            self.assertIn("42%", window.model_download_desc_label.text())
             self.assertFalse(window.reload_progress.isHidden())
             self.assertEqual(window.reload_progress.value(), 42)
             self.assertTrue(window.update_progress.isHidden())
@@ -2583,7 +2603,7 @@ class UiTests(unittest.TestCase):
                 0.10,
             )
             window.refresh_status()
-            self.assertIn("Downloading update", window.save_status.text())
+            self.assertIn("Downloading update", window.update_desc_label.text())
             self.assertFalse(window.update_btn.isEnabled())
             self.assertFalse(window.update_progress.isHidden())
             self.assertEqual(window.update_progress.value(), 10)
@@ -2591,7 +2611,7 @@ class UiTests(unittest.TestCase):
             dummy_updater.last_status = (updater.IDLE, "", None)
             window.refresh_status()
             self.assertTrue(window.update_btn.isEnabled())
-            self.assertIn("42%", window.save_status.text())
+            self.assertIn("42%", window.model_download_desc_label.text())
             self.assertTrue(window.update_progress.isHidden())
         window.close()
 
@@ -2703,6 +2723,7 @@ class UiTests(unittest.TestCase):
         self.assertEqual(window.download_overview_title.text(), "Update available")
         self.assertEqual(window.download_overview_detail.text(), "Click to download")
         self.assertEqual(window.download_overview_status.property("tone"), "available")
+        self.assertEqual(window.update_title_label.text(), "Update available")
         window.download_overview.click()
         dummy_updater.start_update.assert_called_once_with()
 
@@ -2712,10 +2733,205 @@ class UiTests(unittest.TestCase):
             None,
         )
         window.refresh_status()
-        self.assertEqual(window.download_overview_title.text(), "Restart to finish")
-        self.assertEqual(window.update_btn.text(), "Restart now")
+        self.assertEqual(window.download_overview_title.text(), "Restart Dictate")
+        self.assertEqual(window.download_overview.property("tone"), "restart")
+        self.assertEqual(window.update_title_label.text(), "Restart to finish")
+        self.assertEqual(window.update_btn.text(), "Restart Dictate")
+        self.assertEqual(window.update_btn.property("updateState"), "restart")
         window.download_overview.click()
         dummy_updater.restart_to_install.assert_called_once_with()
+        window.close()
+
+    def test_settings_uses_compact_header_icons_and_in_place_words_page(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=False),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+            window.show()
+            self.app.processEvents()
+
+        self.assertEqual(window.findChildren(settings_window.QFrame, "hero"), [])
+        self.assertTrue(all(not button.icon().isNull() for button in window._nav_buttons.values()))
+
+        window.vocabulary_btn.click()
+        self.app.processEvents()
+        self.assertIs(window._pages.currentWidget(), window._vocabulary_page)
+        window._vocabulary_page.editor.setPlainText("Northwind Studio\nCTranslate2")
+        self.assertEqual(window._vocabulary, ["Northwind Studio", "CTranslate2"])
+        window._vocabulary_page.back.emit()
+        self.app.processEvents()
+        self.assertIs(window._pages.currentWidget(), window._settings_page)
+        window.close()
+
+    def test_rail_update_copy_stays_attached_during_window_resize(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+
+            def preload(self):
+                pass
+
+        dummy_updater = Mock(
+            last_status=(updater.AVAILABLE, "Update 9.9.9 is available", None)
+        )
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=False),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            window = settings_window.SettingsWindow(
+                config.Settings(), DummyEngine(), dummy_updater
+            )
+            window.show()
+            self.app.processEvents()
+            before_button = window.download_overview.mapTo(
+                window, window.download_overview.rect().topLeft()
+            )
+            before_title = window.download_overview_title.mapTo(
+                window, window.download_overview_title.rect().topLeft()
+            )
+
+            window.resize(window.width(), window.height() + 180)
+            self.app.processEvents()
+            after_button = window.download_overview.mapTo(
+                window, window.download_overview.rect().topLeft()
+            )
+            after_title = window.download_overview_title.mapTo(
+                window, window.download_overview_title.rect().topLeft()
+            )
+
+        self.assertIsNone(window.download_overview_copy.graphicsEffect())
+        self.assertIsNone(window.download_overview_details.graphicsEffect())
+        self.assertTrue(window.download_overview_title.isVisible())
+        self.assertGreater(after_button.y(), before_button.y())
+        self.assertEqual(
+            after_title.y() - before_title.y(), after_button.y() - before_button.y()
+        )
+        window.close()
+
+    def test_idle_update_overview_is_hidden_but_version_footer_remains(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+
+            def preload(self):
+                pass
+
+        dummy_updater = Mock(last_status=(updater.IDLE, "", None))
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=False),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            window = settings_window.SettingsWindow(
+                config.Settings(), DummyEngine(), dummy_updater
+            )
+            window.show()
+            window.refresh_status()
+            self.app.processEvents()
+
+        self.assertFalse(window.download_overview.isVisible())
+        self.assertTrue(window.version_label.isVisible())
+        self.assertEqual(window.version_label.text(), f"Version {settings_window.VERSION}")
+        window.close()
+
+    def test_transient_settings_errors_stay_inline_without_shifting_the_footer(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=False),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+            patch.object(
+                settings_window.startup_mod,
+                "set_enabled",
+                side_effect=OSError("startup unavailable"),
+            ),
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+            window.show()
+            self.app.processEvents()
+            nav = window.findChild(settings_window.QFrame, "navRail")
+            before_count = nav.layout().count()
+            before_version_y = window.version_label.mapTo(
+                window, window.version_label.rect().topLeft()
+            ).y()
+
+            window.startup_check.setChecked(True)
+            window._save_timer.stop()
+            window._save_now()
+            self.app.processEvents()
+
+        self.assertFalse(hasattr(window, "save_status"))
+        self.assertEqual(nav.layout().count(), before_count)
+        self.assertEqual(
+            window.version_label.mapTo(
+                window, window.version_label.rect().topLeft()
+            ).y(),
+            before_version_y,
+        )
+        self.assertIn("Could not change", window.startup_desc_label.text())
+        window.close()
+
+    def test_found_update_stays_actionable_when_future_checks_are_disabled(self):
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+
+            def preload(self):
+                pass
+
+        dummy_updater = Mock(
+            last_status=(updater.AVAILABLE, "Update 9.9.9 is available", None)
+        )
+        dummy_updater.start_update.return_value = True
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=False),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            window = settings_window.SettingsWindow(
+                config.Settings(auto_update_enabled=False), DummyEngine(), dummy_updater
+            )
+            window.refresh_status()
+
+        self.assertTrue(window.update_btn.isEnabled())
+        window.update_btn.click()
+        dummy_updater.start_update.assert_called_once_with()
         window.close()
 
     def test_check_for_updates_button_hidden_without_an_updater(self):
@@ -3787,6 +4003,9 @@ class UpdateCleanupTests(unittest.TestCase):
 class UpdaterFlowTests(unittest.TestCase):
     SIGNER = "A" * 40
 
+    def test_background_update_cadence_is_exactly_24_hours(self):
+        self.assertEqual(updater.CHECK_INTERVAL_SECONDS, 24 * 60 * 60)
+
     def setUp(self):
         self._pending_temp = tempfile.TemporaryDirectory()
         pending_dir = Path(self._pending_temp.name) / "pending-update"
@@ -3843,6 +4062,7 @@ class UpdaterFlowTests(unittest.TestCase):
                 time.sleep(0.2)  # give a wrongly-auto-triggered download time to start
                 self.assertFalse(downloaded.is_set())
                 self.assertEqual(u.last_status[0], updater.AVAILABLE)
+                self.assertIsNotNone(u.last_checked_at)
             finally:
                 u.shutdown()
 

@@ -1,8 +1,9 @@
 """Settings window, laid out like the Windows 11 Settings app.
 
-Each option is a rounded card row: title and one line of explanation on the
-left, the control on the right. That pattern is most of what makes a window
-read as native, more than any individual control does.
+Each option uses one responsive grouped row: title and one line of explanation
+on the left, the control on the right, then stacked below the copy when space
+gets tight. That pattern is most of what makes a window read as native, more
+than any individual control does.
 
 The stable left rail opens focused Dictation, Activity bar, Appearance,
 Updates, and Privacy pages. Implementation details remain available in a
@@ -16,9 +17,12 @@ import ctypes
 import os
 import re
 from dataclasses import asdict, replace
+from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import (
     QAbstractAnimation,
+    QByteArray,
     QPoint,
     Property,
     Qt,
@@ -30,8 +34,19 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QIcon,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QButtonGroup,
     QComboBox,
     QDialog,
@@ -45,6 +60,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -133,6 +149,8 @@ QFrame#settingsRow {
 }
 QFrame#settingsRow[nested="true"] { background: #272727; }
 QFrame#settingsRow[last="true"] { border-bottom: none; }
+QFrame#settingsGroup[updateStatus="true"] { border-color: #424242; }
+QLabel#updateMeta { color: #8F8F8F; font-size: 8pt; }
 
 QComboBox, QLineEdit, QPlainTextEdit, QPushButton#keyCapture {
     background: #333333;
@@ -171,6 +189,9 @@ QPushButton#apply {
 QPushButton#apply:hover { background: #62CBFF; }
 QPushButton#apply:pressed { background: #3DAEEA; }
 QPushButton#apply:disabled { background: #3A3A3A; color: #6D6D6D; }
+QPushButton#apply[updateState="restart"] { background: #F59E0B; color: #1A1A1A; }
+QPushButton#apply[updateState="restart"]:hover { background: #FDBA3B; }
+QPushButton#apply[updateState="restart"]:pressed { background: #D97706; }
 QPushButton#secondary {
     background: #333333;
     color: #FFFFFF;
@@ -192,6 +213,9 @@ QPushButton#downloadOverview[tone="accent"], QPushButton#downloadOverview[tone="
 }
 QPushButton#downloadOverview:hover { background: #303030; border-color: #414141; }
 QPushButton#downloadOverview:pressed { background: #252525; }
+QPushButton#downloadOverview[tone="restart"] { background: #F59E0B; border-color: #F59E0B; }
+QPushButton#downloadOverview[tone="restart"]:hover { background: #FDBA3B; border-color: #FDBA3B; }
+QPushButton#downloadOverview[tone="restart"]:pressed { background: #D97706; border-color: #D97706; }
 QFrame#downloadOverviewStatus {
     background: #777777;
     border: none;
@@ -200,10 +224,14 @@ QFrame#downloadOverviewStatus {
 QFrame#downloadOverviewStatus[tone="success"] { background: #6CCB5F; }
 QFrame#downloadOverviewStatus[tone="accent"] { background: #4CC2FF; }
 QFrame#downloadOverviewStatus[tone="available"] { background: #FFB900; }
+QFrame#downloadOverviewStatus[tone="restart"] { background: #1A1A1A; }
 QFrame#downloadOverviewStatus[tone="error"] { background: #F1707B; }
 QLabel#downloadOverviewTitle { color: #F4F4F4; font-size: 8pt; font-weight: 600; background: transparent; }
 QLabel#downloadOverviewDetail { color: #AFAFAF; font-size: 8pt; background: transparent; }
 QLabel#downloadOverviewChevron { color: #9A9A9A; font-size: 14pt; font-weight: 400; background: transparent; }
+QLabel#downloadOverviewTitle[tone="restart"],
+QLabel#downloadOverviewDetail[tone="restart"],
+QLabel#downloadOverviewChevron[tone="restart"] { color: #1A1A1A; }
 QProgressBar#downloadOverviewProgress { background: #484848; border: none; border-radius: 1px; min-height: 3px; max-height: 3px; }
 QProgressBar#downloadOverviewProgress::chunk { background: #4CC2FF; border-radius: 1px; }
 QPushButton#link {
@@ -333,6 +361,8 @@ QFrame#settingsGroup { background: #FFFFFF; border: 1px solid #E0E0E0; border-ra
 QFrame#settingsRow { background: transparent; border: none; border-bottom: 1px solid #E6E6E6; border-radius: 0px; }
 QFrame#settingsRow[nested="true"] { background: #F8F8F8; }
 QFrame#settingsRow[last="true"] { border-bottom: none; }
+QFrame#settingsGroup[updateStatus="true"] { border-color: #D2D2D2; }
+QLabel#updateMeta { color: #666666; font-size: 8pt; }
 QComboBox, QLineEdit, QPlainTextEdit, QPushButton#keyCapture { background: #FFFFFF; border: 1px solid #C9C9C9; border-bottom: 1px solid #AFAFAF; border-radius: 4px; padding: 5px 10px; color: #1A1A1A; min-height: 18px; selection-background-color: #0078D4; selection-color: #FFFFFF; }
 QComboBox:hover, QLineEdit:hover, QPlainTextEdit:hover, QPushButton#keyCapture:hover { background: #F8F8F8; }
 QComboBox:disabled, QLineEdit:disabled, QPlainTextEdit:disabled, QPushButton#keyCapture:disabled { background: #EEEEEE; color: #888888; border-color: #DDDDDD; }
@@ -341,20 +371,30 @@ QComboBox::drop-down { border: none; width: 22px; }
 QComboBox QAbstractItemView { background: #FFFFFF; border: 1px solid #C9C9C9; border-radius: 6px; color: #1A1A1A; selection-background-color: #E5F1FB; outline: none; padding: 4px; }
 QPushButton#apply { background: #0078D4; color: #FFFFFF; border: none; border-radius: 4px; padding: 6px 22px; font-weight: 600; }
 QPushButton#apply:hover { background: #006CBE; } QPushButton#apply:pressed { background: #005A9E; } QPushButton#apply:disabled { background: #DADADA; color: #888888; }
+QPushButton#apply[updateState="restart"] { background: #B54708; color: #FFFFFF; }
+QPushButton#apply[updateState="restart"]:hover { background: #963800; }
+QPushButton#apply[updateState="restart"]:pressed { background: #7A2E00; }
 QPushButton#secondary { background: #FFFFFF; color: #1A1A1A; border: 1px solid #C9C9C9; border-radius: 4px; padding: 6px 18px; }
 QPushButton#secondary:hover { background: #F3F3F3; }
 QPushButton#downloadOverview { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 0px; text-align: left; }
 QPushButton#downloadOverview[tone="accent"], QPushButton#downloadOverview[tone="available"], QPushButton#downloadOverview[tone="error"] { background: #F5F5F5; border-color: #DEDEDE; }
 QPushButton#downloadOverview:hover { background: #E5E5E5; border-color: #D2D2D2; }
 QPushButton#downloadOverview:pressed { background: #EEEEEE; }
+QPushButton#downloadOverview[tone="restart"] { background: #B54708; border-color: #B54708; }
+QPushButton#downloadOverview[tone="restart"]:hover { background: #963800; border-color: #963800; }
+QPushButton#downloadOverview[tone="restart"]:pressed { background: #7A2E00; border-color: #7A2E00; }
 QFrame#downloadOverviewStatus { background: #8A8A8A; border: none; border-radius: 4px; }
 QFrame#downloadOverviewStatus[tone="success"] { background: #0F7B0F; }
 QFrame#downloadOverviewStatus[tone="accent"] { background: #0078D4; }
 QFrame#downloadOverviewStatus[tone="available"] { background: #D97706; }
+QFrame#downloadOverviewStatus[tone="restart"] { background: #FFFFFF; }
 QFrame#downloadOverviewStatus[tone="error"] { background: #C42B1C; }
 QLabel#downloadOverviewTitle { color: #1A1A1A; font-size: 8pt; font-weight: 600; background: transparent; }
 QLabel#downloadOverviewDetail { color: #616161; font-size: 8pt; background: transparent; }
 QLabel#downloadOverviewChevron { color: #6D6D6D; font-size: 14pt; font-weight: 400; background: transparent; }
+QLabel#downloadOverviewTitle[tone="restart"],
+QLabel#downloadOverviewDetail[tone="restart"],
+QLabel#downloadOverviewChevron[tone="restart"] { color: #FFFFFF; }
 QProgressBar#downloadOverviewProgress { background: #D6D6D6; border: none; border-radius: 1px; min-height: 3px; max-height: 3px; }
 QProgressBar#downloadOverviewProgress::chunk { background: #0078D4; border-radius: 1px; }
 QPushButton#link { background: transparent; color: #0067B8; border: none; padding: 5px 2px; }
@@ -387,6 +427,26 @@ MODEL_LABELS = {
     "large-v3-turbo": "Large v3 Turbo",
 }
 
+_FLUENT_ASSET_DIR = Path(__file__).resolve().parent / "assets" / "fluent"
+
+
+def _fluent_icon(name: str, dark: bool, size: int = 20) -> QIcon:
+    """Render one bundled Microsoft Fluent SVG in the active text color."""
+    path = _FLUENT_ASSET_DIR / f"{name}.svg"
+    try:
+        svg = path.read_text(encoding="utf-8")
+    except OSError:
+        return QIcon()
+    color = "#DADADA" if dark else "#303030"
+    svg = svg.replace('fill="#212121"', f'fill="{color}"')
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
+
 
 def stylesheet(dark: bool | None = None) -> str:
     dark = system_is_dark() if dark is None else dark
@@ -413,27 +473,96 @@ def apply_native_chrome(hwnd: int, dark: bool | None = None) -> None:
         pass
 
 
-def _card(title: str, desc: str, control: QWidget) -> QFrame:
-    frame = QFrame()
-    frame.setObjectName("card")
-    row = QHBoxLayout(frame)
-    row.setContentsMargins(14, 10, 14, 10)
-    row.setSpacing(12)
+class SettingsRow(QFrame):
+    """The single row pattern used throughout Settings.
 
-    text = QVBoxLayout()
-    text.setSpacing(1)
-    label = QLabel(title)
-    label.setProperty("role", "title")
-    text.addWidget(label)
-    if desc:
-        sub = QLabel(desc)
-        sub.setObjectName("desc")  # so a row can update its own explanation
-        sub.setProperty("role", "desc")
-        sub.setWordWrap(True)
-        text.addWidget(sub)
-    row.addLayout(text, 1)
-    row.addWidget(control, 0, Qt.AlignRight | Qt.AlignVCenter)
-    return frame
+    Wide rows keep copy and control on one line. Narrow rows move the control
+    below the copy, which prevents long descriptions from being squeezed or
+    clipped when the window is resized.
+    """
+
+    STACK_BELOW_WIDTH = 500
+
+    def __init__(
+        self,
+        title: str,
+        desc: str,
+        control: QWidget | None = None,
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self.setObjectName("card")
+        self.setMinimumHeight(64)
+        self._control = control
+        self._stacked = False
+
+        self._row = QBoxLayout(QBoxLayout.LeftToRight, self)
+        self._row.setContentsMargins(16, 12, 16, 12)
+        self._row.setSpacing(16)
+
+        self._copy = QWidget()
+        self._copy.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._copy.setMinimumWidth(0)
+        self.text_layout = QVBoxLayout(self._copy)
+        self.text_layout.setContentsMargins(0, 0, 0, 0)
+        self.text_layout.setSpacing(2)
+        self.title_label = QLabel(title)
+        self.title_label.setMinimumWidth(0)
+        self.title_label.setProperty("role", "title")
+        self.title_layout = QHBoxLayout()
+        self.title_layout.setContentsMargins(0, 0, 0, 0)
+        self.title_layout.setSpacing(8)
+        self.title_layout.addWidget(self.title_label)
+        self.title_layout.addStretch(1)
+        self.text_layout.addLayout(self.title_layout)
+        self.desc_label: QLabel | None = None
+        if desc:
+            self.desc_label = QLabel(desc)
+            self.desc_label.setObjectName("desc")
+            self.desc_label.setProperty("role", "desc")
+            self.desc_label.setWordWrap(True)
+            self.desc_label.setMinimumWidth(0)
+            self.desc_label.setMaximumWidth(480)
+            self.text_layout.addWidget(self.desc_label)
+        self._row.addWidget(self._copy, 1)
+        if control is not None:
+            self._row.addWidget(control, 0, Qt.AlignRight | Qt.AlignVCenter)
+
+    def add_detail(self, widget: QWidget) -> None:
+        widget.setMinimumWidth(0)
+        self.text_layout.addWidget(widget)
+
+    def add_title_icon(self) -> QLabel:
+        icon_label = QLabel()
+        icon_label.setFixedSize(20, 20)
+        icon_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.title_layout.insertWidget(0, icon_label, 0, Qt.AlignVCenter)
+        return icon_label
+
+    @property
+    def is_stacked(self) -> bool:
+        return self._stacked
+
+    def resizeEvent(self, event) -> None:
+        stacked = event.size().width() < self.STACK_BELOW_WIDTH
+        if stacked != self._stacked:
+            self._stacked = stacked
+            self._row.setDirection(
+                QBoxLayout.TopToBottom if stacked else QBoxLayout.LeftToRight
+            )
+            self._row.setStretch(0, 0 if stacked else 1)
+            if self._control is not None:
+                alignment = (
+                    Qt.AlignLeft | Qt.AlignVCenter
+                    if stacked
+                    else Qt.AlignRight | Qt.AlignVCenter
+                )
+                self._row.setAlignment(self._control, alignment)
+        super().resizeEvent(event)
+
+
+def _card(title: str, desc: str, control: QWidget) -> SettingsRow:
+    return SettingsRow(title, desc, control)
 
 
 def _header(text: str) -> QLabel:
@@ -458,7 +587,7 @@ def _info_card(title: str, desc: str) -> QFrame:
     return frame
 
 
-def _text_row(title: str, desc: str) -> QFrame:
+def _text_row(title: str, desc: str) -> SettingsRow:
     """A read-only disclosure row -- title plus explanation, no control.
 
     Meant to sit inside _settings_group() so a set of related facts reads as
@@ -466,18 +595,7 @@ def _text_row(title: str, desc: str) -> QFrame:
     Settings app groups related items under one card instead of stacking a
     separate floating box per fact.
     """
-    frame = QFrame()
-    layout = QVBoxLayout(frame)
-    layout.setContentsMargins(14, 10, 14, 10)
-    layout.setSpacing(2)
-    heading = QLabel(title)
-    heading.setProperty("role", "title")
-    layout.addWidget(heading)
-    body = QLabel(desc)
-    body.setProperty("role", "desc")
-    body.setWordWrap(True)
-    layout.addWidget(body)
-    return frame
+    return SettingsRow(title, desc)
 
 
 def _native_progress_bar() -> QProgressBar:
@@ -501,7 +619,7 @@ def _progress_row(bar: QProgressBar) -> QFrame:
     """A slim, title-less row that just holds a full-width progress bar."""
     frame = QFrame()
     layout = QVBoxLayout(frame)
-    layout.setContentsMargins(14, 8, 14, 8)
+    layout.setContentsMargins(16, 12, 16, 12)
     layout.addWidget(bar)
     return frame
 
@@ -1226,24 +1344,31 @@ class UpdateCompleteDialog(QDialog):
         self.presented.emit()
 
 
-class VocabularyDialog(QDialog):
-    """A deliberately small editor for Whisper recognition hints."""
+class VocabularyPage(QWidget):
+    """Edit local recognition hints without opening a second window."""
 
-    def __init__(self, words: list[str], parent: QWidget | None = None):
+    back = Signal()
+    vocabularyChanged = Signal(object)
+
+    def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("root")
-        self.setWindowTitle("Words I use")
-        self.setStyleSheet(stylesheet())
-        self.setMinimumSize(500, 360)
-        self.resize(540, 390)
-        base = QFont("Segoe UI Variable Text", 9)
-        self.setFont(base if base.exactMatch() else QFont("Segoe UI", 9))
+        self._loading = False
 
         col = QVBoxLayout(self)
-        col.setContentsMargins(24, 22, 24, 22)
-        col.setSpacing(10)
+        col.setContentsMargins(26, 20, 26, 26)
+        col.setSpacing(8)
+
+        back_btn = QPushButton("Back to Dictation")
+        back_btn.setObjectName("backNav")
+        back_btn.setCursor(Qt.PointingHandCursor)
+        back_btn.setAccessibleName("Back to Dictation settings")
+        back_btn.clicked.connect(self.back.emit)
+        col.addWidget(back_btn)
+        col.addSpacing(2)
+
         title = QLabel("Words I use")
-        title.setProperty("role", "header")
+        title.setProperty("role", "appTitle")
         col.addWidget(title)
         intro = QLabel(
             "Add names, brands, places, or technical terms one per line. "
@@ -1252,36 +1377,51 @@ class VocabularyDialog(QDialog):
         intro.setProperty("role", "desc")
         intro.setWordWrap(True)
         col.addWidget(intro)
+        col.addSpacing(12)
 
         self.editor = QPlainTextEdit()
         self.editor.setPlaceholderText("Northwind Studio\nCTranslate2\nSpringfield")
-        self.editor.setPlainText("\n".join(words))
         self.editor.setMaximumBlockCount(config.MAX_VOCABULARY_WORDS)
+        self.editor.setAccessibleName("Words Dictate should recognize")
+        self.editor.textChanged.connect(self._on_text_changed)
         col.addWidget(self.editor, 1)
 
-        note = QLabel(f"Up to {config.MAX_VOCABULARY_WORDS} words or short phrases.")
-        note.setProperty("role", "status")
-        col.addWidget(note)
-
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        cancel = QPushButton("Cancel")
-        cancel.setObjectName("secondary")
-        cancel.clicked.connect(self.reject)
-        buttons.addWidget(cancel)
-        save = QPushButton("Save")
-        save.setObjectName("apply")
-        save.clicked.connect(self.accept)
-        buttons.addWidget(save)
-        col.addLayout(buttons)
+        self.note = QLabel()
+        self.note.setProperty("role", "status")
+        col.addWidget(self.note)
+        self._refresh_note()
 
     @property
     def vocabulary(self) -> list[str]:
         return config.clean_vocabulary(self.editor.toPlainText().splitlines())
 
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        apply_native_chrome(int(self.winId()))
+    def set_vocabulary(self, words: list[str]) -> None:
+        self._loading = True
+        self.editor.setPlainText("\n".join(words))
+        self._loading = False
+        self._refresh_note()
+
+    def focus_editor(self) -> None:
+        self.editor.setFocus(Qt.OtherFocusReason)
+
+    def _refresh_note(self) -> None:
+        count = len(self.vocabulary)
+        noun = "entry" if count == 1 else "entries"
+        self.note.setText(
+            f"{count} {noun} · Up to {config.MAX_VOCABULARY_WORDS} · Changes save automatically"
+        )
+
+    def _on_text_changed(self) -> None:
+        self._refresh_note()
+        if not self._loading:
+            self.vocabularyChanged.emit(self.vocabulary)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape:
+            self.back.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class FirstRunDialog(QDialog):
@@ -1421,10 +1561,17 @@ class SettingsWindow(QWidget):
         dark = self._selected_dark()
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setStyleSheet(stylesheet(dark))
+        self._apply_fluent_icons(dark)
         apply_native_chrome(int(self.winId()), dark)
         self._paint_chevron(dark)
         for toggle in self.findChildren(ToggleSwitch):
             toggle.set_dark(dark)
+
+    def _apply_fluent_icons(self, dark: bool) -> None:
+        for section, asset_name in getattr(self, "_nav_icon_names", {}).items():
+            self._nav_buttons[section].setIcon(_fluent_icon(asset_name, dark))
+        if hasattr(self, "update_status_icon"):
+            self.update_status_icon.setPixmap(_fluent_icon("updates", dark).pixmap(20, 20))
 
     def set_theme(self, system_dark: bool) -> None:
         """Apply a Windows change, respecting any local appearance override."""
@@ -1485,9 +1632,9 @@ class SettingsWindow(QWidget):
                 ready_action = (
                     "update",
                     "restart_update",
-                    "ready",
-                    "Restart to finish",
-                    "Verified and ready",
+                    "restart",
+                    "Restart Dictate",
+                    "Update verified and ready",
                 )
             elif update_state == updater_mod.AVAILABLE:
                 ready_action = (
@@ -1523,6 +1670,7 @@ class SettingsWindow(QWidget):
             tone = {
                 "available": "available",
                 "error": "error",
+                "restart": "restart",
             }.get(mode, "accent")
             self._set_download_overview_presentation(mode, title, detail, tone=tone)
             return
@@ -1560,6 +1708,16 @@ class SettingsWindow(QWidget):
             overview_style = self.download_overview.style()
             overview_style.unpolish(self.download_overview)
             overview_style.polish(self.download_overview)
+            copy_tone = "restart" if tone == "restart" else "default"
+            for copy_widget in (
+                self.download_overview_title,
+                self.download_overview_detail,
+                self.download_overview_chevron,
+            ):
+                copy_widget.setProperty("tone", copy_tone)
+                copy_style = copy_widget.style()
+                copy_style.unpolish(copy_widget)
+                copy_style.polish(copy_widget)
         if active:
             self._download_overview_status_effect.setOpacity(1.0)
             if self._download_overview_pulse.state() != QAbstractAnimation.State.Running:
@@ -1578,22 +1736,22 @@ class SettingsWindow(QWidget):
         tone: str = "muted",
     ) -> None:
         """Switch the rail control between quiet, actionable, and active states."""
-        previous_mode = self._download_overview_mode
         self._download_overview_mode = mode
+        if mode == "idle":
+            self._download_overview_size_anim.stop()
+            self._download_overview_pulse.stop()
+            self.download_overview.setVisible(False)
+            self.download_overview.setAccessibleName("")
+            self.download_overview.setToolTip("")
+            return
+
+        self.download_overview.setVisible(True)
         active = mode == "active"
         self.download_overview_title.setText(title)
         self._set_download_overview_active(active, tone)
-
-        presentation_key = (mode, title, self._download_action)
-        if presentation_key != getattr(self, "_download_overview_presentation_key", None):
-            self._download_overview_presentation_key = presentation_key
-            self._download_overview_copy_fade.stop()
-            self._download_overview_copy_effect.setOpacity(0.55)
-            self._download_overview_copy_fade.setStartValue(0.55)
-            self._download_overview_copy_fade.setEndValue(1.0)
-            self._download_overview_copy_fade.setDuration(150)
-            self._download_overview_copy_fade.setEasingCurve(FLUENT_DECELERATE)
-            self._download_overview_copy_fade.start()
+        summary = f"{title}. {detail}" if detail else title
+        self.download_overview.setAccessibleName(summary)
+        self.download_overview.setToolTip(summary)
 
         show_details = bool(detail)
         if show_details:
@@ -1605,49 +1763,22 @@ class SettingsWindow(QWidget):
                 else:
                     self.download_overview_progress.setRange(0, 100)
                     self.download_overview_progress.setValue(int(progress * 100))
-            if self.download_overview_details.isHidden():
-                self._download_overview_hide_details_after_fade = False
-                self.download_overview_details.setVisible(True)
-                self._download_overview_details_effect.setOpacity(0.0)
-                self._download_overview_details_fade.stop()
-                self._download_overview_details_fade.setStartValue(0.0)
-                self._download_overview_details_fade.setEndValue(1.0)
-                self._download_overview_details_fade.setDuration(150)
-                self._download_overview_details_fade.setEasingCurve(FLUENT_DECELERATE)
-                self._download_overview_details_fade.start()
-        elif not self.download_overview_details.isHidden():
-            # Fade the extra information away before the card contracts; that
-            # feels like a Windows status control settling, not disappearing.
-            self._download_overview_hide_details_after_fade = True
-            self._download_overview_details_fade.stop()
-            self._download_overview_details_fade.setStartValue(
-                self._download_overview_details_effect.opacity()
-            )
-            self._download_overview_details_fade.setEndValue(0.0)
-            self._download_overview_details_fade.setDuration(100)
-            self._download_overview_details_fade.setEasingCurve(FLUENT_ACCELERATE)
-            self._download_overview_details_fade.start()
+            self.download_overview_details.setVisible(True)
         else:
             self.download_overview_details.setVisible(False)
+            self.download_overview_progress.setVisible(False)
 
         sizes = {
             "idle": QSize(156, 40),
             "ready": QSize(156, 58),
             "available": QSize(156, 58),
             "error": QSize(156, 58),
+            "restart": QSize(156, 58),
             "active": QSize(156, 68),
         }
         target = sizes[mode]
         if self._download_overview_size_target != target:
-            if previous_mode == "active" and not active:
-                QTimer.singleShot(105, lambda: self._animate_download_overview_size(mode, target))
-            else:
-                self._animate_download_overview_size(mode, target)
-
-    def _finish_download_overview_details_fade(self) -> None:
-        if self._download_overview_hide_details_after_fade:
-            self.download_overview_details.setVisible(False)
-            self.download_overview_progress.setVisible(False)
+            self._animate_download_overview_size(mode, target)
 
     def _animate_download_overview_size(self, mode: str, target: QSize) -> None:
         """Animate the rail control between its idle and active footprints."""
@@ -1666,7 +1797,7 @@ class SettingsWindow(QWidget):
             animation = QPropertyAnimation(self.download_overview, property_name, self)
             animation.setStartValue(current)
             animation.setEndValue(target)
-            animation.setDuration(180)
+            animation.setDuration(200)
             animation.setEasingCurve(FLUENT_DECELERATE)
             self._download_overview_size_anim.addAnimation(animation)
         self._download_overview_size_anim.start()
@@ -1745,6 +1876,13 @@ class SettingsWindow(QWidget):
         self._nav_group = QButtonGroup(self)
         self._nav_group.setExclusive(True)
         self._nav_buttons: dict[str, QPushButton] = {}
+        self._nav_icon_names = {
+            "dictation": "dictation",
+            "activity": "activity",
+            "appearance": "appearance",
+            "updates": "updates",
+            "privacy": "privacy",
+        }
         for key, label in (
             ("dictation", "Dictation"),
             ("activity", "Activity bar"),
@@ -1755,6 +1893,7 @@ class SettingsWindow(QWidget):
             button = QPushButton(label)
             button.setObjectName("navItem")
             button.setCheckable(True)
+            button.setIconSize(QSize(20, 20))
             button.setCursor(Qt.PointingHandCursor)
             self._nav_group.addButton(button)
             self._nav_buttons[key] = button
@@ -1801,11 +1940,6 @@ class SettingsWindow(QWidget):
         # of What's new and GitHub.
         self.version_label.setContentsMargins(8, 0, 0, 0)
         nav_col.addWidget(self.version_label)
-        self.save_status = QLabel()
-        self.save_status.setProperty("role", "status")
-        self.save_status.setWordWrap(True)
-        self.save_status.setVisible(False)
-        nav_col.addWidget(self.save_status)
         outer.addWidget(nav)
 
         # Each rail destination is a real page. The rail stays still while the
@@ -1825,28 +1959,22 @@ class SettingsWindow(QWidget):
         self._settings_page = scroll
         self._privacy_page = PrivacyPage()
         self._privacy_page.back.connect(self._hide_privacy)
+        self._vocabulary_page = VocabularyPage()
+        self._vocabulary_page.back.connect(self._hide_vocabulary)
+        self._vocabulary_page.vocabularyChanged.connect(self._set_vocabulary)
 
         page = QWidget()
         page.setObjectName("root")
         col = QVBoxLayout(page)
-        col.setContentsMargins(22, 20, 22, 22)
+        col.setContentsMargins(26, 24, 26, 26)
         col.setSpacing(8)
         scroll.setWidget(page)
 
-        hero = QFrame()
-        hero.setObjectName("hero")
-        hero_row = QHBoxLayout(hero)
-        hero_row.setContentsMargins(16, 14, 16, 14)
-        hero_row.setSpacing(14)
-        hero_copy = QVBoxLayout()
-        hero_copy.setSpacing(2)
         app_title = QLabel("Dictate")
         app_title.setProperty("role", "appTitle")
-        hero_copy.addWidget(app_title)
-        app_desc = QLabel("Your voice stays on this PC.")
+        app_desc = QLabel("Choose how Dictate listens, transcribes, and stays ready.")
         app_desc.setProperty("role", "desc")
-        hero_copy.addWidget(app_desc)
-        hero_row.addLayout(hero_copy, 1)
+        app_desc.setWordWrap(True)
 
         # One adaptive rail control keeps app updates, model downloads, and
         # GPU setup visible without turning the page header into a toolbar.
@@ -1857,6 +1985,7 @@ class SettingsWindow(QWidget):
         self.download_overview.setObjectName("downloadOverview")
         self.download_overview.setCursor(Qt.PointingHandCursor)
         self.download_overview.setFixedSize(156, 40)
+        self.download_overview.setVisible(False)
         self.download_overview.setAccessibleName("Downloads and updates")
         self.download_overview.setToolTip(
             "See current download and update activity, or open its detailed control."
@@ -1899,14 +2028,6 @@ class SettingsWindow(QWidget):
         overview_copy = QVBoxLayout(self.download_overview_copy)
         overview_copy.setContentsMargins(0, 0, 0, 0)
         overview_copy.setSpacing(1)
-        self._download_overview_copy_effect = QGraphicsOpacityEffect(
-            self.download_overview_copy
-        )
-        self._download_overview_copy_effect.setOpacity(1.0)
-        self.download_overview_copy.setGraphicsEffect(self._download_overview_copy_effect)
-        self._download_overview_copy_fade = QPropertyAnimation(
-            self._download_overview_copy_effect, b"opacity", self
-        )
         self.download_overview_title = QLabel("Up to date")
         self.download_overview_title.setObjectName("downloadOverviewTitle")
         self.download_overview_title.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -1924,32 +2045,17 @@ class SettingsWindow(QWidget):
         self.download_overview_progress.setFixedHeight(3)
         details_copy.addWidget(self.download_overview_progress)
         self.download_overview_details.setVisible(False)
-        self._download_overview_details_effect = QGraphicsOpacityEffect(
-            self.download_overview_details
-        )
-        self._download_overview_details_effect.setOpacity(1.0)
-        self.download_overview_details.setGraphicsEffect(self._download_overview_details_effect)
-        self._download_overview_hide_details_after_fade = False
-        self._download_overview_details_fade = QPropertyAnimation(
-            self._download_overview_details_effect, b"opacity", self
-        )
-        self._download_overview_details_fade.finished.connect(
-            self._finish_download_overview_details_fade
-        )
         overview_copy.addWidget(self.download_overview_details)
         download_copy.addWidget(self.download_overview_copy, 1)
-        overview_chevron = QLabel("›")
-        overview_chevron.setObjectName("downloadOverviewChevron")
-        overview_chevron.setAttribute(Qt.WA_TransparentForMouseEvents)
-        download_copy.addWidget(overview_chevron, 0, Qt.AlignVCenter)
+        self.download_overview_chevron = QLabel("›")
+        self.download_overview_chevron.setObjectName("downloadOverviewChevron")
+        self.download_overview_chevron.setAttribute(Qt.WA_TransparentForMouseEvents)
+        download_copy.addWidget(self.download_overview_chevron, 0, Qt.AlignVCenter)
         self.download_overview.clicked.connect(self._open_download_overview)
         self._download_overview_slot.addWidget(self.download_overview)
-        col.addWidget(hero)
-
-        col.addSpacing(3)
-        essential_header = QLabel("ESSENTIALS")
-        essential_header.setProperty("role", "section")
-        col.addWidget(essential_header)
+        col.addWidget(app_title)
+        col.addWidget(app_desc)
+        col.addSpacing(12)
 
         self.mic_box = QComboBox()
         self.mic_box.setFixedWidth(200)
@@ -2052,6 +2158,7 @@ class SettingsWindow(QWidget):
             "Keep Dictate ready without opening it manually.",
             self.startup_check,
         )
+        self.startup_desc_label = startup_row.findChild(QLabel, "desc")
         self.essentials_group = _settings_group(
             mic_row,
             ptt_row,
@@ -2130,6 +2237,7 @@ class SettingsWindow(QWidget):
             "Stored only for Dictate, separate from other apps and downloads.",
             self.open_models_btn,
         )
+        self.model_storage_desc_label = model_storage_row.findChild(QLabel, "desc")
 
         advanced_col.addWidget(
             _settings_group(
@@ -2287,29 +2395,47 @@ class SettingsWindow(QWidget):
         self.updates_header = updates_header
         self.auto_update_check = ToggleSwitch(self._settings.auto_update_enabled)
         self.auto_update_check.toggled.connect(self._queue_save)
-        auto_update_row = _card(
-            "Check for updates automatically",
-            "Dictate periodically checks its official GitHub release for a "
-            "new version. Turn this off and Dictate never contacts GitHub "
-            "about updates.",
-            self.auto_update_check,
-        )
         self.update_btn = QPushButton("Check for updates")
         self.update_btn.setObjectName("apply")
+        self.update_btn.setProperty("updateState", "default")
         self.update_btn.setVisible(self._updater is not None)
         self.update_btn.clicked.connect(self._check_for_updates)
         update_row = _card(
             "You're up to date",
-            "Dictate checks only its official GitHub release, and never "
-            "downloads a new version without you clicking to install it.",
+            "Dictate checks GitHub for a newer official release.",
             self.update_btn,
         )
-        self.update_desc_label = update_row.findChild(QLabel, "desc")
+        self.update_status_icon = update_row.add_title_icon()
+        self.update_title_label = update_row.title_label
+        self.update_desc_label = update_row.desc_label
+        self.update_meta_label = QLabel()
+        self.update_meta_label.setObjectName("updateMeta")
+        update_row.add_detail(self.update_meta_label)
         self.update_progress = _native_progress_bar()
-        self.updates_group = _settings_group(
-            auto_update_row, update_row, _progress_row(self.update_progress)
+        update_row.add_detail(self.update_progress)
+        self.updates_group = _settings_group(update_row)
+        self.updates_group.setProperty("updateStatus", True)
+
+        auto_update_row = _card(
+            "Check automatically",
+            "Check at startup and every 24 hours while Dictate keeps running.",
+            self.auto_update_check,
         )
-        col.addWidget(self.updates_group)
+        self.updates_whats_new_btn = QPushButton("View release notes")
+        self.updates_whats_new_btn.setObjectName("secondary")
+        self.updates_whats_new_btn.clicked.connect(self._show_whats_new)
+        whats_new_row = _card(
+            "What's new",
+            f"Read the changes included with Dictate {self._whats_new_version}.",
+            self.updates_whats_new_btn,
+        )
+        update_source_row = _text_row(
+            "Download and install",
+            "Downloads only when you choose. Restart to install.",
+        )
+        self.update_details_group = _settings_group(
+            auto_update_row, whats_new_row, update_source_row
+        )
 
         col.addStretch(1)
 
@@ -2378,15 +2504,20 @@ class SettingsWindow(QWidget):
         )
 
         self._updates_page, updates_col = new_page()
+        update_preferences_header = QLabel("UPDATE SETTINGS")
+        update_preferences_header.setProperty("role", "section")
         finish_page(
             self._updates_page,
             updates_col,
             self.updates_header,
             "Updates",
-            "Control when Dictate checks GitHub and install only when you choose.",
+            "See your update status and choose when a new version is installed.",
             self.updates_group,
+            update_preferences_header,
+            self.update_details_group,
         )
         self._pages.addWidget(self._privacy_page)
+        self._pages.addWidget(self._vocabulary_page)
 
         self._page_map = {
             "dictation": self._settings_page,
@@ -2394,6 +2525,7 @@ class SettingsWindow(QWidget):
             "appearance": self._appearance_page,
             "updates": self._updates_page,
             "privacy": self._privacy_page,
+            "vocabulary": self._vocabulary_page,
         }
         self._page_order = list(self._page_map)
         self._page_effects: dict[str, QGraphicsOpacityEffect] = {}
@@ -2565,13 +2697,26 @@ class SettingsWindow(QWidget):
         self.vocabulary_btn.setText("Add words" if count == 0 else f"Edit ({count})")
 
     def _edit_vocabulary(self) -> None:
-        dialog = VocabularyDialog(self._vocabulary, self)
-        if dialog.exec():
-            words = dialog.vocabulary
-            if words != self._vocabulary:
-                self._vocabulary = words
-                self._update_vocabulary_button()
-                self._queue_save()
+        self._vocabulary_origin_scroll = self._scroll.verticalScrollBar().value()
+        self._vocabulary_page.set_vocabulary(self._vocabulary)
+        self._nav_buttons["dictation"].setChecked(True)
+        self._move_nav_indicator("dictation")
+        self._animate_to_page("vocabulary")
+        QTimer.singleShot(0, self._vocabulary_page.focus_editor)
+
+    def _set_vocabulary(self, words: list[str]) -> None:
+        if words == self._vocabulary:
+            return
+        self._vocabulary = words
+        self._update_vocabulary_button()
+        self._queue_save()
+
+    def _hide_vocabulary(self) -> None:
+        self._nav_buttons["dictation"].setChecked(True)
+        self._move_nav_indicator("dictation")
+        self._animate_to_page("dictation")
+        previous = getattr(self, "_vocabulary_origin_scroll", 0)
+        QTimer.singleShot(0, lambda: self._scroll.verticalScrollBar().setValue(previous))
 
     def _toggle_advanced(self, open_: bool) -> None:
         """Grow/shrink the Advanced panel with a fade and a rotating chevron.
@@ -2710,8 +2855,26 @@ class SettingsWindow(QWidget):
         )
         dialog.exec()
 
+    def _set_update_button_state(self, state: str) -> None:
+        """Keep the restart action visually distinct from ordinary update work."""
+        presentation = "restart" if state == updater_mod.READY_TO_RESTART else "default"
+        if self.update_btn.property("updateState") == presentation:
+            return
+        self.update_btn.setProperty("updateState", presentation)
+        style = self.update_btn.style()
+        style.unpolish(self.update_btn)
+        style.polish(self.update_btn)
+
     def _check_for_updates(self) -> None:
-        if self._updater is None or not self.auto_update_check.isChecked():
+        if self._updater is None:
+            return
+        u_state, _u_detail, _u_progress = self._updater.last_status
+        # Turning off future checks must not strand an update that was already
+        # found or a verified installer that is already waiting to restart.
+        if (
+            not self.auto_update_check.isChecked()
+            and u_state not in (updater_mod.AVAILABLE, updater_mod.READY_TO_RESTART)
+        ):
             return
         # Disabled synchronously, in this same click -- not left to
         # refresh_status() reacting later to the updater's own async,
@@ -2727,13 +2890,13 @@ class SettingsWindow(QWidget):
         # declined call produces no status change to react to, so a button
         # disabled on click would otherwise sit there reading "Checking…"
         # until something unrelated refreshed it.
-        u_state, _u_detail, _u_progress = self._updater.last_status
         if u_state == updater_mod.AVAILABLE:
             self.update_btn.setEnabled(False)
             self.update_btn.setText("Downloading…")
             if not self._updater.start_update():
                 self.refresh_status()
         elif u_state == updater_mod.READY_TO_RESTART:
+            self._set_update_button_state(updater_mod.VERIFYING)
             self.update_btn.setEnabled(False)
             self.update_btn.setText("Verifying…")
             if not self._updater.restart_to_install():
@@ -2751,18 +2914,29 @@ class SettingsWindow(QWidget):
             if not self._updater.check_now(silent=False):
                 self.refresh_status()
 
-    def refresh_status(self) -> None:
-        """Finish model-change feedback without a permanent status badge.
+    def _update_meta_text(self) -> str:
+        checked_at = getattr(self._updater, "last_checked_at", None)
+        if not isinstance(checked_at, (int, float)):
+            checked = "Not checked yet this session"
+        else:
+            checked_time = datetime.fromtimestamp(checked_at)
+            clock = checked_time.strftime("%I:%M %p").lstrip("0")
+            if checked_time.date() == datetime.now().date():
+                checked = f"Last checked today at {clock}"
+            else:
+                checked = f"Last checked {checked_time.strftime('%b %d')} at {clock}"
+        return f"Version {VERSION} · {checked}"
 
-        Also the live surface for GPU-runtime and update download progress:
-        both flow through the same LOADING-with-progress/status-detail shape
-        as an ordinary model download, so this one status line covers all
-        three rather than needing a separate widget per download kind.
+    def refresh_status(self) -> None:
+        """Refresh progress and errors inside the controls that own them.
+
+        GPU-runtime, model, and update work all expose the same
+        LOADING-with-progress/status-detail shape. Each state stays beside
+        its action instead of creating a separate message in the rail footer.
         Updater.last_status reverts itself back to IDLE a few seconds after
         a one-shot confirmation (UP_TO_DATE/ERROR) -- see updater.py's
-        _set_status -- so this can just poll it fresh each call with no
-        "have I already shown this" bookkeeping of its own. AVAILABLE and
-        READY_TO_RESTART remain visible until the person acts.
+        _set_status -- so this can poll it fresh with no extra bookkeeping.
+        AVAILABLE and READY_TO_RESTART remain visible until the person acts.
         """
         self._refresh_download_overview()
         if self._updater is not None:
@@ -2774,14 +2948,32 @@ class SettingsWindow(QWidget):
                 updater_mod.VERIFYING,
                 updater_mod.INSTALLING,
             )
+            update_actionable = u_state in (
+                updater_mod.AVAILABLE,
+                updater_mod.READY_TO_RESTART,
+            )
             self.update_btn.setEnabled(
-                u_state == updater_mod.READY_TO_RESTART
+                update_actionable
                 or (auto_update_on and not update_busy)
             )
+            self._set_update_button_state(u_state)
+            self.update_meta_label.setText(self._update_meta_text())
+            update_title = {
+                updater_mod.CHECKING: "Checking for updates",
+                updater_mod.UP_TO_DATE: "You're up to date",
+                updater_mod.AVAILABLE: "Update available",
+                updater_mod.DOWNLOADING: "Downloading update",
+                updater_mod.READY_TO_RESTART: "Restart to finish",
+                updater_mod.VERIFYING: "Verifying update",
+                updater_mod.INSTALLING: "Restarting Dictate",
+                updater_mod.ERROR: "Update needs attention",
+            }.get(u_state, "You're up to date" if auto_update_on else "Updates paused")
+            if self.update_title_label is not None:
+                self.update_title_label.setText(update_title)
             if u_state == updater_mod.AVAILABLE:
                 self.update_btn.setText("Download update")
             elif u_state == updater_mod.READY_TO_RESTART:
-                self.update_btn.setText("Restart now")
+                self.update_btn.setText("Restart Dictate")
             elif u_state == updater_mod.VERIFYING:
                 self.update_btn.setText("Verifying…")
             elif u_state == updater_mod.INSTALLING:
@@ -2804,16 +2996,30 @@ class SettingsWindow(QWidget):
                     self.update_progress.setRange(0, 0)
 
             if u_state != updater_mod.IDLE:
-                self._set_status(u_detail)
                 if self.update_desc_label is not None:
-                    self.update_desc_label.setText(u_detail)
+                    update_description = {
+                        updater_mod.CHECKING: "Looking for a newer official release.",
+                        updater_mod.UP_TO_DATE: "Dictate is running the latest available version.",
+                        updater_mod.AVAILABLE: (
+                            f"{u_detail}. Nothing downloads until you choose it."
+                            if u_detail
+                            else "A newer version is ready to download when you choose."
+                        ),
+                        updater_mod.DOWNLOADING: u_detail or "Downloading the installer.",
+                        updater_mod.READY_TO_RESTART: (
+                            "The update is downloaded and verified. Restart when you're ready."
+                        ),
+                        updater_mod.VERIFYING: "Checking the installer before restart.",
+                        updater_mod.INSTALLING: "Dictate is closing to install the update.",
+                        updater_mod.ERROR: u_detail or "The update could not be completed.",
+                    }.get(u_state, u_detail)
+                    self.update_desc_label.setText(update_description)
                 return
 
             if self.update_desc_label is not None:
                 if auto_update_on:
                     self.update_desc_label.setText(
-                        "Dictate checks only its official GitHub release, and "
-                        "verifies the download's checksum before installing it."
+                        "Dictate is running the latest version found in this session."
                     )
                 else:
                     self.update_desc_label.setText(
@@ -2836,7 +3042,6 @@ class SettingsWindow(QWidget):
             self.model_download_progress.setValue(int(progress * 100))
             if self.model_download_desc_label is not None:
                 self.model_download_desc_label.setText(detail)
-            self._set_status(detail)
             return
 
         self.model_download_row.setVisible(False)
@@ -2845,16 +3050,18 @@ class SettingsWindow(QWidget):
             if state == engine_mod.READY:
                 self._pending_reload = False
                 self.reload_progress.setVisible(False)
-                self._clear_status()
+                self._update_mode_desc()
                 return
             if state == engine_mod.ERROR:
                 self._pending_reload = False
                 self.reload_progress.setVisible(False)
-                self._set_status("The speech model could not load")
+                if self.mode_desc_label is not None:
+                    self.mode_desc_label.setText(
+                        "The speech model could not load. Choose another mode or try again."
+                    )
                 return
         else:
             self.reload_progress.setVisible(False)
-            self._clear_status()
 
     def _tap_lock_desc(self) -> str:
         """Explain the gesture using the key that is actually bound to it."""
@@ -2870,10 +3077,17 @@ class SettingsWindow(QWidget):
         """Open Dictate's private model cache, creating it if needed."""
         folder = config.model_dir()
         folder.mkdir(parents=True, exist_ok=True)
+        if self.model_storage_desc_label is not None:
+            self.model_storage_desc_label.setText(
+                "Stored only for Dictate, separate from other apps and downloads."
+            )
         try:
             os.startfile(folder)
         except OSError:
-            self._set_status("Could not open the model folder")
+            if self.model_storage_desc_label is not None:
+                self.model_storage_desc_label.setText(
+                    "Could not open this folder. Try again."
+                )
 
     def _refresh_tap_lock_desc(self, *_args) -> None:
         if self.tap_lock_desc_label is not None:
@@ -2922,11 +3136,14 @@ class SettingsWindow(QWidget):
     def _save_now(self) -> None:
         new = self._collect_settings()
         if asdict(new) == asdict(self._settings):
-            self._show_auto_save_message()
             return
         old = self._settings
 
         if new.start_with_windows != old.start_with_windows:
+            if self.startup_desc_label is not None:
+                self.startup_desc_label.setText(
+                    "Keep Dictate ready without opening it manually."
+                )
             try:
                 startup_mod.set_enabled(new.start_with_windows)
             except OSError:
@@ -2934,7 +3151,10 @@ class SettingsWindow(QWidget):
                 self.startup_check.setChecked(old.start_with_windows)
                 self.startup_check.blockSignals(blocked)
                 new = replace(new, start_with_windows=old.start_with_windows)
-                self._set_status("Could not update Windows startup")
+                if self.startup_desc_label is not None:
+                    self.startup_desc_label.setText(
+                        "Could not change Windows startup. Try again."
+                    )
                 if asdict(new) == asdict(old):
                     return
 
@@ -2945,23 +3165,11 @@ class SettingsWindow(QWidget):
         self.changed.emit(new)  # main.py wires this to engine/hotkeys/bar/tray
         if needs_reload:
             self._pending_reload = True
-            self._set_status("Updating speech model…")
+            if self.mode_desc_label is not None:
+                self.mode_desc_label.setText("Updating the speech model…")
             self._engine.preload()
         else:
             self._pending_reload = False
-            self._clear_status()
-
-    def _show_auto_save_message(self) -> None:
-        self._clear_status()
-
-    def _set_status(self, text: str) -> None:
-        """Show the rail status only for live work or an actionable failure."""
-        self.save_status.setText(text)
-        self.save_status.setVisible(True)
-
-    def _clear_status(self) -> None:
-        self.save_status.clear()
-        self.save_status.setVisible(False)
 
     def _load_widgets(self, s: config.Settings) -> None:
         """Push settings values into the controls without staging a change."""

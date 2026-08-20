@@ -508,6 +508,7 @@ class Updater:
         self._status_state = IDLE
         self._status_detail = ""
         self._status_progress: Optional[float] = None
+        self._last_checked_at: Optional[float] = None
         self._revert_timer: Optional[threading.Timer] = None
         self._stop = threading.Event()
         self._busy = threading.Lock()
@@ -533,6 +534,11 @@ class Updater:
         source without a separate case for each.
         """
         return (self._status_state, self._status_detail, self._status_progress)
+
+    @property
+    def last_checked_at(self) -> Optional[float]:
+        """Local timestamp for the most recently completed release check."""
+        return self._last_checked_at
 
     def _set_status(
         self,
@@ -671,6 +677,7 @@ class Updater:
             self._set_status(AVAILABLE, f"Update {info['version']} is available")
             self._on_available(info["version"], info["release_notes"])
         finally:
+            self._last_checked_at = time.time()
             self._busy.release()
             # Fires even for a silent check that changed no status. A UI that
             # disabled its own button on click needs one signal to re-enable

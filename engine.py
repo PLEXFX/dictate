@@ -96,10 +96,15 @@ def _register_cuda_dlls() -> None:
     global _cuda_dlls_registered
     if _cuda_dlls_registered or sys.platform != "win32":
         return
-    _cuda_dlls_registered = True
 
     import ctypes
     import importlib.util
+
+    # A Settings-installed runtime lives in Dictate's writable app-data
+    # folder, not the read-only install tree.  Make its nvidia namespace
+    # visible before finding the DLL subfolders.  Installer-provided files
+    # remain supported by the same helper.
+    gpu_runtime.activate_runtime()
 
     spec = importlib.util.find_spec("nvidia")
     if spec is None or not spec.submodule_search_locations:
@@ -111,6 +116,13 @@ def _register_cuda_dlls() -> None:
             lib = Path(root) / pkg / "bin"
             if lib.is_dir():
                 bin_dirs.append(lib)
+
+    # Settings can open before its optional runtime has been downloaded.
+    # Leave this retryable in that state: otherwise the early probe sets the
+    # one-shot guard and the fresh DLL folders are never registered after the
+    # download completes.
+    if not bin_dirs:
+        return
 
     for lib in bin_dirs:
         try:
@@ -141,6 +153,8 @@ def _register_cuda_dlls() -> None:
                     )
                 except OSError:
                     pass
+
+    _cuda_dlls_registered = True
 
 
 _cuda_available: bool | None = None
@@ -260,6 +274,22 @@ def _make_progress_reporter(on_bytes: Callable[[int, Optional[int]], None]):
     return _HubProgress
 
 
+def _snapshot_has_model_bin(snapshot: object) -> bool:
+    """Return whether a Hub snapshot is safe to hand to CTranslate2.
+
+    Hugging Face can retain the metadata for an interrupted snapshot.  Its
+    local-only lookup may then return that directory even though the large
+    model file never finished landing; faster-whisper eventually turns that
+    into the unhelpful ``Unable to open file 'model.bin'`` error.  Check the
+    one file CTranslate2 must open before treating a cache hit as complete.
+    """
+    try:
+        model_bin = Path(snapshot) / "model.bin"
+        return model_bin.is_file() and model_bin.stat().st_size > 0
+    except (TypeError, OSError):
+        return False
+
+
 def _predownload_with_progress(
     size: str, on_bytes: Callable[[int, Optional[int]], None]
 ) -> None:
@@ -277,23 +307,34 @@ def _predownload_with_progress(
     except Exception:
         return
 
+    incomplete_snapshot = False
     try:
-        huggingface_hub.snapshot_download(
+        cached = huggingface_hub.snapshot_download(
             repo_id,
             allow_patterns=_MODEL_ALLOW_PATTERNS,
             cache_dir=config.model_dir(),
             local_files_only=True,
         )
-        return  # already cached -- nothing to download, nothing to report
+        if _snapshot_has_model_bin(cached):
+            return  # A complete cached model needs no download or percentage.
+        # The cache entry itself exists but lacks model.bin.  Make the online
+        # request re-fetch it instead of letting faster-whisper reuse this
+        # broken snapshot and fail later while opening the model.
+        incomplete_snapshot = True
     except Exception:
         pass
 
     try:
+        kwargs = {
+            "allow_patterns": _MODEL_ALLOW_PATTERNS,
+            "cache_dir": config.model_dir(),
+            "tqdm_class": _make_progress_reporter(on_bytes),
+        }
+        if incomplete_snapshot:
+            kwargs["force_download"] = True
         huggingface_hub.snapshot_download(
             repo_id,
-            allow_patterns=_MODEL_ALLOW_PATTERNS,
-            cache_dir=config.model_dir(),
-            tqdm_class=_make_progress_reporter(on_bytes),
+            **kwargs,
         )
     except Exception:
         pass

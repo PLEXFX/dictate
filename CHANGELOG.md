@@ -7,6 +7,14 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.2-beta.1] - 2026-08-24
+
+### Fixed
+
+- Speech-model loading now repairs a corrupt or partial cached `model.bin`
+  once and retries from the repaired download, instead of showing the raw
+  internal filename error.
+
 ## [1.3.1-beta.1] - 2026-08-24
 
 ### Fixed

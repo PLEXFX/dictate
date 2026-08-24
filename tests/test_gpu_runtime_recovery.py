@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -113,6 +114,41 @@ class GpuRuntimeRecoveryTests(unittest.TestCase):
                 engine._predownload_with_progress("small.en", lambda *_args: None)
             self.assertEqual(hub.snapshot_download.call_count, 2)
             self.assertTrue(hub.snapshot_download.call_args_list[1].kwargs["force_download"])
+
+    def test_model_bin_load_error_repairs_and_retries_the_verified_snapshot(self):
+        """A nonempty but corrupt weight file must not surface its raw error."""
+        with tempfile.TemporaryDirectory() as temp:
+            repaired = Path(temp) / "repaired"
+            repaired.mkdir()
+            (repaired / "model.bin").write_bytes(b"healthy weights")
+
+            subject = engine.Engine.__new__(engine.Engine)
+            subject._settings = type("Settings", (), {"model_size": "tiny.en", "device": "cpu"})()
+            subject._model = None
+            subject._loaded_key = None
+            subject._lock = threading.RLock()
+            subject._last_used = 0.0
+            subject._set_state = Mock()
+
+            first_load = RuntimeError("Unable to open file 'model.bin'")
+            with (
+                patch.object(engine, "resolve_device", return_value="cpu"),
+                patch.object(engine, "_register_cuda_dlls"),
+                patch.object(
+                    subject,
+                    "_download_with_progress",
+                    side_effect=[None, str(repaired)],
+                ) as download,
+                patch(
+                    "faster_whisper.WhisperModel",
+                    side_effect=[first_load, Mock()],
+                ) as whisper_model,
+            ):
+                subject.ensure_loaded()
+
+            self.assertEqual(download.call_args_list[1].kwargs, {"force_download": True})
+            self.assertEqual(whisper_model.call_args_list[1].args[0], str(repaired))
+            self.assertEqual(subject._loaded_key, ("tiny.en", "cpu"))
 
 
 if __name__ == "__main__":

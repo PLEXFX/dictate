@@ -18,12 +18,15 @@ import os
 import re
 from dataclasses import asdict, replace
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 from PySide6.QtCore import (
     QAbstractAnimation,
     QByteArray,
     QPoint,
+    QPointF,
+    QRectF,
     Property,
     Qt,
     QParallelAnimationGroup,
@@ -38,6 +41,7 @@ from PySide6.QtGui import (
     QColor,
     QDesktopServices,
     QFont,
+    QFontDatabase,
     QIcon,
     QPainter,
     QPainterPath,
@@ -70,10 +74,11 @@ import audio as audio_mod
 import config
 import engine as engine_mod
 import gpu_runtime
+import hardware
 import hotkeys as hotkeys_mod
 import startup as startup_mod
 import updater as updater_mod
-from bar import ENTER_MS, EXIT_MS, FLUENT_ACCELERATE, FLUENT_DECELERATE
+from bar import ENTER_MS, EXIT_MS, FLUENT_ACCELERATE, FLUENT_DECELERATE, system_accent
 from theme import resolve_dark, system_is_dark
 from toggle import ToggleSwitch
 from version import VERSION
@@ -82,15 +87,16 @@ DARK_STYLE = """
 QWidget#root { background: #202020; }
 QLabel { color: #FFFFFF; }
 QLabel[role="title"] { font-size: 10pt; }
-QLabel[role="desc"] { color: #9D9D9D; font-size: 8pt; }
+QLabel[role="desc"] { color: #B5B5B5; font-size: 9pt; }
 QLabel[role="header"] { color: #FFFFFF; font-size: 11pt; font-weight: 600; }
-QLabel[role="status"] { color: #9D9D9D; font-size: 8pt; }
+QLabel[role="status"] { color: #B5B5B5; font-size: 9pt; }
 QLabel[role="appTitle"] { color: #FFFFFF; font-size: 19pt; font-weight: 600; }
 QLabel[role="section"] {
-    color: #D8D8D8;
+    color: #9A9A9A;
     font-size: 8pt;
     font-weight: 600;
-    padding: 3px 2px 1px 2px;
+    padding: 6px 2px 2px 2px;
+    letter-spacing: 0.5px;
 }
 QFrame#card {
     background: #2B2B2B;
@@ -169,6 +175,7 @@ QComboBox:disabled, QLineEdit:disabled, QPlainTextEdit:disabled, QPushButton#key
 }
 QPushButton#keyCapture:focus { border-color: #4CC2FF; }
 QComboBox::drop-down { border: none; width: 22px; }
+QComboBox::down-arrow { image: url(__CHEVRON_DOWN_DARK__); width: 10px; height: 10px; }
 QComboBox QAbstractItemView {
     background: #2C2C2C;
     border: 1px solid #3D3D3D;
@@ -211,23 +218,15 @@ QPushButton#downloadOverview[tone="accent"], QPushButton#downloadOverview[tone="
     background: #292929;
     border-color: #363636;
 }
+QPushButton#downloadOverview[tone="available"] { background: #302B21; border-color: #51432B; }
+QPushButton#downloadOverview:focus { border-color: #4CC2FF; }
 QPushButton#downloadOverview:hover { background: #303030; border-color: #414141; }
 QPushButton#downloadOverview:pressed { background: #252525; }
 QPushButton#downloadOverview[tone="restart"] { background: #F59E0B; border-color: #F59E0B; }
 QPushButton#downloadOverview[tone="restart"]:hover { background: #FDBA3B; border-color: #FDBA3B; }
 QPushButton#downloadOverview[tone="restart"]:pressed { background: #D97706; border-color: #D97706; }
-QFrame#downloadOverviewStatus {
-    background: #777777;
-    border: none;
-    border-radius: 4px;
-}
-QFrame#downloadOverviewStatus[tone="success"] { background: #6CCB5F; }
-QFrame#downloadOverviewStatus[tone="accent"] { background: #4CC2FF; }
-QFrame#downloadOverviewStatus[tone="available"] { background: #FFB900; }
-QFrame#downloadOverviewStatus[tone="restart"] { background: #1A1A1A; }
-QFrame#downloadOverviewStatus[tone="error"] { background: #F1707B; }
-QLabel#downloadOverviewTitle { color: #F4F4F4; font-size: 8pt; font-weight: 600; background: transparent; }
-QLabel#downloadOverviewDetail { color: #AFAFAF; font-size: 8pt; background: transparent; }
+QLabel#downloadOverviewTitle { color: #F4F4F4; font-size: 10pt; font-weight: 600; background: transparent; }
+QLabel#downloadOverviewDetail { color: #BDBDBD; font-size: 9pt; background: transparent; }
 QLabel#downloadOverviewChevron { color: #9A9A9A; font-size: 14pt; font-weight: 400; background: transparent; }
 QLabel#downloadOverviewTitle[tone="restart"],
 QLabel#downloadOverviewDetail[tone="restart"],
@@ -339,10 +338,10 @@ LIGHT_STYLE = """
 QWidget#root { background: #F3F3F3; }
 QLabel { color: #1A1A1A; }
 QLabel[role="title"] { font-size: 10pt; }
-QLabel[role="desc"], QLabel[role="status"] { color: #5F5F5F; font-size: 8pt; }
+QLabel[role="desc"], QLabel[role="status"] { color: #626262; font-size: 9pt; }
 QLabel[role="header"] { color: #1A1A1A; font-size: 11pt; font-weight: 600; }
 QLabel[role="appTitle"] { color: #1A1A1A; font-size: 19pt; font-weight: 600; }
-QLabel[role="section"] { color: #4A4A4A; font-size: 8pt; font-weight: 600; padding: 3px 2px 1px 2px; }
+QLabel[role="section"] { color: #707070; font-size: 8pt; font-weight: 600; padding: 6px 2px 2px 2px; letter-spacing: 0.5px; }
 QFrame#card { background: #FFFFFF; border: 1px solid #E3E3E3; border-radius: 6px; }
 QFrame#hero { background: #FAFAFA; border: 1px solid #E0E0E0; border-radius: 8px; }
 QFrame#navRail { background: #EDEDED; border: none; border-right: 1px solid #DDDDDD; }
@@ -368,6 +367,7 @@ QComboBox:hover, QLineEdit:hover, QPlainTextEdit:hover, QPushButton#keyCapture:h
 QComboBox:disabled, QLineEdit:disabled, QPlainTextEdit:disabled, QPushButton#keyCapture:disabled { background: #EEEEEE; color: #888888; border-color: #DDDDDD; }
 QPushButton#keyCapture:focus { border-color: #0078D4; }
 QComboBox::drop-down { border: none; width: 22px; }
+QComboBox::down-arrow { image: url(__CHEVRON_DOWN_LIGHT__); width: 10px; height: 10px; }
 QComboBox QAbstractItemView { background: #FFFFFF; border: 1px solid #C9C9C9; border-radius: 6px; color: #1A1A1A; selection-background-color: #E5F1FB; outline: none; padding: 4px; }
 QPushButton#apply { background: #0078D4; color: #FFFFFF; border: none; border-radius: 4px; padding: 6px 22px; font-weight: 600; }
 QPushButton#apply:hover { background: #006CBE; } QPushButton#apply:pressed { background: #005A9E; } QPushButton#apply:disabled { background: #DADADA; color: #888888; }
@@ -378,19 +378,15 @@ QPushButton#secondary { background: #FFFFFF; color: #1A1A1A; border: 1px solid #
 QPushButton#secondary:hover { background: #F3F3F3; }
 QPushButton#downloadOverview { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 0px; text-align: left; }
 QPushButton#downloadOverview[tone="accent"], QPushButton#downloadOverview[tone="available"], QPushButton#downloadOverview[tone="error"] { background: #F5F5F5; border-color: #DEDEDE; }
+QPushButton#downloadOverview[tone="available"] { background: #FFF8EB; border-color: #E5D4B5; }
+QPushButton#downloadOverview:focus { border-color: #0078D4; }
 QPushButton#downloadOverview:hover { background: #E5E5E5; border-color: #D2D2D2; }
 QPushButton#downloadOverview:pressed { background: #EEEEEE; }
 QPushButton#downloadOverview[tone="restart"] { background: #B54708; border-color: #B54708; }
 QPushButton#downloadOverview[tone="restart"]:hover { background: #963800; border-color: #963800; }
 QPushButton#downloadOverview[tone="restart"]:pressed { background: #7A2E00; border-color: #7A2E00; }
-QFrame#downloadOverviewStatus { background: #8A8A8A; border: none; border-radius: 4px; }
-QFrame#downloadOverviewStatus[tone="success"] { background: #0F7B0F; }
-QFrame#downloadOverviewStatus[tone="accent"] { background: #0078D4; }
-QFrame#downloadOverviewStatus[tone="available"] { background: #D97706; }
-QFrame#downloadOverviewStatus[tone="restart"] { background: #FFFFFF; }
-QFrame#downloadOverviewStatus[tone="error"] { background: #C42B1C; }
-QLabel#downloadOverviewTitle { color: #1A1A1A; font-size: 8pt; font-weight: 600; background: transparent; }
-QLabel#downloadOverviewDetail { color: #616161; font-size: 8pt; background: transparent; }
+QLabel#downloadOverviewTitle { color: #1A1A1A; font-size: 10pt; font-weight: 600; background: transparent; }
+QLabel#downloadOverviewDetail { color: #616161; font-size: 9pt; background: transparent; }
 QLabel#downloadOverviewChevron { color: #6D6D6D; font-size: 14pt; font-weight: 400; background: transparent; }
 QLabel#downloadOverviewTitle[tone="restart"],
 QLabel#downloadOverviewDetail[tone="restart"],
@@ -416,41 +412,202 @@ QPushButton#backNav:hover { color: #004C87; }
 """
 
 
-# Cleaner display text for the Advanced tab's model picker. config.MODELS
-# keeps the raw faster-whisper size names (what engine.py actually loads);
-# these are only how the combo box shows them.
-MODEL_LABELS = {
-    "tiny.en": "Tiny",
-    "base.en": "Base",
-    "small.en": "Small",
-    "medium.en": "Medium",
-    "large-v3-turbo": "Large v3 Turbo",
-}
-
 _FLUENT_ASSET_DIR = Path(__file__).resolve().parent / "assets" / "fluent"
 
 
-def _fluent_icon(name: str, dark: bool, size: int = 20) -> QIcon:
-    """Render one bundled Microsoft Fluent SVG in the active text color."""
-    path = _FLUENT_ASSET_DIR / f"{name}.svg"
+def _render_icon(draw, size: int, gap: int = 0) -> QIcon:
+    """Keep native-size pixels at the common Windows display scales.
+
+    ``gap`` adds transparent pixels to the right of the drawing grid. Qt gives
+    a QPushButton a fixed four-pixel icon-to-text gap with no stylesheet
+    property to widen it, so a wider-than-tall icon whose artwork sits on the
+    left is the only way to reach Windows 11's roomier rail spacing.
+    """
+    icon = QIcon()
+    for scale in (1.0, 1.25, 1.5, 2.0, 3.0):
+        pixels = round(size * scale)
+        pixmap = QPixmap(pixels + round(gap * scale), pixels)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.scale(pixels / 20.0, pixels / 20.0)
+        draw(painter)
+        painter.end()
+        pixmap.setDevicePixelRatio(pixels / size)
+        icon.addPixmap(pixmap)
+    return icon
+
+
+# Windows 11's own Segoe Fluent Icons codepoints, one per rail destination, so
+# every icon comes from a single family drawn on a single optical grid instead
+# of a mix of stroke weights. Appearance is deliberately the Color palette
+# glyph, never a gear -- a gear reads as "Settings", which is the whole window.
+# https://learn.microsoft.com/windows/apps/design/iconography/segoe-fluent-icons-font
+_SEGOE_GLYPHS: dict[str, str] = {
+    "dictation": "\ue720",    # Microphone
+    "activity": "\ue9d9",     # Diagnostic (a live trace on a surface)
+    "appearance": "\ue790",   # Color (paint palette)
+    "updates": "\ue895",      # Sync
+    "privacy": "\ue72e",      # Lock
+}
+
+# Windows 11 draws rail glyphs at 16 px inside a 20 px slot. Filling the slot
+# edge to edge, as this did before, reads noticeably heavier than the OS.
+_GLYPH_PX = 16
+
+# Transparent pixels baked onto the right of a rail icon. Qt's own icon-to-text
+# gap is a hard-coded 4 px, which left the labels almost touching their glyphs;
+# 8 more brings the pair to Windows 11's own rail spacing.
+NAV_ICON_GAP = 8
+
+# The rail's update notice, laid out left to right. Its wrapped copy has to be
+# measured before Qt lays it out, so the width it gets is derived from these
+# rather than restated as a number that silently drifts out of agreement.
+_OVERVIEW_WIDTH = 180
+_OVERVIEW_MARGIN_LEFT = 11
+_OVERVIEW_MARGIN_RIGHT = 9
+_OVERVIEW_STATUS_PX = 20
+_OVERVIEW_STATUS_GAP = NAV_ICON_GAP + 4
+_OVERVIEW_CHEVRON_PX = 12
+_OVERVIEW_CHEVRON_GAP = 6
+_OVERVIEW_COPY_WIDTH = (
+    _OVERVIEW_WIDTH
+    - _OVERVIEW_MARGIN_LEFT
+    - _OVERVIEW_MARGIN_RIGHT
+    - _OVERVIEW_STATUS_PX
+    - _OVERVIEW_STATUS_GAP
+    - _OVERVIEW_CHEVRON_PX
+    - _OVERVIEW_CHEVRON_GAP
+)
+
+
+@lru_cache(maxsize=128)
+def _fluent_icon(
+    name: str, dark: bool, size: int = 20, color: str | None = None, gap: int = 0
+) -> QIcon:
+    """Render Windows 11 navigation icons without display-scale blur."""
+    fill = color or ("#DADADA" if dark else "#303030")
+    glyph = _SEGOE_GLYPHS.get(name)
+    if glyph is not None and "Segoe Fluent Icons" in QFontDatabase.families():
+        font = QFont("Segoe Fluent Icons")
+        font.setPixelSize(_GLYPH_PX)
+        def draw_glyph(painter):
+            painter.setFont(font)
+            painter.setPen(QColor(fill))
+            painter.drawText(QRectF(0, 0, 20, 20), Qt.AlignCenter, glyph)
+        return _render_icon(draw_glyph, size, gap)
+    # Keep the bundled Microsoft SVGs as a fallback when the font is absent.
     try:
-        svg = path.read_text(encoding="utf-8")
+        svg = (_FLUENT_ASSET_DIR / f"{name}.svg").read_text(encoding="utf-8")
     except OSError:
         return QIcon()
-    color = "#DADADA" if dark else "#303030"
-    svg = svg.replace('fill="#212121"', f'fill="{color}"')
+    svg = svg.replace('fill="#212121"', f'fill="{fill}"')
     renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    renderer.render(painter)
-    painter.end()
-    return QIcon(pixmap)
+    inset = (20 - _GLYPH_PX) / 2
+    box = QRectF(inset, inset, _GLYPH_PX, _GLYPH_PX)
+    return _render_icon(lambda p: renderer.render(p, box), size, gap)
+
+
+def _wrapped_height(label: QLabel, width: int) -> int:
+    """How tall this label's text really is once wrapped to ``width``.
+
+    Not ``heightForWidth``: these labels are given a fixed height each time the
+    notice changes state, and a fixed height is what ``heightForWidth`` reports
+    back, so measuring that way returned the *previous* state's height and left
+    the notice sized for whatever it used to say.
+    """
+    return label.fontMetrics().boundingRect(
+        0, 0, width, 10_000, Qt.TextWordWrap | Qt.AlignLeft, label.text()
+    ).height()
+
+
+@lru_cache(maxsize=128)
+def _status_glyph_icon(kind: str, color: str, size: int = 20) -> QIcon:
+    """Matching rounded outline symbols, in a shared 20 px drawing grid."""
+    if kind == "spin":
+        return _fluent_icon("updates", True, size, color)
+    def draw(p):
+        p.setPen(QPen(QColor(color), 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        path = QPainterPath()
+        if kind == "check":
+            p.drawEllipse(QRectF(2.75, 2.75, 14.5, 14.5))
+            path.moveTo(6.25, 10)
+            path.lineTo(8.75, 12.5)
+            path.lineTo(13.75, 7.5)
+        elif kind == "down":
+            path.moveTo(10, 3)
+            path.lineTo(10, 12)
+            path.moveTo(6.5, 8.5)
+            path.lineTo(10, 12)
+            path.lineTo(13.5, 8.5)
+            path.moveTo(4, 13)
+            path.lineTo(4, 16.5)
+            path.lineTo(16, 16.5)
+            path.lineTo(16, 13)
+        elif kind == "warn":
+            path.moveTo(9.1, 3.5)
+            path.quadTo(10, 2, 10.9, 3.5)
+            path.lineTo(17.2, 14.5)
+            path.quadTo(18, 16, 16.3, 16)
+            path.lineTo(3.7, 16)
+            path.quadTo(2, 16, 2.8, 14.5)
+            path.closeSubpath()
+            path.moveTo(10, 7)
+            path.lineTo(10, 10.5)
+            p.drawPoint(QPointF(10, 13.25))
+        elif kind == "chevron":
+            path.moveTo(8, 5.5)
+            path.lineTo(12.5, 10)
+            path.lineTo(8, 14.5)
+        p.drawPath(path)
+    return _render_icon(draw, size)
+
+
+# Update status -> (outline glyph, dark-theme colour, light-theme colour).
+_UPDATE_ICON_TONES: dict[str, tuple[str, str, str]] = {
+    updater_mod.CHECKING: ("spin", "#4CC2FF", "#0078D4"),
+    updater_mod.DOWNLOADING: ("down", "#4CC2FF", "#0078D4"),
+    updater_mod.VERIFYING: ("spin", "#4CC2FF", "#0078D4"),
+    updater_mod.INSTALLING: ("spin", "#4CC2FF", "#0078D4"),
+    updater_mod.AVAILABLE: ("down", "#FFB900", "#D97706"),
+    updater_mod.READY_TO_RESTART: ("spin", "#F59E0B", "#B54708"),
+    updater_mod.ERROR: ("warn", "#F1707B", "#C42B1C"),
+    updater_mod.UP_TO_DATE: ("check", "#6CCB5F", "#0F7B0F"),
+}
+
+# Modes share colours with the Updates page. Restart uses contrasting ink
+# because its entire button is amber; GPU setup retains a download symbol.
+_DOWNLOAD_OVERVIEW_ICONS: dict[str, tuple[str, str, str]] = {
+    "active": ("spin", "#4CC2FF", "#0078D4"),
+    "ready": ("down", "#4CC2FF", "#0078D4"),
+    "available": ("down", "#FFB900", "#D97706"),
+    "restart": ("spin", "#1A1A1A", "#FFFFFF"),
+    "error": ("warn", "#F1707B", "#C42B1C"),
+}
+
+
+def _chevron_down_url(dark: bool) -> str:
+    """Absolute, forward-slash file path for the QSS ``url()`` below.
+
+    QSS's ``url()`` does not accept Windows' native backslash separators, so
+    the path is normalized with ``as_posix()`` even though this is a plain
+    filesystem path, not a real URL.
+    """
+    name = "chevron-down-dark.svg" if dark else "chevron-down-light.svg"
+    return (_FLUENT_ASSET_DIR / name).as_posix()
 
 
 def stylesheet(dark: bool | None = None) -> str:
+    """Styling a QComboBox's drop-down subcontrol at all -- even just
+    ``border: none`` -- stops Qt drawing its native arrow entirely, so both
+    themes need an explicit ``down-arrow`` image or the control silently
+    loses its only visual hint that it opens a list. See chevron-down-*.svg.
+    """
     dark = system_is_dark() if dark is None else dark
-    return DARK_STYLE if dark else LIGHT_STYLE
+    if dark:
+        return DARK_STYLE.replace("__CHEVRON_DOWN_DARK__", _chevron_down_url(True))
+    return LIGHT_STYLE.replace("__CHEVRON_DOWN_LIGHT__", _chevron_down_url(False))
 
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
@@ -492,12 +649,12 @@ class SettingsRow(QFrame):
     ):
         super().__init__(parent)
         self.setObjectName("card")
-        self.setMinimumHeight(64)
+        self.setMinimumHeight(56)
         self._control = control
         self._stacked = False
 
         self._row = QBoxLayout(QBoxLayout.LeftToRight, self)
-        self._row.setContentsMargins(16, 12, 16, 12)
+        self._row.setContentsMargins(16, 10, 16, 10)
         self._row.setSpacing(16)
 
         self._copy = QWidget()
@@ -782,7 +939,7 @@ class BindingCapture(QPushButton):
         self._held: set[str] = set()
         self._recorded: set[str] = set()
         self.setObjectName("keyCapture")
-        self.setFixedWidth(180)
+        self.setFixedWidth(200)
         self.setFocusPolicy(Qt.StrongFocus)
         self.clicked.connect(self._start_capture)
         self.setBinding(binding)
@@ -1023,94 +1180,77 @@ def _populate_privacy_content(col: QVBoxLayout) -> None:
     title.setProperty("role", "header")
     col.addWidget(title)
     intro = QLabel(
-        "Dictate is a local tool with no account and no cloud transcription. "
-        "This page explains exactly what it uses and the few things that "
-        "leave this PC."
+        "Dictate runs locally with no account and no cloud transcription. "
+        "Below is exactly what it accesses and the few things that leave this PC."
     )
     intro.setProperty("role", "desc")
     intro.setWordWrap(True)
     col.addWidget(intro)
-    col.addSpacing(4)
 
-    local_header = QLabel("STAYS ON THIS PC")
+    local_header = QLabel("Stays on this PC")
     local_header.setProperty("role", "section")
     col.addWidget(local_header)
     col.addWidget(
         _settings_group(
             _text_row(
                 "Microphone",
-                "The selected microphone opens only while you hold the talk "
-                "key. Audio is kept in memory long enough to transcribe it; "
-                "Dictate does not save voice recordings.",
+                "Opens only while you hold the talk key. Audio is "
+                "transcribed in memory and never saved to disk.",
             ),
             _text_row(
-                "Local transcription",
-                "faster-whisper processes your audio on this computer. "
-                "Dictate does not upload recordings or transcribed text to "
-                "a transcription service.",
+                "Transcription",
+                "Processed locally by faster-whisper. No audio or text is "
+                "uploaded to any service.",
             ),
             _text_row(
                 "Last dictation",
-                "The most recent successful result is kept in memory only, "
-                "never written to disk, so \"Copy last dictation\" in the "
-                "tray menu can recover it. It's replaced the moment you "
-                "dictate again, and cleared when Dictate closes.",
+                "The most recent result is held in memory only — never "
+                "written to disk. It clears when Dictate closes.",
             ),
             _text_row(
                 "Clipboard",
-                "Dictate temporarily uses the Windows clipboard to insert "
-                "the result, then restores the previous contents — "
-                "including an empty clipboard. \"Copy last dictation\" "
-                "works the same way: your prior clipboard returns after "
-                "5 seconds unless you copy something new first.",
+                "Used briefly to insert text, then your prior contents are "
+                "restored. \"Copy last dictation\" does the same — your "
+                "clipboard returns after 5 seconds.",
             ),
             _text_row(
                 "Words I use",
-                "Names, brands, or terms you add are saved to your local "
-                "settings file and used only as local recognition hints "
-                "for Whisper. They never leave this PC.",
+                "Saved to your local settings file as recognition hints for "
+                "Whisper. Never sent anywhere.",
             ),
             _text_row(
                 "Your settings",
-                "Preferences — device, hotkeys, recognition words, window "
-                "layout — are saved as plain JSON at "
-                "%APPDATA%\\dictate\\settings.json. Nothing here is "
-                "tied to an account or synced anywhere.",
+                "Saved as plain JSON at %APPDATA%\\dictate\\settings.json. "
+                "No account, no sync.",
             ),
             _text_row(
                 "Diagnostics",
-                "The debug console reports status and errors, but it does "
-                "not print the words you dictated.",
+                "Reports status and errors only — never the words you dictated.",
             ),
         )
     )
 
-    network_header = QLabel("LEAVES THIS PC")
+    network_header = QLabel("Leaves this PC")
     network_header.setProperty("role", "section")
     col.addWidget(network_header)
     col.addWidget(
         _settings_group(
             _text_row(
                 "Speech model downloads",
-                "The first time you use a speech model, its files may "
-                "download from Hugging Face. Your audio and words are "
-                "never part of that request.",
+                "Model files download from Hugging Face the first time you "
+                "use them. No audio or text is part of the request.",
             ),
             _text_row(
                 "GPU acceleration files",
-                "Switching Processing to GPU downloads NVIDIA's CUDA "
-                "runtime files from PyPI the first time, if your PC has a "
-                "supported GPU but is missing them. Again, no audio or "
-                "text is part of that request.",
+                "NVIDIA CUDA runtime files download from PyPI when you "
+                "switch to GPU processing. No audio or text is included.",
             ),
             _text_row(
                 "Update checks",
-                "Dictate asks GitHub's public release page once a day, or "
-                "whenever you click \"Check for updates,\" whether a newer "
-                "version exists. No account, hardware ID, or usage data is "
-                "sent — the same plain request any visitor's browser "
-                "would make. Turn off \"Check for updates automatically\" "
-                "in Settings and Dictate never makes this request.",
+                "Dictate asks GitHub's release page once a day whether a "
+                "newer version exists. No account, hardware ID, or usage "
+                "data is sent. Disable \"Check automatically\" to stop "
+                "these requests entirely.",
             ),
         )
     )
@@ -1144,8 +1284,8 @@ class PrivacyDialog(QDialog):
         page = QWidget()
         page.setObjectName("root")
         col = QVBoxLayout(page)
-        col.setContentsMargins(22, 20, 22, 20)
-        col.setSpacing(9)
+        col.setContentsMargins(22, 16, 22, 20)
+        col.setSpacing(8)
         scroll.setWidget(page)
 
         _populate_privacy_content(col)
@@ -1190,16 +1330,15 @@ class PrivacyPage(QWidget):
         page = QWidget()
         page.setObjectName("root")
         col = QVBoxLayout(page)
-        col.setContentsMargins(22, 20, 22, 20)
-        col.setSpacing(9)
+        col.setContentsMargins(22, 16, 22, 20)
+        col.setSpacing(8)
         scroll.setWidget(page)
 
-        back_btn = QPushButton("← Privacy")
+        back_btn = QPushButton("← Back")
         back_btn.setObjectName("backNav")
         back_btn.setCursor(Qt.PointingHandCursor)
         back_btn.clicked.connect(self.back.emit)
         col.addWidget(back_btn)
-        col.addSpacing(2)
 
         _populate_privacy_content(col)
         col.addStretch(1)
@@ -1528,6 +1667,7 @@ class SettingsWindow(QWidget):
         self._loading = True
         self._pending_reload = False
         self._has_cuda = engine_mod.cuda_available()
+        self._hardware = hardware.probe()
         self._system_dark = system_is_dark()
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -1539,7 +1679,7 @@ class SettingsWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setStyleSheet(stylesheet())
         self.setMinimumSize(760, 540)
-        self.resize(820, 620)
+        self.resize(860, 740)
         base = QFont("Segoe UI Variable Text", 9)
         self.setFont(base if base.exactMatch() else QFont("Segoe UI", 9))
 
@@ -1568,10 +1708,56 @@ class SettingsWindow(QWidget):
             toggle.set_dark(dark)
 
     def _apply_fluent_icons(self, dark: bool) -> None:
+        self._refresh_nav_icons(dark)
+        self._refresh_update_status_icon()
+        if hasattr(self, "download_overview_status"):
+            self._update_download_overview_icon(self.download_overview_status.property("tone"))
+
+    def _refresh_nav_icons(self, dark: bool | None = None) -> None:
+        """Tint the current page's own rail icon with the system accent,
+        the rest a plain neutral -- the checked row already gets a bolder
+        background and text weight from the stylesheet, but a QIcon is a
+        baked bitmap that stylesheet ``color:`` never touches, so without
+        this every icon stayed the same flat grey regardless of selection.
+        Windows Settings' own rail highlights the current icon the same way.
+        """
+        if dark is None:
+            dark = self._selected_dark()
+        accent = system_accent(dark).name()
+        current = getattr(self, "_visible_section", "dictation")
         for section, asset_name in getattr(self, "_nav_icon_names", {}).items():
-            self._nav_buttons[section].setIcon(_fluent_icon(asset_name, dark))
-        if hasattr(self, "update_status_icon"):
-            self.update_status_icon.setPixmap(_fluent_icon("updates", dark).pixmap(20, 20))
+            color = accent if section == current else None
+            self._nav_buttons[section].setIcon(
+                _fluent_icon(asset_name, dark, color=color, gap=NAV_ICON_GAP)
+            )
+
+    def _refresh_update_status_icon(self) -> None:
+        """Recolour and reshape the Updates card's own icon for whatever
+        the updater is actually reporting, instead of the same static grey
+        arrow-circle for every state -- see _UPDATE_ICON_TONES.
+        """
+        if not hasattr(self, "update_status_icon"):
+            return
+        dark = self._selected_dark()
+        state = self._updater.last_status[0] if self._updater is not None else None
+        tones = _UPDATE_ICON_TONES.get(state)
+        if tones is None:
+            # IDLE (or no updater at all): mirrors the adaptive rail's own
+            # idle branch -- a plain success check when checks are on,
+            # otherwise the neutral rotate icon while they're paused.
+            if self._updater is not None and self.auto_update_check.isChecked():
+                tones = ("check", "#6CCB5F", "#0F7B0F")
+            else:
+                self.update_status_icon.setPixmap(_fluent_icon("updates", dark).pixmap(QSize(20, 20), self.devicePixelRatioF()))
+                return
+        kind, dark_color, light_color = tones
+        color = dark_color if dark else light_color
+        icon = (
+            _fluent_icon("updates", dark, color=color)
+            if kind == "spin"
+            else _status_glyph_icon(kind, color)
+        )
+        self.update_status_icon.setPixmap(icon.pixmap(QSize(20, 20), self.devicePixelRatioF()))
 
     def set_theme(self, system_dark: bool) -> None:
         """Apply a Windows change, respecting any local appearance override."""
@@ -1693,6 +1879,30 @@ class SettingsWindow(QWidget):
                     "idle", "Up to date", tone="success"
                 )
 
+    def _update_download_overview_icon(self, tone: str) -> None:
+        """Give the rail chip's status glyph the right shape and colour for
+        its current mode -- see _DOWNLOAD_OVERVIEW_ICONS. Keyed by mode, not
+        the ``tone`` argument, because "active" (busy work) and "ready" (GPU
+        set-up available) share the accent tone but need different shapes.
+        """
+        icon_spec = _DOWNLOAD_OVERVIEW_ICONS.get(self._download_overview_mode)
+        if icon_spec is None:
+            self.download_overview_status.clear()
+            return
+        dark = self._selected_dark()
+        kind, dark_color, light_color = icon_spec
+        color = dark_color if dark else light_color
+        icon = (
+            _fluent_icon("updates", dark, color=color)
+            if kind == "spin"
+            else _status_glyph_icon(kind, color, size=20)
+        )
+        self.download_overview_status.setPixmap(icon.pixmap(QSize(20, 20), self.devicePixelRatioF()))
+        chevron_color = color if self._download_overview_mode == "restart" else ("#BDBDBD" if dark else "#616161")
+        self.download_overview_chevron.setPixmap(
+            _status_glyph_icon("chevron", chevron_color, 12).pixmap(QSize(12, 12), self.devicePixelRatioF())
+        )
+
     def _set_download_overview_active(self, active: bool, tone: str) -> None:
         """Set the status color and a gentle pulse for active work only."""
         if (
@@ -1702,9 +1912,6 @@ class SettingsWindow(QWidget):
             self.download_overview_status.setProperty("active", active)
             self.download_overview_status.setProperty("tone", tone)
             self.download_overview.setProperty("tone", tone)
-            style = self.download_overview_status.style()
-            style.unpolish(self.download_overview_status)
-            style.polish(self.download_overview_status)
             overview_style = self.download_overview.style()
             overview_style.unpolish(self.download_overview)
             overview_style.polish(self.download_overview)
@@ -1749,6 +1956,7 @@ class SettingsWindow(QWidget):
         active = mode == "active"
         self.download_overview_title.setText(title)
         self._set_download_overview_active(active, tone)
+        self._update_download_overview_icon(tone)
         summary = f"{title}. {detail}" if detail else title
         self.download_overview.setAccessibleName(summary)
         self.download_overview.setToolTip(summary)
@@ -1768,15 +1976,20 @@ class SettingsWindow(QWidget):
             self.download_overview_details.setVisible(False)
             self.download_overview_progress.setVisible(False)
 
-        sizes = {
-            "idle": QSize(156, 40),
-            "ready": QSize(156, 58),
-            "available": QSize(156, 58),
-            "error": QSize(156, 58),
-            "restart": QSize(156, 58),
-            "active": QSize(156, 68),
-        }
-        target = sizes[mode]
+        # Measure the actual QLabel wrapping, then constrain the nested layouts.
+        # A minimum-height button alone lets Qt shrink wrapped labels to fit.
+        copy_width = _OVERVIEW_COPY_WIDTH
+        title_height = _wrapped_height(self.download_overview_title, copy_width)
+        detail_height = (
+            _wrapped_height(self.download_overview_detail, copy_width) if show_details else 0
+        )
+        self.download_overview_title.setFixedHeight(title_height)
+        self.download_overview_detail.setFixedHeight(detail_height)
+        details_height = detail_height + (7 if active else 0)
+        self.download_overview_details.setFixedHeight(details_height)
+        copy_height = title_height + (3 + details_height if show_details else 0)
+        self.download_overview_copy.setFixedHeight(copy_height)
+        target = QSize(_OVERVIEW_WIDTH, max(64, 20 + copy_height))
         if self._download_overview_size_target != target:
             self._animate_download_overview_size(mode, target)
 
@@ -1861,7 +2074,7 @@ class SettingsWindow(QWidget):
 
         nav = QFrame()
         nav.setObjectName("navRail")
-        nav.setFixedWidth(184)
+        nav.setFixedWidth(208)
         nav_col = QVBoxLayout(nav)
         nav_col.setContentsMargins(14, 18, 14, 16)
         nav_col.setSpacing(4)
@@ -1893,7 +2106,7 @@ class SettingsWindow(QWidget):
             button = QPushButton(label)
             button.setObjectName("navItem")
             button.setCheckable(True)
-            button.setIconSize(QSize(20, 20))
+            button.setIconSize(QSize(20 + NAV_ICON_GAP, 20))
             button.setCursor(Qt.PointingHandCursor)
             self._nav_group.addButton(button)
             self._nav_buttons[key] = button
@@ -1970,9 +2183,9 @@ class SettingsWindow(QWidget):
         col.setSpacing(8)
         scroll.setWidget(page)
 
-        app_title = QLabel("Dictate")
+        app_title = QLabel("Dictation")
         app_title.setProperty("role", "appTitle")
-        app_desc = QLabel("Choose how Dictate listens, transcribes, and stays ready.")
+        app_desc = QLabel("Your microphone, talk key, and speech preferences.")
         app_desc.setProperty("role", "desc")
         app_desc.setWordWrap(True)
 
@@ -1984,26 +2197,31 @@ class SettingsWindow(QWidget):
         self.download_overview = QPushButton()
         self.download_overview.setObjectName("downloadOverview")
         self.download_overview.setCursor(Qt.PointingHandCursor)
-        self.download_overview.setFixedSize(156, 40)
+        self.download_overview.setFixedSize(_OVERVIEW_WIDTH, 40)
         self.download_overview.setVisible(False)
         self.download_overview.setAccessibleName("Downloads and updates")
         self.download_overview.setToolTip(
             "See current download and update activity, or open its detailed control."
         )
-        self._download_overview_size_target = QSize(156, 40)
+        self._download_overview_size_target = QSize(_OVERVIEW_WIDTH, 40)
         self._download_overview_size_anim = QParallelAnimationGroup(self)
         self._download_overview_size_anim.finished.connect(
             self._finish_download_overview_size_animation
         )
 
         download_copy = QHBoxLayout(self.download_overview)
-        download_copy.setContentsMargins(10, 7, 8, 7)
-        download_copy.setSpacing(8)
-        self.download_overview_status = QFrame()
-        self.download_overview_status.setObjectName("downloadOverviewStatus")
+        download_copy.setContentsMargins(
+            _OVERVIEW_MARGIN_LEFT, 10, _OVERVIEW_MARGIN_RIGHT, 10
+        )
+        # Spacing is set per gap, not once for the row: the glyph needs the
+        # rail's roomier icon-to-label distance, while the trailing chevron
+        # only needs enough clearance not to crowd the copy it follows.
+        download_copy.setSpacing(0)
+        # Use the same 20 px outline symbols as navigation and Updates.
+        self.download_overview_status = QLabel()
         self.download_overview_status.setProperty("active", False)
         self.download_overview_status.setProperty("tone", "muted")
-        self.download_overview_status.setFixedSize(8, 8)
+        self.download_overview_status.setFixedSize(_OVERVIEW_STATUS_PX, _OVERVIEW_STATUS_PX)
         self.download_overview_status.setAttribute(Qt.WA_TransparentForMouseEvents)
         self._download_overview_status_effect = QGraphicsOpacityEffect(
             self.download_overview_status
@@ -2022,14 +2240,20 @@ class SettingsWindow(QWidget):
             pulse.setEasingCurve(easing)
             self._download_overview_pulse.addAnimation(pulse)
         self._download_overview_pulse.setLoopCount(-1)
-        download_copy.addWidget(self.download_overview_status, 0, Qt.AlignVCenter)
+        # Windows 11 lines a leading glyph up with the first line of copy,
+        # not the middle of a block that may wrap to three lines.
+        download_copy.addWidget(self.download_overview_status, 0, Qt.AlignTop)
+        download_copy.addSpacing(_OVERVIEW_STATUS_GAP)
         self.download_overview_copy = QWidget()
         self.download_overview_copy.setAttribute(Qt.WA_TransparentForMouseEvents)
         overview_copy = QVBoxLayout(self.download_overview_copy)
         overview_copy.setContentsMargins(0, 0, 0, 0)
-        overview_copy.setSpacing(1)
+        overview_copy.setSpacing(3)
         self.download_overview_title = QLabel("Up to date")
         self.download_overview_title.setObjectName("downloadOverviewTitle")
+        self.download_overview_title.setWordWrap(True)
+        self.download_overview_title.setTextFormat(Qt.PlainText)
+        self.download_overview_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.download_overview_title.setAttribute(Qt.WA_TransparentForMouseEvents)
         overview_copy.addWidget(self.download_overview_title)
         self.download_overview_details = QWidget()
@@ -2038,6 +2262,9 @@ class SettingsWindow(QWidget):
         details_copy.setSpacing(4)
         self.download_overview_detail = QLabel("Checking download status…")
         self.download_overview_detail.setObjectName("downloadOverviewDetail")
+        self.download_overview_detail.setWordWrap(True)
+        self.download_overview_detail.setTextFormat(Qt.PlainText)
+        self.download_overview_detail.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.download_overview_detail.setAttribute(Qt.WA_TransparentForMouseEvents)
         details_copy.addWidget(self.download_overview_detail)
         self.download_overview_progress = _native_progress_bar()
@@ -2047,7 +2274,9 @@ class SettingsWindow(QWidget):
         self.download_overview_details.setVisible(False)
         overview_copy.addWidget(self.download_overview_details)
         download_copy.addWidget(self.download_overview_copy, 1)
-        self.download_overview_chevron = QLabel("›")
+        download_copy.addSpacing(_OVERVIEW_CHEVRON_GAP)
+        self.download_overview_chevron = QLabel()
+        self.download_overview_chevron.setFixedSize(_OVERVIEW_CHEVRON_PX, _OVERVIEW_CHEVRON_PX)
         self.download_overview_chevron.setObjectName("downloadOverviewChevron")
         self.download_overview_chevron.setAttribute(Qt.WA_TransparentForMouseEvents)
         download_copy.addWidget(self.download_overview_chevron, 0, Qt.AlignVCenter)
@@ -2061,15 +2290,16 @@ class SettingsWindow(QWidget):
         self.mic_box.setFixedWidth(200)
         _fill_microphone_box(self.mic_box, self._settings.input_device)
         self.mic_box.currentIndexChanged.connect(self._queue_save)
-        mic_row = _card("Microphone", "The microphone Dictate listens to.", self.mic_box)
+        mic_row = _card("Microphone", "Choose where Dictate listens.", self.mic_box)
 
         self.ptt_edit = BindingCapture(self._settings.ptt_key)
+        self.ptt_edit.setToolTip("Click to change. Press a key or mouse button, or hold inputs together for a combination.")
         self.ptt_edit.bindingChanged.connect(self._queue_save)
         self.ptt_edit.bindingChanged.connect(self._refresh_tap_lock_desc)
         self.ptt_edit.captureActive.connect(self.capture_active.emit)
         ptt_row = _card(
             "Hold to talk",
-            "Click, then press a key or mouse button. Hold inputs together for a combination.",
+            "Hold the key, speak, then release.",
             self.ptt_edit,
         )
 
@@ -2082,21 +2312,32 @@ class SettingsWindow(QWidget):
         )
         self.tap_lock_desc_label = self.tap_lock_row.findChild(QLabel, "desc")
 
-        self.mode_box = QComboBox()
-        for value, label, _model, _device in config.TRANSCRIPTION_MODES:
-            self.mode_box.addItem(label, value)
-        self.mode_box.addItem("Custom (Advanced)", "custom")
-        custom_item = self.mode_box.model().item(self.mode_box.findData("custom"))
-        if custom_item is not None:
-            custom_item.setEnabled(False)
-        self.mode_box.setFixedWidth(200)
-        self.mode_box.currentIndexChanged.connect(self._on_mode_changed)
-        mode_row = _card(
-            "Transcription mode",
-            "Everyday is the best fit for normal dictation.",
-            self.mode_box,
+        # Where dictation runs and which speech model it uses are the main
+        # sentence for how dictation actually behaves, so both live in
+        # Essentials, not behind Advanced -- as two plain, direct choices
+        # rather than one combined "Speed & accuracy" abstraction. Matches
+        # the Microphone combo above them.
+        self.device_box = QComboBox()
+        self.device_box.setFixedWidth(200)
+        self._populate_device_choices()
+        self.device_box.currentIndexChanged.connect(self._on_device_changed)
+        device_row = _card(
+            "Processing",
+            "Where Dictate runs the speech model.",
+            self.device_box,
         )
-        self.mode_desc_label = mode_row.findChild(QLabel, "desc")
+        self.device_desc_label = device_row.findChild(QLabel, "desc")
+
+        self.model_box = QComboBox()
+        self.model_box.setFixedWidth(200)
+        self._populate_model_choices()
+        self.model_box.currentIndexChanged.connect(self._on_model_changed)
+        model_row = _card(
+            "Model",
+            "Which speech model to use.",
+            self.model_box,
+        )
+        self.model_desc_label = model_row.findChild(QLabel, "desc")
 
         # This row appears for the first local download as well as an
         # intentional model change. It sits in Essentials so a new user sees
@@ -2117,7 +2358,7 @@ class SettingsWindow(QWidget):
         self._update_vocabulary_button()
         vocabulary_row = _card(
             "Words I use",
-            "Names, brands, and terms Dictate should recognize more reliably.",
+            "Help Dictate recognize names and uncommon terms.",
             self.vocabulary_btn,
         )
 
@@ -2138,16 +2379,15 @@ class SettingsWindow(QWidget):
         self.sleep_slider.valueChanged.connect(self._queue_save)
         sleep_after_row = _card(
             "Sleep after",
-            "Moving this shows the normal default value.",
+            "How long to wait before releasing model memory.",
             self.sleep_slider,
         )
 
         self.sound_check = ToggleSwitch(self._settings.sound_cues)
         self.sound_check.toggled.connect(self._queue_save)
         sound_row = _card(
-            "Sounds",
-            "A short tone when Dictate starts listening, and another when it "
-            "starts turning your speech into text.",
+            "Recording sounds",
+            "A short cue when recording starts and finishes.",
             self.sound_check,
         )
 
@@ -2155,22 +2395,32 @@ class SettingsWindow(QWidget):
         self.startup_check.toggled.connect(self._queue_save)
         startup_row = _card(
             "Start with Windows",
-            "Keep Dictate ready without opening it manually.",
+            "Keep Dictate ready after you sign in.",
             self.startup_check,
         )
         self.startup_desc_label = startup_row.findChild(QLabel, "desc")
-        self.essentials_group = _settings_group(
-            mic_row,
-            ptt_row,
-            self.tap_lock_row,
-            mode_row,
-            self.model_download_row,
-            vocabulary_row,
-            sleep_row,
-            sleep_after_row,
-            sound_row,
-            startup_row,
-        )
+
+        # Ten rows in one undivided list is past the point where anyone scans
+        # rather than reads. Split them along the promise the page title just
+        # made -- "listens, transcribes, and stays ready" -- so the headings
+        # answer a question the reader already has, and no group exceeds four
+        # rows. Headings sit outside the frames, matching ACTIVITY BAR below.
+        self.essentials_group = QWidget()
+        essentials = QVBoxLayout(self.essentials_group)
+        essentials.setContentsMargins(0, 0, 0, 0)
+        essentials.setSpacing(8)
+        for heading, rows in (
+            ("Recording", (mic_row, ptt_row, self.tap_lock_row)),
+            (
+                "Transcription",
+                (device_row, model_row, self.model_download_row, vocabulary_row),
+            ),
+            ("Stay ready", (sound_row, startup_row)),
+        ):
+            label = QLabel(heading)
+            label.setProperty("role", "section")
+            essentials.addWidget(label)
+            essentials.addWidget(_settings_group(*rows))
         col.addWidget(self.essentials_group)
 
         self.advanced_btn = ExpanderHeader("Advanced settings")
@@ -2182,32 +2432,21 @@ class SettingsWindow(QWidget):
         advanced_col.setContentsMargins(0, 0, 0, 0)
         advanced_col.setSpacing(8)
 
-        performance_header = QLabel("PERFORMANCE")
+        memory_header = QLabel("Memory")
+        memory_header.setProperty("role", "section")
+        advanced_col.addWidget(memory_header)
+        advanced_col.addWidget(_settings_group(sleep_row, sleep_after_row))
+
+        performance_header = QLabel("GPU acceleration")
         performance_header.setProperty("role", "section")
         advanced_col.addWidget(performance_header)
 
-        self.device_box = QComboBox()
-        for value, _desc in config.DEVICES:
-            self.device_box.addItem(
-                {"auto": "Automatic", "cuda": "GPU", "cpu": "CPU"}[value], value
-            )
-        self.device_box.setFixedWidth(150)
-        self.device_box.currentIndexChanged.connect(self._on_advanced_model_changed)
-        self._update_gpu_choices()
-        device_desc = "Automatic, GPU, or CPU. GPU is fastest but uses VRAM."
-        if gpu_runtime.needs_download(gpu_available=self._has_cuda):
-            device_desc = (
-                "Automatic stays on CPU until GPU acceleration is installed. "
-                "Download now downloads the files (about 1.3 GB)."
-            )
-        device_row = _card("Processing", device_desc, self.device_box)
-        self.device_desc_label = device_row.findChild(QLabel, "desc")
-
         # A dedicated call-to-action for GPU acceleration, separate from the
-        # Processing dropdown above: if the GPU files were skipped during
-        # installation, GPU-only choices stay greyed out until this explicit
-        # download finishes. That prevents a first dictation from unexpectedly
-        # starting a 1.3 GB download or pretending it is already on GPU.
+        # Processing choice in Essentials above: if the GPU files were
+        # skipped during installation, the GPU option there stays greyed out
+        # until this explicit download finishes. That prevents a first
+        # dictation from unexpectedly starting a 1.3 GB download or
+        # pretending it is already on GPU.
         self.gpu_download_btn = QPushButton("Download now")
         self.gpu_download_btn.clicked.connect(self._start_gpu_download_clicked)
         self.gpu_download_row = _card(
@@ -2222,14 +2461,6 @@ class SettingsWindow(QWidget):
         self.gpu_download_row.setVisible(False)
         self.gpu_download_progress_row.setVisible(False)
 
-        self.model_box = QComboBox()
-        for value, _desc in config.MODELS:
-            self.model_box.addItem(MODEL_LABELS.get(value, value), value)
-        self.model_box.setFixedWidth(150)
-        self.model_box.currentIndexChanged.connect(self._on_model_changed)
-        self.model_card = _card("Speech model", "Model details", self.model_box)
-        self.model_desc_label = self.model_card.findChild(QLabel, "desc")
-
         self.open_models_btn = QPushButton("Open model folder")
         self.open_models_btn.clicked.connect(self._open_model_folder)
         model_storage_row = _card(
@@ -2241,15 +2472,13 @@ class SettingsWindow(QWidget):
 
         advanced_col.addWidget(
             _settings_group(
-                device_row,
                 self.gpu_download_row,
                 self.gpu_download_progress_row,
-                self.model_card,
                 model_storage_row,
             )
         )
 
-        behavior_header = QLabel("SHORTCUTS")
+        behavior_header = QLabel("Shortcuts")
         behavior_header.setProperty("role", "section")
         advanced_col.addWidget(behavior_header)
 
@@ -2287,7 +2516,7 @@ class SettingsWindow(QWidget):
         self._advanced_motion.finished.connect(self._on_advanced_anim_finished)
         col.addWidget(self.advanced_panel)
 
-        activity_header = QLabel("ACTIVITY BAR")
+        activity_header = QLabel("Activity Bar")
         activity_header.setProperty("role", "section")
         col.addWidget(activity_header)
         self.activity_header = activity_header
@@ -2351,7 +2580,7 @@ class SettingsWindow(QWidget):
         # already open, and update results all route through the same
         # App._notify() helper in main.py. Placed before Dictate Update
         # rather than folded into that card, since it isn't update-specific.
-        notifications_header = QLabel("NOTIFICATIONS")
+        notifications_header = QLabel("Notifications")
         notifications_header.setProperty("role", "section")
         col.addWidget(notifications_header)
         self.system_notifications_check = ToggleSwitch(
@@ -2368,7 +2597,7 @@ class SettingsWindow(QWidget):
         self.notifications_group = _settings_group(system_notifications_row)
         col.addWidget(self.notifications_group)
 
-        appearance_header = QLabel("APPEARANCE")
+        appearance_header = QLabel("Appearance")
         appearance_header.setProperty("role", "section")
         col.addWidget(appearance_header)
         self.appearance_header = appearance_header
@@ -2389,7 +2618,7 @@ class SettingsWindow(QWidget):
 
         # Updates gets a dedicated rail destination, so the primary action is
         # prominent without being buried in a long general-settings document.
-        updates_header = QLabel("DICTATE UPDATE")
+        updates_header = QLabel("Dictate Update")
         updates_header.setProperty("role", "section")
         col.addWidget(updates_header)
         self.updates_header = updates_header
@@ -2504,7 +2733,7 @@ class SettingsWindow(QWidget):
         )
 
         self._updates_page, updates_col = new_page()
-        update_preferences_header = QLabel("UPDATE SETTINGS")
+        update_preferences_header = QLabel("Update Settings")
         update_preferences_header.setProperty("role", "section")
         finish_page(
             self._updates_page,
@@ -2551,82 +2780,82 @@ class SettingsWindow(QWidget):
 
     # --- behaviour ---
 
-    def _model_desc(self) -> str:
-        chosen = self.model_box.currentData()
-        for value, desc in config.MODELS:
-            if value == chosen:
-                # Not .capitalize() -- that would lowercase the rest and turn
-                # "~600 MB" into "~600 mb".
-                return f"Bigger is more accurate and slower. {desc[0].upper()}{desc[1:]}."
-        return "Bigger is more accurate and slower to run."
+    def _gpu_ready(self) -> bool:
+        return self._has_cuda and not gpu_runtime.needs_download(gpu_available=True)
+
+    def _populate_device_choices(self) -> None:
+        """CPU always works; GPU is disabled until its runtime is ready."""
+        self.device_box.clear()
+        for value, label in config.DEVICES:
+            self.device_box.addItem(label, value)
+        index = self.device_box.findData("cuda")
+        if index >= 0:
+            item = self.device_box.model().item(index)
+            gpu_selectable = self._has_cuda and self._gpu_ready()
+            item.setEnabled(gpu_selectable)
+            if not self._has_cuda:
+                item.setToolTip("No supported NVIDIA GPU was found on this PC.")
+            elif not gpu_selectable:
+                item.setToolTip("Set up GPU acceleration first to use this option.")
+
+    def _populate_model_choices(self) -> None:
+        for size, summary in config.MODELS:
+            self.model_box.addItem(config.model_display_name(size), size)
+            self.model_box.setItemData(
+                self.model_box.count() - 1, summary, Qt.ToolTipRole
+            )
+
+    def _device_description(self) -> str:
+        """One short line: which real hardware this choice runs on, or why
+        GPU isn't available yet."""
+        if self._has_cuda and not self._gpu_ready():
+            return (
+                "Set up GPU acceleration in Advanced settings to use "
+                "your graphics card."
+            )
+        if self.device_box.currentData() == "cuda" and self._hardware.has_gpu_details:
+            return self._hardware.gpu_name
+        return self._hardware.cpu_name or "Where Dictate runs the speech model."
+
+    def _model_description(self) -> str:
+        size = self.model_box.currentData()
+        for value, summary in config.MODELS:
+            if value == size:
+                return summary
+        return "Which speech model to use."
+
+    def _on_device_changed(self, *_args) -> None:
+        if self._loading:
+            return
+        self._update_device_description()
+        self._queue_save()
 
     def _on_model_changed(self, *_args) -> None:
-        if self.model_desc_label is not None:
-            self.model_desc_label.setText(self._model_desc())
-        self._on_advanced_model_changed()
-
-    def _on_advanced_model_changed(self, *_args) -> None:
         if self._loading:
             return
-        self._sync_mode_from_advanced()
+        self._update_model_description()
         self._queue_save()
 
-    def _on_mode_changed(self, *_args) -> None:
-        if self._loading:
-            return
-        chosen = config.transcription_mode_settings(self.mode_box.currentData())
-        if chosen is None:
-            return
-        model_size, device = chosen
-        blocked_device = self.device_box.blockSignals(True)
-        blocked_model = self.model_box.blockSignals(True)
-        self.device_box.setCurrentIndex(max(0, self.device_box.findData(device)))
-        self.model_box.setCurrentIndex(max(0, self.model_box.findData(model_size)))
-        self.device_box.blockSignals(blocked_device)
-        self.model_box.blockSignals(blocked_model)
+    def _update_device_description(self) -> None:
+        if self.device_desc_label is not None:
+            self.device_desc_label.setText(self._device_description())
+
+    def _update_model_description(self) -> None:
         if self.model_desc_label is not None:
-            self.model_desc_label.setText(self._model_desc())
-        self._update_mode_desc()
-        self._queue_save()
+            self.model_desc_label.setText(self._model_description())
 
-    def _sync_mode_from_advanced(self) -> None:
-        mode = config.transcription_mode_for(
-            self.model_box.currentData(), self.device_box.currentData()
-        )
-        blocked = self.mode_box.blockSignals(True)
-        self.mode_box.setCurrentIndex(max(0, self.mode_box.findData(mode)))
-        self.mode_box.blockSignals(blocked)
-        self._update_mode_desc()
-
-    def _update_mode_desc(self) -> None:
-        descriptions = {
-            "balanced": "Best for everyday dictation without using the GPU.",
-            "faster": "Uses the GPU for the shortest wait after you release the key.",
-            "accurate": "Uses a larger model for names, accents, and difficult audio.",
-            "max": "Uses Dictate's largest model for the hardest audio. NVIDIA GPU required.",
-            "custom": "Advanced model and processing choices are active.",
-        }
-        if self.mode_desc_label is not None:
-            self.mode_desc_label.setText(
-                descriptions.get(self.mode_box.currentData(), descriptions["balanced"])
+    def _update_processing_choices(self) -> None:
+        """Refresh GPU availability after GPU acceleration is installed."""
+        index = self.device_box.findData("cuda")
+        if index >= 0:
+            item = self.device_box.model().item(index)
+            gpu_selectable = self._has_cuda and self._gpu_ready()
+            item.setEnabled(gpu_selectable)
+            item.setToolTip(
+                "" if gpu_selectable
+                else "Set up GPU acceleration first to use this option."
             )
-
-    def _update_gpu_choices(self) -> None:
-        """Keep GPU-only choices unavailable until their runtime is present."""
-        ready = self._has_cuda and not gpu_runtime.needs_download(gpu_available=True)
-        device_item = self.device_box.model().item(self.device_box.findData("cuda"))
-        if device_item is not None:
-            device_item.setEnabled(ready)
-            device_item.setToolTip(
-                "" if ready else "Install GPU acceleration first to use this option."
-            )
-        for value in ("faster", "max"):
-            item = self.mode_box.model().item(self.mode_box.findData(value))
-            if item is not None:
-                item.setEnabled(ready)
-                item.setToolTip(
-                    "" if ready else "Install GPU acceleration first to use this mode."
-                )
+        self._update_device_description()
 
     def _start_gpu_download_clicked(self) -> None:
         """Start the GPU-runtime download, and put the button back if it can't.
@@ -2665,7 +2894,7 @@ class SettingsWindow(QWidget):
             return
         downloading, progress = getattr(self._engine, "gpu_status", (False, None))
         needs = gpu_runtime.needs_download(gpu_available=True)
-        self._update_gpu_choices()
+        self._update_processing_choices()
         visible = needs or downloading
         self.gpu_download_row.setVisible(visible)
         self.gpu_download_progress_row.setVisible(visible)
@@ -2684,6 +2913,13 @@ class SettingsWindow(QWidget):
                     f"Downloading{pct} — Dictate keeps using CPU until this finishes."
                 )
         elif needs:
+            error = getattr(self._engine, "gpu_error", "")
+            if isinstance(error, str) and error:
+                self.gpu_download_btn.setEnabled(True)
+                self.gpu_download_btn.setText("Try again")
+                if self.gpu_download_desc_label is not None:
+                    self.gpu_download_desc_label.setText(error)
+                return
             self.gpu_download_btn.setEnabled(True)
             self.gpu_download_btn.setText("Download now")
             if self.gpu_download_desc_label is not None:
@@ -2694,7 +2930,7 @@ class SettingsWindow(QWidget):
 
     def _update_vocabulary_button(self) -> None:
         count = len(self._vocabulary)
-        self.vocabulary_btn.setText("Add words" if count == 0 else f"Edit ({count})")
+        self.vocabulary_btn.setText("Edit words" if count == 0 else f"Edit words ({count})")
 
     def _edit_vocabulary(self) -> None:
         self._vocabulary_origin_scroll = self._scroll.verticalScrollBar().value()
@@ -2830,6 +3066,7 @@ class SettingsWindow(QWidget):
         self._page_fade.setStartValue(0.58)
         self._page_fade.setEndValue(1.0)
         self._visible_section = section
+        self._refresh_nav_icons()
         self._page_motion.start()
 
     def _navigate_to_section(self, section: str) -> None:
@@ -2957,6 +3194,7 @@ class SettingsWindow(QWidget):
                 or (auto_update_on and not update_busy)
             )
             self._set_update_button_state(u_state)
+            self._refresh_update_status_icon()
             self.update_meta_label.setText(self._update_meta_text())
             update_title = {
                 updater_mod.CHECKING: "Checking for updates",
@@ -3050,14 +3288,14 @@ class SettingsWindow(QWidget):
             if state == engine_mod.READY:
                 self._pending_reload = False
                 self.reload_progress.setVisible(False)
-                self._update_mode_desc()
+                self._update_model_description()
                 return
             if state == engine_mod.ERROR:
                 self._pending_reload = False
                 self.reload_progress.setVisible(False)
-                if self.mode_desc_label is not None:
-                    self.mode_desc_label.setText(
-                        "The speech model could not load. Choose another mode or try again."
+                if self.model_desc_label is not None:
+                    self.model_desc_label.setText(
+                        "Dictate could not load this choice. Pick another model or device and try again."
                     )
                 return
         else:
@@ -3069,8 +3307,7 @@ class SettingsWindow(QWidget):
             self.ptt_edit.binding() or self._settings.ptt_key or config.DEFAULT_PTT_KEY
         )
         return (
-            f"Tap {key} instead of holding it and Dictate keeps recording. "
-            f"Tap again to finish, or press Esc to discard it."
+            f"Tap {key} again to finish. Esc cancels."
         )
 
     def _open_model_folder(self) -> None:
@@ -3100,10 +3337,12 @@ class SettingsWindow(QWidget):
         self._queue_save()
 
     def _collect_settings(self) -> config.Settings:
+        model_size = self.model_box.currentData() or self._settings.model_size
+        device = self.device_box.currentData() or self._settings.device
         return replace(
             self._settings,
-            device=self.device_box.currentData(),
-            model_size=self.model_box.currentData(),
+            device=device,
+            model_size=model_size,
             input_device=self.mic_box.currentData() or "",
             sleep_enabled=self.sleep_check.isChecked(),
             sound_cues=self.sound_check.isChecked(),
@@ -3142,7 +3381,7 @@ class SettingsWindow(QWidget):
         if new.start_with_windows != old.start_with_windows:
             if self.startup_desc_label is not None:
                 self.startup_desc_label.setText(
-                    "Keep Dictate ready without opening it manually."
+                    "Keep Dictate ready after you sign in."
                 )
             try:
                 startup_mod.set_enabled(new.start_with_windows)
@@ -3165,8 +3404,8 @@ class SettingsWindow(QWidget):
         self.changed.emit(new)  # main.py wires this to engine/hotkeys/bar/tray
         if needs_reload:
             self._pending_reload = True
-            if self.mode_desc_label is not None:
-                self.mode_desc_label.setText("Updating the speech model…")
+            if self.model_desc_label is not None:
+                self.model_desc_label.setText("Updating processing…")
             self._engine.preload()
         else:
             self._pending_reload = False
@@ -3174,10 +3413,12 @@ class SettingsWindow(QWidget):
     def _load_widgets(self, s: config.Settings) -> None:
         """Push settings values into the controls without staging a change."""
         self._loading = True
-        self.device_box.setCurrentIndex(max(0, self.device_box.findData(s.device)))
-        self.model_box.setCurrentIndex(max(0, self.model_box.findData(s.model_size)))
-        if self.model_desc_label is not None:
-            self.model_desc_label.setText(self._model_desc())
+        device_index = self.device_box.findData(s.device)
+        self.device_box.setCurrentIndex(max(0, device_index))
+        model_index = self.model_box.findData(s.model_size)
+        self.model_box.setCurrentIndex(max(0, model_index))
+        self._update_device_description()
+        self._update_model_description()
         self.sleep_check.setChecked(s.sleep_enabled)
         self.sleep_slider.setValue(s.sleep_after_minutes)
         self.sleep_slider.setEnabled(s.sleep_enabled)
@@ -3196,7 +3437,6 @@ class SettingsWindow(QWidget):
         self.auto_update_check.setChecked(s.auto_update_enabled)
         self.system_notifications_check.setChecked(s.system_notifications_enabled)
         self.theme_box.setCurrentIndex(max(0, self.theme_box.findData(s.theme_mode)))
-        self._sync_mode_from_advanced()
         self._loading = False
 
     def showEvent(self, event) -> None:

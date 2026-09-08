@@ -42,10 +42,10 @@ MODELS = [
 # surface should use the compact names below instead of exposing identifiers
 # like ``small.en`` or ``large-v3-turbo``.
 MODEL_DISPLAY_NAMES = {
-    "tiny.en": "Tiny English",
-    "base.en": "Base English",
-    "small.en": "Small English",
-    "medium.en": "Medium English",
+    "tiny.en": "Tiny",
+    "base.en": "Base",
+    "small.en": "Small",
+    "medium.en": "Medium",
     "large-v3-turbo": "Large v3 Turbo",
 }
 
@@ -54,34 +54,15 @@ def model_display_name(model_size: str) -> str:
     """Return a concise human-facing name for a faster-whisper model."""
     return MODEL_DISPLAY_NAMES.get(model_size, model_size)
 
+# Where Dictate runs the speech model. Deliberately just these two -- no
+# "Automatic" -- so the choice on screen matches the choice actually saved;
+# engine.resolve_device still treats an old settings file's "auto" the same
+# as "cuda" (GPU if ready, CPU fallback otherwise) for anyone upgrading from
+# before this was simplified.
 DEVICES = [
-    ("auto", "Use the GPU when it is available"),
-    ("cuda", "GPU (NVIDIA) -- fastest, holds VRAM while loaded"),
-    ("cpu", "CPU -- leaves VRAM free, still fast on your Ryzen"),
+    ("cpu", "CPU"),
+    ("cuda", "GPU (NVIDIA)"),
 ]
-
-# Outcome-based choices shown on the main Settings page. The raw model and
-# processing device remain available under Advanced settings.
-TRANSCRIPTION_MODES = [
-    ("balanced", "Everyday (recommended)", "small.en", "cpu"),
-    ("faster", "Fast response", "small.en", "cuda"),
-    ("accurate", "Best accuracy", "medium.en", "auto"),
-    ("max", "Max accuracy", "large-v3-turbo", "cuda"),
-]
-
-
-def transcription_mode_settings(mode: str) -> tuple[str, str] | None:
-    for value, _label, model_size, device in TRANSCRIPTION_MODES:
-        if value == mode:
-            return model_size, device
-    return None
-
-
-def transcription_mode_for(model_size: str, device: str) -> str:
-    for value, _label, mode_model, mode_device in TRANSCRIPTION_MODES:
-        if (model_size, device) == (mode_model, mode_device):
-            return value
-    return "custom"
 
 
 # The talk key lives here and nowhere else, so "the default is F9" is one
@@ -164,7 +145,7 @@ def _as_choice(value: object, allowed: set[str], default: str) -> str:
 @dataclass
 class Settings:
     # --- model ---
-    device: str = "cpu"          # auto | cuda | cpu
+    device: str = "cpu"          # cpu | cuda -- an old file's "auto" clamps to cpu below
     model_size: str = "small.en"
 
     # --- lifecycle ---

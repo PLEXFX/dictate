@@ -27,7 +27,7 @@ from ctypes import wintypes
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
@@ -69,6 +69,22 @@ UPDATED_WINDOW_READY_EVENT = "Local\\DictateUpdatedWindowReady"
 # transcribes what it has. A hold is bounded by the user's finger; a lock is
 # not, so a forgotten one would otherwise hold the microphone open all day.
 MAX_LOCKED_SECONDS = 5 * 60
+
+# Both microphone-error paths land on the same short label: a device that
+# never opens (mic.start() raised) and one that opens but streams nothing
+# real (live silence check below, or the post-release fallback) are the same
+# problem to the person holding the key, so they should read as the same
+# message rather than two differently worded guesses.
+NO_MIC_TEXT = "No microphone detected."
+
+# _check_live_silence waits this long after a hold starts before judging it
+# silent, so the mic driver waking up and an ordinary breath before speaking
+# never look like a dead microphone. After that, it only needs to see this
+# much more near-silent audio to decide -- short enough to catch a broken
+# mic while the person is still mid-sentence instead of making them finish
+# talking and let go first.
+LIVE_SILENCE_GRACE_SECONDS = 0.7
+LIVE_SILENCE_WINDOW_SECONDS = 0.7
 
 # How long "Undo last dictation" stays on offer. Dictate cannot read another
 # app's undo history, so it can never *prove* its paste is still the top of
@@ -239,6 +255,103 @@ def make_icon(color: QColor = QColor(76, 194, 255)) -> QIcon:
     return QIcon(pixmap)
 
 
+# The native pixel sizes Windows can ask a tray icon for, across every common
+# display scale (100% through 250%, including 28 for 175%) plus every larger
+# size icon.ico itself ships (a hover/peek surface can request one). The two
+# tray icons -- plain and the update-available badge -- must register the
+# *exact* same size list: Thomas reported them looking like two different
+# sizes, and the actual bug was that update_badged_icon only ever pre-baked
+# this narrower list while the plain tray icon was built straight from
+# self.icon, which also carries icon.ico's 96/128/256 frames. Any size
+# Windows asked for that fell outside the narrower list made the two icons
+# resolve through different fallback scaling and could visibly disagree.
+# tray_icon and update_badged_icon now both build from this one list, so the
+# two states can no longer diverge, at any size either is ever asked for.
+_TRAY_ICON_SIZES = (16, 20, 24, 28, 32, 40, 48, 64, 96, 128, 256)
+
+# The app's own logo art (icon.ico) is drawn edge to edge with no breathing
+# room, which is fine for a taskbar/alt-tab icon but reads oversized next to
+# other apps' tray icons, which all keep a small margin. This is how much of
+# the tray icon's canvas the glyph actually fills once tray_icon insets it.
+_TRAY_GLYPH_FILL = 0.82
+
+
+def tray_icon(base: QIcon) -> QIcon:
+    """The tray's own presentation of the app icon: the same art as the
+    window icon, inset with a small transparent margin at every native tray
+    size instead of filling the slot edge to edge.
+
+    Exists as a separate icon from ``self.icon`` (used for the window/taskbar
+    icon, which stays full-bleed) for two reasons: it makes the tray icon
+    read at the same visual weight as its neighbours instead of looking
+    oversized, and it gives update_badged_icon's corner dot genuine empty
+    space to sit in rather than overlapping the artwork -- the plain and
+    badged tray icons share this exact same inset base, so switching between
+    them (see main.App._refresh_tray_update_indicator) never changes the
+    glyph's own size, only whether the dot is present.
+    """
+    icon = QIcon()
+    for size in _TRAY_ICON_SIZES:
+        glyph = size * _TRAY_GLYPH_FILL
+        offset = (size - glyph) / 2.0
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        # Source rect is the *actual* returned pixmap's own size, not the
+        # requested one -- QIcon.pixmap() never upscales past whatever its
+        # largest real source frame is, so a base lacking a frame at this
+        # size (or above) hands back something smaller than `size`. Sourcing
+        # from the requested size regardless used to paint from a bogus
+        # oversized rect and leave everything past the real frame blank.
+        # These are physical ICO frames. The implicit overload applies the
+        # current screen DPR and would resize frames again at 125/150/200%.
+        source = base.pixmap(QSize(size, size), 1.0)
+        painter.drawPixmap(
+            QRectF(offset, offset, glyph, glyph),
+            source,
+            QRectF(0, 0, source.width(), source.height()),
+        )
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
+def update_badged_icon(base: QIcon) -> QIcon:
+    """An amber corner dot, rendered at native tray sizes with a dark keyline.
+
+    ``base`` is expected to already be ``tray_icon(...)``'s inset result, not
+    the raw window icon -- the dot's own coordinates are fixed to the full
+    canvas corner and rely on that margin being empty.
+
+    The dot's outer edge sits at 18.5 of the 20-unit canvas -- inside the
+    same margin band ``tray_icon``'s own 0.82 fill leaves around the glyph
+    (whose edge falls at 18.2), rather than reaching all the way to 19.5/20
+    (the canvas edge, sometimes the literal last pixel at small tray sizes).
+    Thomas reported the badged icon looking like a different size from the
+    plain one; the actual bug was that the old coordinates let the dot hug
+    the canvas corner with almost no margin while the plain glyph keeps a
+    visible one, so the two states read as different overall icon sizes even
+    though the glyph itself never moves or resizes between them.
+    """
+    icon = QIcon()
+    for size in _TRAY_ICON_SIZES:
+        # Match the plain icon's physical pixels, independent of monitor DPI.
+        pixmap = base.pixmap(QSize(size, size), 1.0)
+        pixmap.setDevicePixelRatio(1.0)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.scale(pixmap.width() / 20.0, pixmap.height() / 20.0)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#202020"))
+        painter.drawEllipse(QRectF(12.5, 12.5, 6, 6))
+        painter.setBrush(QColor("#FFB900"))
+        painter.drawEllipse(QRectF(13.3, 13.3, 4.4, 4.4))
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
 def _tray_tip(settings) -> str:
     """One sentence for the tray icon, naming whichever gestures are live."""
     key = hotkeys_mod.format_combo(settings.ptt_key)
@@ -302,7 +415,9 @@ class App:
         self._apply_appearance()
         self._busy = False
         self._dictation_active = False  # mic open or its captured audio is still processing
+        self._live_silence_reported = False  # _check_live_silence already ended this hold
         self._ptt_preload_pending = False  # background warm-up started by a PTT press
+        self._startup_preload_pending = False  # silent warm-up started after sign-in
         self._start_cue_at = 0.0  # when the "start" cue began, so "lock" can wait it out
         self._reload_pending = False  # set only by a Settings-triggered reload
         self._gpu_download_showing = False  # bar is currently reflecting a GPU download
@@ -411,8 +526,8 @@ class App:
             enabled=self.settings.auto_update_enabled,
         )
 
-        if not self.settings.sleep_enabled:
-            self.engine.preload()
+        self._refresh_tray_update_indicator()
+        self._warm_after_launch()
         if self.settings.always_visible:
             self.bar.set_state("idle")
             self.bar.show_bar()
@@ -427,6 +542,18 @@ class App:
             # case, which otherwise has no visible confirmation at all since
             # Dictate opens straight to the tray with no window.
             QTimer.singleShot(500, self._show_ready_notice)
+
+    def _warm_after_launch(self) -> None:
+        """Remove Windows sign-in's first-use penalties before the talk key.
+
+        Both the speech model and PortAudio can be cold after a restart. Keep
+        this silent and asynchronous; the normal idle timer still unloads the
+        model after the person's configured rest period.
+        """
+        if not self.settings.onboarding_complete:
+            return
+        self._startup_preload_pending = self.engine.preload()
+        threading.Thread(target=self.mic.warm_up, daemon=True).start()
 
     # --- tray ---
 
@@ -444,7 +571,13 @@ class App:
             self._apply_appearance()
 
     def _build_tray(self) -> None:
-        self.tray = QSystemTrayIcon(self.icon)
+        self._tray_update_badged = False
+        # A dedicated, inset copy of the icon for the tray specifically (see
+        # tray_icon's own docstring) -- self.icon itself stays full-bleed and
+        # keeps going to the window/taskbar icon below.
+        self._tray_icon = tray_icon(self.icon)
+        self._tray_update_icon = update_badged_icon(self._tray_icon)
+        self.tray = QSystemTrayIcon(self._tray_icon)
         self.tray.setToolTip(_tray_tip(self.settings))
 
         menu = QMenu()
@@ -630,7 +763,7 @@ class App:
         except Exception as exc:
             self._dictation_active = False
             self.hotkeys.cancel_lock()
-            self.bar.set_state("error", "No microphone")
+            self.bar.set_state("error", NO_MIC_TEXT)
             print(f"[dictate] mic error: {exc}")
             return
         # After the stream is open, so a machine with a slow audio device
@@ -692,6 +825,13 @@ class App:
         print("[dictate] recording cancelled")
 
     def _stop_listening(self, duration: float) -> None:
+        if self._live_silence_reported:
+            # _check_live_silence already ended this hold and put the error
+            # on the bar while the key was still down; the real release just
+            # arrived a moment later and the recording it thinks it is ending
+            # is already gone -- nothing left to do.
+            self._live_silence_reported = False
+            return
         if self._busy:
             # _start_listening declined this press because the previous
             # dictation is still being transcribed and pasted, so there is no
@@ -709,7 +849,7 @@ class App:
             return
         if audio_mod.rms_level(clip) < audio_mod.SILENCE_RMS_THRESHOLD:
             self._dictation_active = False
-            self.bar.set_state("error", "No audio detected — check your microphone")
+            self.bar.set_state("error", NO_MIC_TEXT)
             return
         self._busy = True
         # Only once there is really something to transcribe: a tap too short
@@ -779,6 +919,41 @@ class App:
 
     def _pump_meter(self) -> None:
         self.bar.set_levels(self.meter.update(self.mic.latest_window()))
+        self._check_live_silence()
+
+    def _check_live_silence(self) -> None:
+        """Catch a mic that is open but delivering nothing, while the key is
+        still held, instead of waiting for release.
+
+        A muted or disconnected device streams near-zero samples for the
+        whole hold and used to only get caught by the rms check at the end of
+        _stop_listening -- which meant a person talking into a dead mic had
+        to finish the sentence and let go before finding out. This runs the
+        same check continuously against a trailing window of what has
+        actually arrived, so it fires the moment enough real silence has
+        accumulated instead of after the fact.
+        """
+        if not self._dictation_active:
+            return
+        if time.monotonic() - self._start_cue_at < LIVE_SILENCE_GRACE_SECONDS:
+            return
+        recent = self.mic.snapshot(max_seconds=LIVE_SILENCE_WINDOW_SECONDS)
+        if recent.size == 0 or audio_mod.rms_level(recent) >= audio_mod.SILENCE_RMS_THRESHOLD:
+            return
+        self._live_silence_reported = True
+        self.lock_limit_timer.stop()
+        self.meter_timer.stop()
+        self.mic.stop()
+        # Resets any tap-to-lock state so a stray later press starts a fresh
+        # dictation instead of thinking it is ending one that already ended
+        # here. If a lock was actually active this also fires talk_cancelled
+        # (-> _cancel_listening), which is harmless to run before the error
+        # below -- it repeats cleanup already done above and its own "idle"
+        # state is immediately overwritten by the "error" set right after.
+        self.hotkeys.cancel_lock()
+        self._dictation_active = False
+        self.bar.set_clickable(False)
+        self.bar.set_state("error", NO_MIC_TEXT)
 
     # --- settings ---
 
@@ -821,15 +996,19 @@ class App:
             if progress is not None:
                 if self._dictation_active:
                     percent = f" {int(progress * 100)}%" if progress is not None else ""
-                    detail = f"Recording continues — speech model downloading{percent}"
+                    detail = f"Recording continues · speech model downloading{percent}"
                 self.bar.set_state("loading", detail, progress)
             elif not (
-                self._dictation_active or self._ptt_preload_pending
+                self._dictation_active
+                or self._ptt_preload_pending
+                or getattr(self, "_startup_preload_pending", False)
             ):
                 self.bar.set_state("loading", detail, progress)
         elif state == engine_mod.READY:
             if self._ptt_preload_pending:
                 self._ptt_preload_pending = False
+            elif getattr(self, "_startup_preload_pending", False):
+                self._startup_preload_pending = False
             elif self._reload_pending:
                 self._reload_pending = False
                 self.bar.set_state("loaded", detail)
@@ -861,7 +1040,11 @@ class App:
             self.bar.set_state("loading", f"Downloading GPU acceleration…{pct}", progress)
         elif self._gpu_download_showing:
             self._gpu_download_showing = False
-            self.bar.set_state("loaded", "GPU acceleration ready")
+            error = getattr(self.engine, "gpu_error", "")
+            if isinstance(error, str) and error:
+                self.bar.set_state("error", "GPU download failed.")
+            else:
+                self.bar.set_state("loaded", "GPU acceleration ready")
 
     def _show_settings(self) -> None:
         if self.settings_window is None:
@@ -959,7 +1142,7 @@ class App:
             self.hotkeys.cancel_lock()
         self.bar.update_settings(settings)
         self.cues.update_settings(settings)
-        self.tray.setToolTip(_tray_tip(settings))
+        self._refresh_tray_update_indicator()
 
     # --- undoing a paste ---
 
@@ -1072,15 +1255,31 @@ class App:
     # --- updates ---
 
     def _on_update_available(self, version: str, notes: str) -> None:
-        # No auto-download: this notification is the only thing that ever
-        # happens on its own. Clicking it is the one action that starts the
-        # download. Installation remains a separate, explicit restart action
-        # after the downloaded installer has been verified.
-        self._notify(
-            f"Update {version} available. Click to download.",
-            tone="info",
-            on_click=self._start_update,
-        )
+        # Availability is quiet: persistent Settings status and a tray dot.
+        self._refresh_tray_update_indicator()
+        print(f"[dictate] update {version} available; see Settings to download")
+
+    def _refresh_tray_update_indicator(self) -> None:
+        if not hasattr(self, "tray") or not hasattr(self, "updater"):
+            return
+        state = self.updater.last_status[0]
+        badge = getattr(self, "_tray_update_badged", False)
+        if state in (updater_mod.AVAILABLE, updater_mod.DOWNLOADING,
+                     updater_mod.VERIFYING, updater_mod.READY_TO_RESTART,
+                     updater_mod.INSTALLING):
+            badge = True
+        elif state == updater_mod.UP_TO_DATE:
+            badge = False
+        # A failed transfer/check must not erase a previously known update.
+        if badge != getattr(self, "_tray_update_badged", False):
+            self._tray_update_badged = badge
+            self.tray.setIcon(self._tray_update_icon if badge else self._tray_icon)
+        tip = _tray_tip(self.settings)
+        if badge:
+            tip += ("\nUpdate ready to restart. Open Settings."
+                    if state == updater_mod.READY_TO_RESTART
+                    else "\nUpdate available. Open Settings.")
+        self.tray.setToolTip(tip)
 
     def _check_for_updates(self) -> None:
         """Tray and console entry point for a manual check.
@@ -1096,7 +1295,7 @@ class App:
         state, _detail, _progress = self.updater.last_status
         if state == updater_mod.READY_TO_RESTART:
             self._notify(
-                "Update verified. Click to restart and finish.",
+                "Update ready to restart.",
                 tone="success",
                 on_click=self._restart_update,
                 duration_ms=8000,
@@ -1180,6 +1379,7 @@ class App:
         for a manual check (button, tray, console), so this never surfaces
         a background check nobody asked to see.
         """
+        self._refresh_tray_update_indicator()
         if self.settings_window:
             self.settings_window.refresh_status()
         if self._dictation_active or self._ptt_preload_pending:
@@ -1202,7 +1402,7 @@ class App:
             if not getattr(self, "_update_ready_notified", False):
                 self._update_ready_notified = True
                 self._notify(
-                    "Update verified. Click to restart and finish.",
+                    "Update ready to restart.",
                     tone="success",
                     on_click=self._restart_update,
                     duration_ms=8000,

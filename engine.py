@@ -332,6 +332,9 @@ def _predownload_with_progress(
             )
             if _snapshot_has_model_bin(cached):
                 return str(cached)
+            # The cache entry itself exists but lacks model.bin. Make the online
+            # request re-fetch it instead of letting faster-whisper reuse this
+            # broken snapshot and fail later while opening the model.
             incomplete_snapshot = True
         except Exception:
             pass
@@ -373,6 +376,7 @@ class Engine:
 
         self._model = None
         self._loaded_key: tuple[str, str] | None = None  # (model_size, device)
+        self._fallback_for: tuple[str, str] | None = None
         self._lock = threading.RLock()
         # First-run setup, the tray's "Load model now" action, and a talk-key
         # press can all request the same warm-up. Keep one worker per active
@@ -390,6 +394,7 @@ class Engine:
         self._gpu_download_guard = threading.Lock()
         self._gpu_downloading = False
         self._gpu_progress: Optional[float] = None
+        self._gpu_error = ""
         self._state = UNLOADED
         self._detail = ""
         self._progress: Optional[float] = None
@@ -499,7 +504,9 @@ class Engine:
     def ensure_loaded(self):
         with self._lock:
             wanted = (self._settings.model_size, resolve_device(self._settings.device))
-            if self._model is not None and self._loaded_key == wanted:
+            if self._model is not None and (
+                self._loaded_key == wanted or self._fallback_for == wanted
+            ):
                 return self._model
             if self._model is not None:
                 self._unload_locked()
@@ -525,6 +532,10 @@ class Engine:
                 self._model = load_model(device, compute_type)
             except Exception as exc:
                 if _is_model_bin_error(exc):
+                    # A nonempty but truncated/corrupt blob can pass the
+                    # filesystem check above. Repair once at the point where
+                    # CTranslate2 proves it unusable, then use the returned
+                    # snapshot path so the retry cannot select the stale one.
                     self._set_state(
                         LOADING,
                         f"Repairing {config.model_display_name(size)} download",
@@ -554,6 +565,9 @@ class Engine:
                             f"Preparing {config.model_display_name(size)} · CPU (GPU unavailable)",
                         )
                         self._model = load_model("cpu", "int8")
+                        # Keep this working fallback until a settings change,
+                        # explicit reload or idle unload allows another try.
+                        self._fallback_for = wanted
                         device = "cpu"
                     else:
                         raise exc
@@ -594,20 +608,25 @@ class Engine:
         design exists to prevent.
         """
         with self._gpu_download_guard:
-            if (
-                self._gpu_download_thread is not None
-                and self._gpu_download_thread.is_alive()
-            ):
+            if self._gpu_downloading:
                 return
             self._gpu_downloading = True
             self._gpu_progress = 0.0
+            self._gpu_error = ""
             self._gpu_download_thread = threading.Thread(
                 target=self._run_gpu_download, daemon=True
             )
-            self._gpu_download_thread.start()
-        # Outside the guard: this calls into the UI, and holding a lock across
-        # a callback invites a deadlock against whatever that callback touches.
+        # Publish the start before a fast failure can publish completion.
+        # _gpu_downloading guards the interval before the worker starts too.
         self._on_gpu_status(True, 0.0)
+        try:
+            self._gpu_download_thread.start()
+        except Exception as exc:
+            self._gpu_error = "GPU download could not start. Try again."
+            self._gpu_downloading = False
+            self._gpu_progress = None
+            self._on_gpu_status(False, None)
+            print(f"[dictate] GPU setup could not start: {exc}")
 
     def _run_gpu_download(self) -> None:
         """Fetch the CUDA compute DLLs a Core-only install doesn't ship with.
@@ -639,13 +658,24 @@ class Engine:
             self._gpu_progress = frac
             self._on_gpu_status(True, frac)
 
+        success = False
+        self._gpu_error = ""
         try:
-            gpu_runtime.download_and_install(on_bytes)
+            success = bool(gpu_runtime.download_and_install(on_bytes))
+        except Exception as exc:
+            print(f"[dictate] GPU setup error: {exc}")
         finally:
+            if not success:
+                self._gpu_error = "GPU download failed. Check your connection and try again."
             self._gpu_downloading = False
             self._gpu_progress = None
             self._on_gpu_status(False, None)
-            self._invalidate_for_gpu_ready()
+            if success:
+                self._invalidate_for_gpu_ready()
+
+    @property
+    def gpu_error(self) -> str:
+        return self._gpu_error
 
     def _invalidate_for_gpu_ready(self) -> None:
         """Drop a resident CPU model once the GPU runtime finishes downloading
@@ -714,6 +744,7 @@ class Engine:
     def _unload_locked(self) -> None:
         self._model = None
         self._loaded_key = None
+        self._fallback_for = None
         # CTranslate2 frees its VRAM when the model object is collected, and
         # CPython won't necessarily collect it promptly on its own.
         import gc
@@ -756,7 +787,14 @@ class Engine:
 
     def shutdown(self) -> None:
         self._stop.set()
-        self.unload()
+        # Quit runs on Qt's thread. Never wait behind a model download or
+        # transcription. Workers are daemons; process exit frees their model.
+        if self._lock.acquire(blocking=False):
+            try:
+                if self._model is not None:
+                    self._unload_locked()
+            finally:
+                self._lock.release()
 
     # --- the actual work ---
 

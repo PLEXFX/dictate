@@ -367,6 +367,10 @@ class Hotkeys:
             if self._combo_latched and not (combo <= pressed):
                 self._combo_latched = False
 
+            # A locked capture ends on the next talk-key PRESS (or Esc),
+            # never on the release of an unrelated key or mouse button.
+            if self._locked:
+                return
             ptt = parse_combo(self._settings.ptt_key)
             still_held = not ptt or ptt <= pressed
             if still_held:

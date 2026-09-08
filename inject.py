@@ -32,6 +32,7 @@ TEMPORARY_COPY_SECONDS = 5
 FOCUS_SETTLE = 0.12  # Windows switches the foreground window asynchronously
 
 CF_UNICODETEXT = 13
+_TEXT_FORMATS = {1, 7, CF_UNICODETEXT, 16}  # text, OEM text, Unicode, locale
 
 _user32_lib = None
 _user32_ready = False
@@ -50,7 +51,7 @@ def _user32():
         return _user32_lib
     _user32_ready = True
     try:
-        lib = ctypes.WinDLL("user32")
+        lib = ctypes.WinDLL("user32", use_last_error=True)
     except (AttributeError, OSError):
         return None
     lib.GetForegroundWindow.restype = wintypes.HWND
@@ -65,6 +66,12 @@ def _user32():
     lib.CountClipboardFormats.argtypes = ()
     lib.IsClipboardFormatAvailable.restype = wintypes.BOOL
     lib.IsClipboardFormatAvailable.argtypes = (wintypes.UINT,)
+    lib.OpenClipboard.restype = wintypes.BOOL
+    lib.OpenClipboard.argtypes = (wintypes.HWND,)
+    lib.CloseClipboard.restype = wintypes.BOOL
+    lib.CloseClipboard.argtypes = ()
+    lib.EnumClipboardFormats.restype = wintypes.UINT
+    lib.EnumClipboardFormats.argtypes = (wintypes.UINT,)
     _user32_lib = lib
     return lib
 
@@ -77,28 +84,31 @@ def _read_clipboard() -> tuple[bool, str]:
 
 
 def clipboard_is_borrowable() -> bool:
-    """True when borrowing the clipboard would not destroy anything.
+    """Borrow only an empty or plain-text clipboard we can fully restore.
 
-    ``pyperclip.paste()`` cannot answer this on its own. It reads only
-    CF_UNICODETEXT and returns an empty string for anything else, so a
-    clipboard holding a screenshot or a set of copied files looks exactly like
-    an empty one -- and "restoring" an empty string over the user's screenshot
-    is the very loss the caller is trying to avoid.
-
-    Windows can tell the two apart without opening the clipboard at all:
-    ``CountClipboardFormats() == 0`` is genuinely empty, and the Unicode-text
-    format being present means there is text to put back. Anything else means
-    some other program owns data here that Dictate cannot preserve.
-
-    Fails closed: if the question cannot be answered, the answer is no.
+    Rich text, HTML, images and application-private formats may coexist with
+    Unicode text. A text-only backup would silently discard those formats.
     """
     try:
         user32 = _user32()
-        if user32 is None:
+        if user32 is None or not user32.OpenClipboard(None):
             return False
-        if int(user32.CountClipboardFormats()) == 0:
-            return True  # nothing there to lose
-        return bool(user32.IsClipboardFormatAvailable(CF_UNICODETEXT))
+        try:
+            formats = set()
+            current = 0
+            while True:
+                ctypes.set_last_error(0)
+                current = int(user32.EnumClipboardFormats(current))
+                if not current:
+                    if ctypes.get_last_error():
+                        return False
+                    break
+                formats.add(current)
+                if current not in _TEXT_FORMATS:
+                    return False
+            return not formats or CF_UNICODETEXT in formats
+        finally:
+            user32.CloseClipboard()
     except Exception:
         return False
 
@@ -229,27 +239,16 @@ def send(text: str, mode: str = "paste") -> None:
         _controller.type(text)
         return
 
-    # Checked before reading, because reading cannot distinguish an empty
-    # clipboard from one holding an image or a file selection -- both come
-    # back as "". Copying over either of those destroys them.
-    if not clipboard_is_borrowable():
-        raise ClipboardUnavailable("Couldn't safely preserve the clipboard")
-    previous_read, previous = _read_clipboard()
-    if not previous_read:
-        # Another program is holding the clipboard open right now.
+    restore = copy_temporarily(text)
+    if restore is None:
         raise ClipboardUnavailable("Couldn't safely preserve the clipboard")
     try:
-        pyperclip.copy(text)
         time.sleep(CLIPBOARD_SETTLE)
         with _controller.pressed(keyboard.Key.ctrl):
             _controller.press("v")
             _controller.release("v")
         time.sleep(PASTE_SETTLE)
     finally:
-        # Restore the prior text even when it was an empty string. A
-        # truthiness check here would leave the dictated text on the clipboard
-        # whenever the clipboard started empty.
-        try:
-            pyperclip.copy(previous)
-        except Exception:
-            pass
+        # Uses the clipboard sequence counter: a newer copy belongs to the
+        # user, including a deliberate copy of the exact same words.
+        restore()

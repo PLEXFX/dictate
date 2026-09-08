@@ -7,6 +7,53 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0-beta.1] - 2026-09-07
+
+### Added
+
+- Hardware-aware Processing controls: plain **Processing** (CPU/GPU) and
+  **Model** choices replace the old combined preset list, backed by a small
+  local hardware check that recommends the best option without changing your
+  existing choice.
+- Settings navigation and status icons now use Windows 11's own Segoe Fluent
+  Icons instead of a mix of bundled SVGs at different weights; **Appearance**
+  shows a paint palette instead of a gear, and every dropdown in Settings has
+  a real down-arrow chevron.
+- A small amber dot appears on the system tray icon while an update is known
+  (available, downloading, verifying, or ready to restart), with no popup or
+  activity-bar interruption.
+
+### Changed
+
+- The microphone list now shows one row per physical device instead of
+  repeating it once per Windows audio API it's registered under.
+- Update-available status uses a distinct amber download-arrow icon, no
+  longer the same spinning glyph used for active checking/downloading/
+  installing.
+- Settings' update notice now sizes itself to its own text instead of
+  inheriting the previous state's box height.
+- VRAM is now reported by rounding instead of always flooring, so a
+  12,282 MB card no longer reads as "11 GB."
+
+### Fixed
+
+- The activity bar no longer snaps to the bottom-left instead of
+  re-centering when the bar-width slider is dragged after the bar has
+  auto-hidden.
+- The tray icon's update-notification dot no longer makes that state read
+  as a different overall icon size than the plain icon; the logo itself
+  never moves or resizes.
+- The "model/GPU ready" activity-bar state now actually shows its
+  confirmation text instead of a silent pulse.
+- Quitting Dictate no longer waits behind an in-progress model download or
+  transcription.
+- A GPU acceleration download that fails to start or complete now reports a
+  retryable error instead of silently doing nothing.
+- Instant "no microphone" detection now fires the moment a broken mic is
+  obvious, instead of after the talk key is released.
+- Fixed a text-clipping glitch on the activity bar's error/notice pop-in
+  transition.
+
 ## [1.3.2-beta.1] - 2026-08-24
 
 ### Fixed

@@ -665,7 +665,14 @@ class Updater:
             if not silent:
                 self._set_status(CHECKING, "Checking for updates…")
             info = _fetch_latest_release()
-            if info is None or not is_newer(info["version"], self._current_version):
+            if info is None:
+                if not silent:
+                    message = "Couldn't check for updates. Check your connection and try again."
+                    self._set_status(ERROR, message, revert_after=8.0)
+                    self._on_error(message)
+                return
+            self._last_checked_at = time.time()
+            if not is_newer(info["version"], self._current_version):
                 if not silent:
                     self._set_status(
                         UP_TO_DATE, "You're on the latest version", revert_after=3.0
@@ -677,7 +684,6 @@ class Updater:
             self._set_status(AVAILABLE, f"Update {info['version']} is available")
             self._on_available(info["version"], info["release_notes"])
         finally:
-            self._last_checked_at = time.time()
             self._busy.release()
             # Fires even for a silent check that changed no status. A UI that
             # disabled its own button on click needs one signal to re-enable
@@ -762,7 +768,7 @@ class Updater:
                 pct = int(frac * 100)
                 self._set_status(
                     DOWNLOADING,
-                    f"Downloading update {info['version']} — {pct}%",
+                    f"Downloading update {info['version']} · {pct}%",
                     progress=frac,
                 )
 

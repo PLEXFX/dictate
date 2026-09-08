@@ -68,7 +68,7 @@ Read the full [privacy statement](PRIVACY.md).
 
 Dictate checks GitHub for updates at launch and every 24 hours while it is running. It never installs or restarts without your action: when an update is available, choose it from the activity bar or Settings; after the installer is downloaded and verified, choose the orange **Restart Dictate** action.
 
-Every release has notes in [CHANGELOG.md](CHANGELOG.md). The current beta, **v1.3.2-beta.1**, repairs a corrupt local speech-model download once and retries it instead of showing a `model.bin` error.
+Every release has notes in [CHANGELOG.md](CHANGELOG.md). The current beta, **v1.4.0-beta.1**, brings Windows 11 Segoe Fluent icons throughout Settings and the tray, plainer Processing/Model controls, and a round of activity-bar and update-indicator bug fixes.
 
 ## Run from source
 

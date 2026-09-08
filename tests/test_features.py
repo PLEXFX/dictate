@@ -96,6 +96,7 @@ class ClipboardTests(unittest.TestCase):
         controller = _Controller()
         with (
             self._borrowable(True),
+            patch.object(inject, "_clipboard_sequence", return_value=42),
             patch.object(inject.pyperclip, "paste", return_value=""),
             patch.object(inject.pyperclip, "copy", side_effect=copied.append),
             patch.object(inject.time, "sleep"),
@@ -133,6 +134,7 @@ class ClipboardTests(unittest.TestCase):
         copied: list[str] = []
         with (
             self._borrowable(False),
+            patch.object(inject, "_clipboard_sequence", return_value=42),
             patch.object(inject.pyperclip, "paste", return_value=""),
             patch.object(inject.pyperclip, "copy", side_effect=copied.append),
             patch.object(inject.time, "sleep"),
@@ -144,11 +146,11 @@ class ClipboardTests(unittest.TestCase):
         self.assertEqual(copied, [])
 
     def test_clipboard_is_borrowable_only_for_empty_or_text(self):
-        cases = [(0, False, True), (3, True, True), (3, False, False)]
-        for formats, has_text, expected in cases:
+        cases = [([], True), ([13, 1, 7, 16], True), ([2], False), ([13, 49300], False)]
+        for formats, expected in cases:
             user32 = Mock()
-            user32.CountClipboardFormats.return_value = formats
-            user32.IsClipboardFormatAvailable.return_value = has_text
+            user32.OpenClipboard.return_value = True
+            user32.EnumClipboardFormats.side_effect = formats + [0]
             with patch.object(inject, "_user32", return_value=user32):
                 self.assertIs(inject.clipboard_is_borrowable(), expected)
 
@@ -195,6 +197,7 @@ class ClipboardTests(unittest.TestCase):
         copied: list[str] = []
         with (
             self._borrowable(False),
+            patch.object(inject, "_clipboard_sequence", return_value=42),
             patch.object(inject.pyperclip, "paste", return_value=""),
             patch.object(inject.pyperclip, "copy", side_effect=copied.append),
         ):
@@ -263,6 +266,7 @@ class MicrophoneTests(unittest.TestCase):
         with (
             patch.object(audio.sd, "query_devices", return_value=devices),
             patch.object(audio.sd, "query_hostapis", return_value=host_apis),
+            patch.object(audio.sd, "check_input_settings"),
         ):
             listed = audio.input_devices()
             capture = audio.MicCapture(listed[0].key)
@@ -275,6 +279,22 @@ class MicrophoneTests(unittest.TestCase):
         with patch.object(audio, "input_devices", return_value=[]):
             with self.assertRaisesRegex(RuntimeError, "not available"):
                 audio.MicCapture("missing")._device_index()
+
+    def test_warm_up_opens_and_releases_the_driver(self):
+        capture = audio.MicCapture()
+        stream = Mock()
+        with patch.object(audio.sd, "InputStream", return_value=stream):
+            capture.warm_up()
+        stream.start.assert_called_once_with()
+        stream.stop.assert_called_once_with()
+        stream.close.assert_called_once_with()
+
+    def test_warm_up_never_disturbs_an_active_recording(self):
+        capture = audio.MicCapture()
+        capture._stream = Mock()
+        with patch.object(audio.sd, "InputStream") as input_stream:
+            capture.warm_up()
+        input_stream.assert_not_called()
 
     def test_rms_level_of_silence_is_below_threshold(self):
         silent = np.zeros(4000, dtype=np.float32)
@@ -364,7 +384,7 @@ class EngineProgressTests(unittest.TestCase):
 
         fractions = [progress for _detail, progress in states if progress is not None]
         self.assertEqual(fractions, [0.999, 1.0])
-        self.assertEqual(states[-1], ("Downloading Small English · CPU · 100%", 1.0))
+        self.assertEqual(states[-1], ("Downloading Small · CPU · 100%", 1.0))
 
     def test_preload_reuses_the_active_warmup_thread(self):
         import engine
@@ -874,23 +894,23 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertEqual(config.Settings(bar_width=1).clamped().bar_width, 180)
         self.assertEqual(config.Settings(bar_width=999).clamped().bar_width, 280)
 
-    def test_outcome_modes_map_to_real_engine_settings(self):
-        self.assertEqual(
-            config.transcription_mode_settings("balanced"), ("small.en", "cpu")
-        )
-        self.assertEqual(
-            config.transcription_mode_settings("faster"), ("small.en", "cuda")
-        )
-        self.assertEqual(
-            config.transcription_mode_settings("accurate"), ("medium.en", "auto")
-        )
-        self.assertEqual(
-            config.transcription_mode_settings("max"), ("large-v3-turbo", "cuda")
-        )
-        self.assertEqual(
-            config.transcription_mode_for("large-v3-turbo", "cuda"), "max"
-        )
-        self.assertEqual(config.transcription_mode_for("base.en", "cpu"), "custom")
+    def test_device_choices_are_just_cpu_and_gpu(self):
+        """Processing is a plain CPU/GPU choice now -- no "Automatic" and no
+        hidden speed-preset profile behind it (see settings_window.py)."""
+        self.assertEqual([value for value, _label in config.DEVICES], ["cpu", "cuda"])
+        self.assertEqual(config.Settings().clamped().device, "cpu")
+        # An old settings file's "auto" (from before this was simplified)
+        # clamps to the plain default instead of round-tripping a value the
+        # picker can no longer show.
+        self.assertEqual(config.Settings(device="auto").clamped().device, "cpu")
+
+    def test_model_display_names_cover_every_real_model(self):
+        for size, _summary in config.MODELS:
+            self.assertIn(size, config.MODEL_DISPLAY_NAMES)
+        self.assertEqual(config.model_display_name("large-v3-turbo"), "Large v3 Turbo")
+        # An unrecognized id falls back to itself rather than raising, so a
+        # future model id is never worse than showing its technical name.
+        self.assertEqual(config.model_display_name("unknown-id"), "unknown-id")
 
 
 class StartupTests(unittest.TestCase):
@@ -1141,6 +1161,126 @@ class HotkeyTests(unittest.TestCase):
         self.assertEqual(hotkeys.normalize_mouse(mouse.Button.x2), "mouse5")
 
 
+class TrayIconRenderTests(unittest.TestCase):
+    """tray_icon/update_badged_icon: the tray gets its own inset presentation
+    of the app icon (see main.py's _TRAY_GLYPH_FILL comment) instead of the
+    window icon's full-bleed art, so it doesn't read oversized next to other
+    apps' tray icons, and so the update dot has real empty space to sit in."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication(
+            ["dictate-tests", "-platform", "offscreen"]
+        )
+
+    def test_plain_and_badged_frames_stay_identical_outside_dot_at_scaled_dpi(self):
+        # QApplication reads scaling at startup. Separate processes exercise
+        # the actual Qt DPI selection, not a mock of QIcon.pixmap.
+        import subprocess
+        code = """
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QSize
+import main
+app = QApplication([])
+plain = main.tray_icon(main.load_icon())
+original = {n: plain.pixmap(QSize(n, n), 1.0).toImage() for n in main._TRAY_ICON_SIZES}
+badged = main.update_badged_icon(plain)
+assert plain.availableSizes() == badged.availableSizes(), (app.devicePixelRatio(), plain.availableSizes(), badged.availableSizes())
+for size, before in original.items():
+    clean = plain.pixmap(QSize(size, size), 1.0).toImage()
+    dotted = badged.pixmap(QSize(size, size), 1.0).toImage()
+    assert clean.size() == dotted.size() == QSize(size, size)
+    assert clean == before, 'badging mutated the plain icon'
+    # Compare every pixel outside the bottom-right badge area, not just
+    # an opaque point that can stay opaque even when the logo changes size.
+    safe = int(size * 0.6)
+    assert clean.copy(0, 0, size, safe) == dotted.copy(0, 0, size, safe), (size, 'top')
+    assert clean.copy(0, 0, safe, size) == dotted.copy(0, 0, safe, size), (size, 'left')
+"""
+        for scale in ("1", "1.25", "1.5", "1.75", "2", "2.5", "3"):
+            with self.subTest(scale=scale):
+                env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_SCALE_FACTOR=scale)
+                result = subprocess.run(
+                    [sys.executable, "-c", code], cwd=PROJECT_ROOT, env=env,
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @staticmethod
+    def _opaque_square_icon():
+        """A synthetic base icon that fills its whole canvas at every size
+        tray_icon actually asks for -- deterministic stand-in for the shipped
+        edge-to-edge icon.ico artwork, which (like a real multi-resolution
+        .ico) has a real frame at each of those sizes rather than one source
+        QIcon silently refuses to upscale past."""
+        import main
+        from PySide6.QtGui import QIcon, QPixmap
+        from PySide6.QtCore import Qt
+
+        icon = QIcon()
+        for size in main._TRAY_ICON_SIZES:
+            pixmap = QPixmap(size, size)
+            pixmap.fill(Qt.black)
+            icon.addPixmap(pixmap)
+        return icon
+
+    def test_tray_icon_insets_the_glyph_with_a_transparent_margin(self):
+        import main
+        from PySide6.QtCore import QSize
+
+        base = self._opaque_square_icon()
+        inset = main.tray_icon(base)
+        for size in main._TRAY_ICON_SIZES:
+            with self.subTest(size=size):
+                img = inset.pixmap(QSize(size, size)).toImage()
+                # A fully-opaque base must leave its own corner transparent
+                # once inset -- the whole point of the margin.
+                self.assertEqual(img.pixelColor(0, 0).alpha(), 0)
+                # But the centre is still the genuine glyph, not empty.
+                self.assertGreater(img.pixelColor(size // 2, size // 2).alpha(), 0)
+
+    def test_badged_icon_keeps_the_same_glyph_scale_as_the_plain_tray_icon(self):
+        import main
+        from PySide6.QtCore import QSize
+
+        base = self._opaque_square_icon()
+        plain = main.tray_icon(base)
+        badged = main.update_badged_icon(plain)
+        size = 32
+        plain_img = plain.pixmap(QSize(size, size)).toImage()
+        badged_img = badged.pixmap(QSize(size, size)).toImage()
+        # A point well inside the glyph is unaffected by the corner dot, so
+        # the two states must agree there -- the badge should never look
+        # like it shrank or grew the icon itself, only added a dot.
+        probe = (size // 2, size // 4)
+        self.assertEqual(
+            plain_img.pixelColor(*probe).alpha(),
+            badged_img.pixelColor(*probe).alpha(),
+        )
+
+    def test_badge_dot_lands_in_the_margin_tray_icon_left_empty(self):
+        import main
+        from PySide6.QtCore import QSize
+
+        base = self._opaque_square_icon()
+        plain = main.tray_icon(base)
+        badged = main.update_badged_icon(plain)
+        size = 32
+        img = badged.pixmap(QSize(size, size)).toImage()
+        found = False
+        for y in range(size):
+            for x in range(size):
+                c = img.pixelColor(x, y)
+                if c.red() > 200 and 120 < c.green() < 220 and c.blue() < 80 and c.alpha() > 0:
+                    found = True
+                    break
+            if found:
+                break
+        self.assertTrue(found, "no amber badge pixel found in the badged tray icon")
+
+
 class PttWarmStartTests(unittest.TestCase):
     @staticmethod
     def _app():
@@ -1150,6 +1290,7 @@ class PttWarmStartTests(unittest.TestCase):
         app._busy = False
         app._dictation_active = False
         app._ptt_preload_pending = False
+        app._startup_preload_pending = False
         app._reload_pending = False
         app._gpu_download_showing = False
         app._update_showing = False
@@ -1165,8 +1306,36 @@ class PttWarmStartTests(unittest.TestCase):
         app.tray = Mock()
         app.act_check_update = Mock()
         app.updater = Mock()
+        app.updater.last_status = (main.updater_mod.IDLE, "", None)
+        app.icon = Mock()
+        app._tray_icon = Mock()
+        app._tray_update_icon = Mock()
+        app._tray_update_badged = False
         app.settings_window = None
         return app, main
+
+    def test_launch_warmup_loads_model_and_primes_microphone(self):
+        app, main = self._app()
+        app.settings.onboarding_complete = True
+        app.engine.preload.return_value = True
+
+        with patch.object(main.threading, "Thread") as worker:
+            app._warm_after_launch()
+
+        app.engine.preload.assert_called_once_with()
+        self.assertTrue(app._startup_preload_pending)
+        worker.assert_called_once_with(target=app.mic.warm_up, daemon=True)
+        worker.return_value.start.assert_called_once_with()
+
+    def test_launch_warmup_waits_for_onboarding(self):
+        app, main = self._app()
+        app.settings.onboarding_complete = False
+
+        with patch.object(main.threading, "Thread") as worker:
+            app._warm_after_launch()
+
+        app.engine.preload.assert_not_called()
+        worker.assert_not_called()
 
     def test_gpu_status_shows_bar_loading_and_clears_on_finish(self):
         app, _main = self._app()
@@ -1211,28 +1380,62 @@ class PttWarmStartTests(unittest.TestCase):
         app.bar.reset_mock()
         app.updater.last_status = (
             main.updater_mod.DOWNLOADING,
-            "Downloading update 1.2.3 — 10%",
+            "Downloading update 1.2.3 · 10%",
             0.10,
         )
         app._on_update_status_changed()
         app.bar.set_state.assert_called_once_with(
-            "loading", "Downloading update 1.2.3 — 10%", 0.10
+            "loading", "Downloading update 1.2.3 · 10%", 0.10
         )
 
-    def test_update_available_notifies_on_the_bar_and_downloads_when_clicked(self):
+    def test_update_available_no_longer_notifies_on_the_bar(self):
+        """Thomas asked for this nudge gone -- Settings' adaptive rail and
+        Updates page already surface AVAILABLE durably (see
+        settings_window.refresh_status), so this handler must not touch the
+        bar/tray notification path at all."""
         app, _main = self._app()
         app._notify = Mock()
+        app.updater.last_status = (updater.AVAILABLE, "Update 1.2.3 available", None)
 
         app._on_update_available("1.2.3", "Release notes")
 
-        app._notify.assert_called_once_with(
-            "Update 1.2.3 available. Click to download.",
-            tone="info",
-            on_click=app._start_update,
-        )
-        app.updater.start_update.return_value = True
-        app._notify.call_args.kwargs["on_click"]()
-        app.updater.start_update.assert_called_once_with()
+        app._notify.assert_not_called()
+        app.bar.notify.assert_not_called()
+
+    def test_tray_update_dot_survives_transfer_errors_and_clears_when_current(self):
+        app, main = self._app()
+        for state in (updater.AVAILABLE, updater.DOWNLOADING, updater.VERIFYING,
+                      updater.ERROR, updater.IDLE, updater.READY_TO_RESTART):
+            app.updater.last_status = (state, "", None)
+            app._refresh_tray_update_indicator()
+            self.assertTrue(app._tray_update_badged)
+        # Progress events don't reassign the icon and flicker the Windows tray.
+        app.tray.setIcon.assert_called_once_with(app._tray_update_icon)
+        self.assertIn("ready to restart", app.tray.setToolTip.call_args.args[0])
+        app.updater.last_status = (updater.UP_TO_DATE, "", None)
+        app._refresh_tray_update_indicator()
+        self.assertFalse(app._tray_update_badged)
+        app.tray.setIcon.assert_called_with(app._tray_icon)
+        self.assertNotIn("Update available", app.tray.setToolTip.call_args.args[0])
+
+    def test_tray_dot_updates_during_dictation_without_touching_bar(self):
+        app, main = self._app()
+        app._dictation_active = True
+        app.updater.last_status = (updater.AVAILABLE, "", None)
+        app._on_update_status_changed()
+        app.tray.setIcon.assert_called_once_with(app._tray_update_icon)
+        app.bar.set_state.assert_not_called()
+        app.tray.showMessage.assert_not_called()
+
+    def test_restored_staged_update_badges_tray_but_plain_check_error_does_not(self):
+        app, main = self._app()
+        app.updater.last_status = (updater.ERROR, "Offline", None)
+        app._refresh_tray_update_indicator()
+        self.assertFalse(app._tray_update_badged)
+        app.tray.setIcon.assert_not_called()
+        app.updater.last_status = (updater.READY_TO_RESTART, "", None)
+        app._refresh_tray_update_indicator()
+        app.tray.setIcon.assert_called_once_with(app._tray_update_icon)
 
     def test_update_terminal_state_clears_the_flag_without_a_second_bar_call(self):
         """UP_TO_DATE/ERROR/AVAILABLE each already have their own dedicated
@@ -1358,7 +1561,7 @@ class PttWarmStartTests(unittest.TestCase):
         )
 
         app.bar.set_state.assert_called_once_with(
-            "loading", "Recording continues — speech model downloading 42%", 0.42
+            "loading", "Recording continues · speech model downloading 42%", 0.42
         )
 
     def test_first_run_opens_settings_and_starts_the_default_model_download(self):
@@ -1489,6 +1692,9 @@ class UndoLastPasteTests(unittest.TestCase):
         import main
 
         app = main.App.__new__(main.App)
+        app.bridge = Mock()
+        app._undo_done = threading.Event()
+        app.bridge.undo_finished.emit.side_effect = lambda sent: app._undo_done.set()
         app._undo_target = self.TARGET
         app._undo_at = main.time.monotonic()
         app.hotkeys = Mock()
@@ -1506,6 +1712,7 @@ class UndoLastPasteTests(unittest.TestCase):
             main.inject, "undo_in", return_value=True
         ) as undo_in:
             app._undo_last_paste()
+            self.assertTrue(app._undo_done.wait(2), "Undo worker never completed")
 
         undo_in.assert_called_once_with(self.TARGET)
 
@@ -1552,6 +1759,7 @@ class UndoLastPasteTests(unittest.TestCase):
             main.inject, "undo_in", return_value=True
         ) as undo_in:
             app._undo_last_paste()
+            self.assertTrue(app._undo_done.wait(2), "Undo worker never completed")
             app._undo_last_paste()
 
         self.assertEqual(undo_in.call_count, 1)
@@ -1586,6 +1794,7 @@ class UndoLastPasteTests(unittest.TestCase):
             main.inject, "undo_in", return_value=True
         ):
             app._undo_last_paste()
+            self.assertTrue(app._undo_done.wait(2), "Undo worker never completed")
 
         self.assertEqual(
             [call.args[0] for call in app.hotkeys.suppress.call_args_list], [True, False]
@@ -1760,6 +1969,7 @@ class StopListeningTests(unittest.TestCase):
         app = main.App.__new__(main.App)
         app._busy = False
         app._dictation_active = True
+        app._live_silence_reported = False
         app._start_cue_at = 0.0
         app.bridge = Mock()
         app.meter = Mock()
@@ -1815,7 +2025,7 @@ class StopListeningTests(unittest.TestCase):
         app._stop_listening(1.0)
 
         app.bar.set_state.assert_called_once_with(
-            "error", "No audio detected — check your microphone"
+            "error", "No microphone detected."
         )
         self.assertFalse(app._dictation_active)
         self.assertFalse(app._busy)
@@ -1829,7 +2039,7 @@ class StopListeningTests(unittest.TestCase):
         app._stop_listening(2.0)
 
         app.bar.set_state.assert_called_once_with(
-            "error", "No audio detected — check your microphone"
+            "error", "No microphone detected."
         )
         self.assertFalse(app._busy)
 
@@ -1843,6 +2053,90 @@ class StopListeningTests(unittest.TestCase):
 
         app.bar.set_state.assert_called_once_with("transcribing")
         self.assertTrue(app._busy)
+
+
+class LiveSilenceTests(unittest.TestCase):
+    """_check_live_silence: catching a dead mic while the key is still held,
+    instead of making the person finish talking and let go first."""
+
+    @staticmethod
+    def _app(held_seconds: float = 5.0):
+        import main
+
+        app = main.App.__new__(main.App)
+        app._dictation_active = True
+        app._live_silence_reported = False
+        app._start_cue_at = time.monotonic() - held_seconds
+        app.bridge = Mock()
+        app.mic = Mock()
+        app.bar = Mock()
+        app.meter = Mock()
+        app.meter_timer = Mock()
+        app.lock_limit_timer = Mock()
+        app.hotkeys = Mock()
+        return app, main
+
+    def test_sustained_silence_after_the_grace_period_reports_no_microphone(self):
+        app, main = self._app()
+        app.mic.snapshot.return_value = np.full(400, 1e-6, dtype=np.float32)
+
+        app._check_live_silence()
+
+        app.mic.snapshot.assert_called_once_with(
+            max_seconds=main.LIVE_SILENCE_WINDOW_SECONDS
+        )
+        app.bar.set_state.assert_called_once_with("error", main.NO_MIC_TEXT)
+        app.bar.set_clickable.assert_called_once_with(False)
+        app.mic.stop.assert_called_once()
+        app.meter_timer.stop.assert_called_once()
+        app.lock_limit_timer.stop.assert_called_once()
+        app.hotkeys.cancel_lock.assert_called_once()
+        self.assertTrue(app._live_silence_reported)
+        self.assertFalse(app._dictation_active)
+
+    def test_a_key_release_after_live_detection_is_a_silent_no_op(self):
+        """The real key-up arrives a moment after _check_live_silence already
+        ended the hold; _stop_listening must not re-report or reset the bar
+        it already put an error on."""
+        app, main = self._app()
+        app.mic.snapshot.return_value = np.full(400, 1e-6, dtype=np.float32)
+        app._check_live_silence()
+        app.bar.reset_mock()
+        app.mic.reset_mock()
+
+        app._stop_listening(2.0)
+
+        app.bar.set_state.assert_not_called()
+        app.mic.stop.assert_not_called()
+        self.assertFalse(app._live_silence_reported)
+
+    def test_still_within_the_grace_period_is_ignored(self):
+        app, main = self._app(held_seconds=0.1)
+        app.mic.snapshot.return_value = np.full(400, 1e-6, dtype=np.float32)
+
+        app._check_live_silence()
+
+        app.mic.snapshot.assert_not_called()
+        app.bar.set_state.assert_not_called()
+        self.assertFalse(app._live_silence_reported)
+
+    def test_real_signal_present_is_not_flagged(self):
+        app, main = self._app()
+        app.mic.snapshot.return_value = np.linspace(-0.4, 0.4, 400).astype(np.float32)
+
+        app._check_live_silence()
+
+        app.bar.set_state.assert_not_called()
+        self.assertFalse(app._live_silence_reported)
+
+    def test_not_dictating_is_ignored(self):
+        app, main = self._app()
+        app._dictation_active = False
+
+        app._check_live_silence()
+
+        app.mic.snapshot.assert_not_called()
+        app.bar.set_state.assert_not_called()
 
 
 class LastDictationTests(unittest.TestCase):
@@ -1933,6 +2227,128 @@ class UiTests(unittest.TestCase):
         self.assertIn("QWidget#root { background: #F3F3F3; }", light)
         self.assertNotIn("QWidget#root { background: transparent; }", dark)
         self.assertNotIn("rgba(43, 43, 43, 174)", dark)
+
+    def test_combo_box_down_arrow_points_at_a_real_file_in_both_themes(self):
+        """Styling QComboBox::drop-down at all (even just border: none, which
+        every row's combo already does) makes Qt stop drawing its native
+        arrow -- without an explicit down-arrow image the control silently
+        loses its only visual hint that it opens a list."""
+        import settings_window
+
+        for dark, svg_name in ((True, "chevron-down-dark.svg"), (False, "chevron-down-light.svg")):
+            css = settings_window.stylesheet(dark=dark)
+            self.assertNotIn("__CHEVRON_DOWN", css)
+            path = settings_window._FLUENT_ASSET_DIR / svg_name
+            self.assertIn(path.as_posix(), css)
+            self.assertTrue(path.is_file())
+
+    def test_every_rail_destination_uses_one_windows_11_icon_family(self):
+        """The five rail icons used to come from a mix of hand-drawn SVG paths
+        at different stroke weights. They are now one Segoe Fluent Icons family
+        on one optical grid -- and Appearance is explicitly not the Settings
+        gear (U+E713), which reads as the whole window rather than a page.
+        """
+        import settings_window
+
+        glyphs = settings_window._SEGOE_GLYPHS
+        for section in ("dictation", "activity", "appearance", "updates", "privacy"):
+            self.assertIn(section, glyphs)
+            # Segoe Fluent Icons lives entirely in the private use area.
+            self.assertTrue(0xE000 <= ord(glyphs[section]) <= 0xF8FF, section)
+        self.assertEqual(len(set(glyphs.values())), len(glyphs))
+        self.assertNotEqual(glyphs["appearance"], "")
+
+    def test_rail_icons_bake_in_a_real_gap_before_their_label(self):
+        """Qt's icon-to-text gap on a QPushButton is a hard-coded 4 px with no
+        stylesheet property to widen it, so the extra space has to be
+        transparent pixels inside the icon itself. Guard both halves: the gap
+        columns stay empty, and the glyph square still carries ink.
+        """
+        from PySide6.QtGui import QColor
+
+        import settings_window
+
+        gap = settings_window.NAV_ICON_GAP
+        self.assertGreater(gap, 0)
+        for dark in (True, False):
+            icon = settings_window._fluent_icon("dictation", dark, gap=gap)
+            image = icon.pixmap(20 + gap, 20).toImage()
+            self.assertEqual((image.width(), image.height()), (20 + gap, 20))
+            for x in range(20, 20 + gap):
+                for y in range(20):
+                    self.assertEqual(
+                        QColor(image.pixelColor(x, y)).alpha(), 0, (dark, x, y)
+                    )
+            ink = any(
+                QColor(image.pixelColor(x, y)).alpha() > 0
+                for x in range(20)
+                for y in range(20)
+            )
+            self.assertTrue(ink, dark)
+
+    def test_update_notice_measures_the_copy_width_it_actually_lays_out(self):
+        """The notice measures its own wrapped height before Qt lays it out, so
+        a copy width that drifts from the real one silently clips or overshoots
+        the control. Both must come from the same numbers.
+        """
+        import settings_window
+
+        parts = (
+            settings_window._OVERVIEW_MARGIN_LEFT
+            + settings_window._OVERVIEW_MARGIN_RIGHT
+            + settings_window._OVERVIEW_STATUS_PX
+            + settings_window._OVERVIEW_STATUS_GAP
+            + settings_window._OVERVIEW_CHEVRON_PX
+            + settings_window._OVERVIEW_CHEVRON_GAP
+        )
+        self.assertEqual(
+            settings_window._OVERVIEW_COPY_WIDTH,
+            settings_window._OVERVIEW_WIDTH - parts,
+        )
+        self.assertGreater(settings_window._OVERVIEW_COPY_WIDTH, 0)
+
+    def test_update_notice_resizes_for_what_it_currently_says(self):
+        """The notice used to measure itself with heightForWidth, which reports
+        back the fixed height the previous state set on the same labels -- so a
+        short message inherited a tall message's box and its copy drifted away
+        from the glyph beside it. Shrink then grow, both must track the text.
+        """
+        from unittest.mock import patch
+
+        import audio as audio_mod
+        import config
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=False),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+
+        def height_for(detail):
+            window._set_download_overview_presentation(
+                "available", "Update available", detail, tone="available"
+            )
+            return window._download_overview_size_target.height()
+
+        long_detail = "Dictate 1.3.1 is ready to download and install."
+        tall = height_for(long_detail)
+        short = height_for("Ready.")
+        grown_again = height_for(long_detail)
+
+        self.assertLess(short, tall)
+        self.assertEqual(grown_again, tall)
+        window.close()
 
     def test_scroll_settle_is_small_and_only_follows_a_person_gesture(self):
         import settings_window
@@ -2025,9 +2441,12 @@ class UiTests(unittest.TestCase):
             privacy = settings_window.PrivacyDialog()
 
         self.assertEqual(window.mic_box.currentData(), microphone.key)
-        self.assertEqual(window.mode_box.currentData(), "balanced")
-        self.assertEqual(window.mode_box.currentText(), "Everyday (recommended)")
-        self.assertGreaterEqual(window.mode_box.findData("max"), 0)
+        self.assertEqual(window.device_box.currentData(), "cpu")
+        self.assertEqual(window.model_box.currentData(), "small.en")
+        self.assertIn("Small", window.model_box.currentText())
+        self.assertGreaterEqual(window.model_box.findData("large-v3-turbo"), 0)
+        self.assertFalse(hasattr(window, "mode_box"))
+        self.assertFalse(hasattr(window, "processing_box"))
         self.assertIn("Default", window.sleep_slider.value_label.text())
         self.assertFalse(hasattr(window.sleep_slider, "reset_btn"))
         window.sleep_slider.setValue(30)
@@ -2046,7 +2465,7 @@ class UiTests(unittest.TestCase):
         privacy_text = " ".join(label.text() for label in privacy.findChildren(QLabel))
         self.assertIn("Your voice stays on this PC", privacy_text)
         self.assertIn("Hugging Face", privacy_text)
-        self.assertIn("does not print", privacy_text)
+        self.assertIn("never the words you dictated", privacy_text)
         self.assertFalse(hasattr(window, "save_status"))
 
         privacy.close()
@@ -2151,7 +2570,8 @@ class UiTests(unittest.TestCase):
             set_startup.assert_called_once_with(True)
             save.assert_called_once()
 
-            window.mode_box.setCurrentIndex(window.mode_box.findData("faster"))
+            window.device_box.setCurrentIndex(window.device_box.findData("cuda"))
+            window.model_box.setCurrentIndex(window.model_box.findData("small.en"))
             window._save_timer.stop()
             window._save_now()
 
@@ -2227,7 +2647,7 @@ class UiTests(unittest.TestCase):
         class DummyEngine:
             state = engine.LOADING
             active_device = ""
-            last_status = (engine.LOADING, "Downloading Small English · CPU · 42%", 0.42)
+            last_status = (engine.LOADING, "Downloading Small · CPU · 42%", 0.42)
             gpu_status = (False, None)
 
             def preload(self):
@@ -2244,10 +2664,10 @@ class UiTests(unittest.TestCase):
         self.assertEqual(window.reload_progress.value(), 42)
         self.assertFalse(window.model_download_row.isHidden())
         self.assertEqual(window.model_download_progress.value(), 42)
-        self.assertIn("Small English", window.model_download_desc_label.text())
+        self.assertIn("Small", window.model_download_desc_label.text())
         self.assertNotIn("small.en", window.model_download_desc_label.text())
         self.assertEqual(window._download_overview_mode, "active")
-        self.assertEqual(window.download_overview_detail.text(), "Small English · 42%")
+        self.assertEqual(window.download_overview_detail.text(), "Small · 42%")
         self.assertTrue(window.download_overview_status.property("active"))
         self.assertFalse(window.download_overview_details.isHidden())
         self.assertFalse(window.download_overview_progress.isHidden())
@@ -2258,7 +2678,7 @@ class UiTests(unittest.TestCase):
         scroll_to.assert_called_once_with(window.model_download_row)
         window.close()
 
-    def test_device_row_explains_the_gpu_download_when_files_are_missing(self):
+    def test_device_row_explains_gpu_setup_when_files_are_missing(self):
         import engine
         import settings_window
 
@@ -2276,7 +2696,8 @@ class UiTests(unittest.TestCase):
             patch.object(settings_window.gpu_runtime, "needs_download", return_value=True),
         ):
             window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
-        self.assertIn("downloads", window.device_desc_label.text().lower())
+        self.assertIn("set up gpu acceleration", window.device_desc_label.text().lower())
+        self.assertFalse(window.gpu_download_row.isHidden())
         window.close()
 
     def test_download_overview_opens_gpu_setup_from_the_rail(self):
@@ -2384,7 +2805,7 @@ class UiTests(unittest.TestCase):
         self.assertEqual(window.gpu_download_btn.text(), "Downloading…")
         window.close()
 
-    def test_gpu_processing_and_gpu_modes_stay_disabled_until_runtime_is_installed(self):
+    def test_gpu_device_choice_stays_disabled_until_runtime_is_installed(self):
         """The explicit download button is the only path that installs GPU files."""
         import engine
         import settings_window
@@ -2406,14 +2827,10 @@ class UiTests(unittest.TestCase):
                 config.Settings(device="cpu"), DummyEngine()
             )
             gpu_item = window.device_box.model().item(window.device_box.findData("cuda"))
-            faster_item = window.mode_box.model().item(window.mode_box.findData("faster"))
-            max_item = window.mode_box.model().item(window.mode_box.findData("max"))
             self.assertFalse(gpu_item.isEnabled())
-            self.assertFalse(faster_item.isEnabled())
-        self.assertFalse(max_item.isEnabled())
         window.close()
 
-    def test_gpu_processing_and_modes_enable_after_the_runtime_is_ready(self):
+    def test_gpu_device_choice_enables_after_the_runtime_is_ready(self):
         import engine
         import settings_window
 
@@ -2433,11 +2850,45 @@ class UiTests(unittest.TestCase):
         ):
             window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
         gpu_item = window.device_box.model().item(window.device_box.findData("cuda"))
-        faster_item = window.mode_box.model().item(window.mode_box.findData("faster"))
-        max_item = window.mode_box.model().item(window.mode_box.findData("max"))
         self.assertTrue(gpu_item.isEnabled())
-        self.assertTrue(faster_item.isEnabled())
-        self.assertTrue(max_item.isEnabled())
+        window.close()
+
+    def test_device_and_model_are_two_plain_choices_not_one_combined_list(self):
+        """Thomas asked for a plain Processing (CPU/GPU) choice and a plain
+        Model choice instead of one combined "Speed & accuracy" list of
+        curated presets -- this is the shape that request produces."""
+        import engine
+        import settings_window
+
+        class DummyEngine:
+            state = engine.UNLOADED
+            active_device = ""
+            last_status = (engine.UNLOADED, "", None)
+            gpu_status = (False, None)
+
+            def preload(self):
+                pass
+
+        with (
+            patch.object(settings_window.engine_mod, "cuda_available", return_value=False),
+            patch.object(settings_window.audio_mod, "input_devices", return_value=[]),
+        ):
+            window = settings_window.SettingsWindow(config.Settings(), DummyEngine())
+
+        self.assertEqual(
+            [window.device_box.itemData(i) for i in range(window.device_box.count())],
+            ["cpu", "cuda"],
+        )
+        self.assertEqual(
+            [window.model_box.itemData(i) for i in range(window.model_box.count())],
+            [size for size, _summary in config.MODELS],
+        )
+        # An unrecognized saved model/device (a hand-edited or ancient
+        # settings file) falls back to the first real row in each box
+        # instead of raising or leaving the collapsed control blank.
+        window._load_widgets(config.Settings(model_size="nope", device="nope"))
+        self.assertIsNotNone(window.device_box.currentData())
+        self.assertIsNotNone(window.model_box.currentData())
         window.close()
 
     def test_refresh_status_shows_live_gpu_download_progress(self):
@@ -2599,7 +3050,7 @@ class UiTests(unittest.TestCase):
             # and disables the button while a check/download is in flight.
             dummy_updater.last_status = (
                 updater.DOWNLOADING,
-                "Downloading update 0.1.0-beta.3 — 10%",
+                "Downloading update 0.1.0-beta.3 · 10%",
                 0.10,
             )
             window.refresh_status()
@@ -3336,14 +3787,51 @@ class BarClickTests(unittest.TestCase):
         self.assertEqual(b._margin_target, 24.0)
         self.assertEqual(b._margin_velocity, velocity)
 
+    def test_width_preview_recentres_after_reappearing_at_a_stale_position(self):
+        """Regression: dragging the "Bar width" slider after the bar has
+        auto-hidden used to snap it to the far left of the screen instead of
+        centre. Root cause -- preview_width() starts the width spring (which
+        captures its recentring anchor from the bar's *current*, possibly
+        stale, hidden position) before show_bar() repositions the window;
+        reposition() only cleared a stale anchor when the spring was idle,
+        so an anchor captured moments earlier from the wrong position
+        survived and silently overwrote the correct centred position on the
+        very next width-spring tick. Dragging the taskbar-distance slider
+        "fixed" it only because that slider's own move path recomputes an
+        absolute position from real screen geometry every tick, bypassing
+        the stale anchor entirely.
+        """
+        import bar as bar_mod
+        from PySide6.QtWidgets import QApplication
 
-class ToastWidthTests(unittest.TestCase):
-    """The toast used to elide routine update text mid-sentence because
-    MAX_W (320px) was narrower than realistic messages -- a long version
-    string plus "available -- click to download & install" easily exceeds
-    that. It now wraps to a second line instead; this locks in that the
-    wrapped box is actually tall enough to hold the whole message, rather
-    than just eyeballing it once."""
+        b = bar_mod.Bar(config.Settings(bar_width=200, bar_margin=8))
+        b.show_bar()
+        # Simulate the window sitting wherever it happened to be left after
+        # an ordinary auto-hide -- far from centre -- before it was hidden.
+        b.move(0, 0)
+        b.hide()
+
+        b.preview_width(260)
+        for _ in range(400):
+            if not b._width_timer.isActive():
+                break
+            b._width_last_tick -= 0.016
+            b._tick_width()
+
+        screen = QApplication.primaryScreen()
+        area = screen.availableGeometry()
+        expected_x = area.center().x() - b._window_width() // 2
+        self.assertEqual(b.x(), expected_x)
+
+
+class InlineLabelWidthTests(unittest.TestCase):
+    """Error/notice text used to live in a separate floating toast with its
+    own MAX_W and wrapping. Now it's inline in the bar's own pill on one
+    line (see Bar._label_width), so what matters is that every message the
+    app actually shows there fits without being elided -- the "Update X
+    available" nudge is deliberately excluded (see main.py's
+    _on_update_available), since Settings is now the only place that shows
+    it and it was the one message long enough to force wrapping before."""
 
     @classmethod
     def setUpClass(cls):
@@ -3353,32 +3841,54 @@ class ToastWidthTests(unittest.TestCase):
             ["dictate-tests", "-platform", "offscreen"]
         )
 
-    def test_realistic_update_messages_are_not_clipped(self):
-        from PySide6.QtCore import Qt
-        from PySide6.QtGui import QFontMetrics
+    def test_realistic_messages_are_not_clipped(self):
+        """_label_width's formula guarantees enough room for its own text
+        unless PILL_W_MAX clamps it -- verified algebraically rather than
+        against a fixed pixel budget, since headless/offscreen Qt (this
+        test's platform) substitutes a font with noticeably wider metrics
+        than the real Windows text renderer the shipped app actually draws
+        with (see DESIGN.md-adjacent notes on the offscreen platform having
+        no real fonts). A message long enough to hit the clamp under that
+        substitution is expected to elide -- see the test below -- so this
+        only asserts the invariant where the clamp isn't in play.
+        """
+        from PySide6.QtGui import QFont, QFontMetrics
 
         import bar as bar_mod
 
-        toast = bar_mod.Toast()
         messages = [
             "You're up to date.",
-            "Update 0.2.10-beta.12 ready. Click to install.",
+            "Update ready to restart.",
             "Ready. Hold Ctrl+Alt+F9 to talk.",
+            "No microphone detected.",
+            "Couldn't safely protect your clipboard.",
+            "Downloading update…",
         ]
-        metrics = QFontMetrics(toast._font)
+        font = QFont("Segoe UI Variable Text", 10)
+        metrics = QFontMetrics(font)
         for text in messages:
-            toast.show_message(text, bar_mod.QRect(0, 0, 1, 1))
-            rect_w = toast.width() - toast.PAD * 2 - 16
-            if metrics.horizontalAdvance(text) <= rect_w:
-                continue  # fits on one line, drawn verbatim -- nothing to check
-            wrapped = metrics.boundingRect(
-                bar_mod.QRect(0, 0, rect_w, 10_000), Qt.TextWordWrap, text
-            )
+            width = bar_mod.Bar._label_width(None, text)
+            if width >= bar_mod.PILL_W_MAX:
+                continue  # clamped -- eliding is the accepted fallback here
+            # _label_width reserves the same 25 px icon allowance and side
+            # padding paintEvent's elide uses -- see max_text_w there.
+            available = max(40.0, (width - 2 * bar_mod.PAD) - 25.0)
             self.assertLessEqual(
-                wrapped.height(),
-                toast.height(),
-                msg=f"wrapped text still clipped: {text!r}",
+                metrics.horizontalAdvance(text),
+                available,
+                msg=f"message still clipped at its own computed width: {text!r}",
             )
+
+    def test_an_unrealistically_long_message_still_elides_cleanly(self):
+        """Not every string can fit on one line at any sane pill width --
+        _label_width must clamp rather than grow the pill without bound, and
+        paintEvent's own elide (max_text_w) must actually kick in so a
+        rogue caller can never overflow the pill."""
+        import bar as bar_mod
+
+        text = "Update 0.2.10-beta.12 is ready to install. Click here to restart Dictate and finish."
+        width = bar_mod.Bar._label_width(None, text)
+        self.assertEqual(width, bar_mod.PILL_W_MAX)
 
 
 class ModelDownloadBarTests(unittest.TestCase):
@@ -3399,55 +3909,59 @@ class ModelDownloadBarTests(unittest.TestCase):
 
         self.assertEqual(bar._state, "loading")
         self.assertEqual(bar._progress, 0.25)
-        self.assertTrue(bar._loading_notice_active)
-        # The toast's label is the real detail text, not a hardcoded
+        # The inline caption is the real detail text, not a hardcoded
         # "Downloading model…" -- a GPU-runtime or update download passes
         # its own accurate detail through the exact same path (see the two
         # tests below), so a hardcoded string would have mislabeled those.
-        self.assertEqual(bar._toast._text, "small.en on CPU — downloading 25%")
+        self.assertEqual(bar._detail, "small.en on CPU — downloading 25%")
+        # The pill widens to fit the caption on one line (has_icon=False,
+        # since it's a centred caption above the track, not an icon+text row).
+        self.assertEqual(
+            bar._state_width(), bar._label_width(bar._detail, has_icon=False)
+        )
 
         bar.set_state("loaded", "small.en on CPU")
 
-        self.assertFalse(bar._loading_notice_active)
+        self.assertIsNone(bar._progress)
 
-    def test_toast_label_updates_live_as_progress_ticks_without_replaying_entrance(self):
+    def test_loading_caption_updates_live_as_progress_ticks(self):
         """This is the actual "so u can see the progress" ask: the percentage
-        shown in the label above the bar has to keep pace with the fill, not
-        freeze at whatever it said the moment the toast first appeared."""
+        shown in the caption above the fill has to keep pace with it, not
+        freeze at whatever it said when the download started."""
         import bar as bar_mod
 
         bar = bar_mod.Bar(config.Settings())
         bar._state_since = 0.0
         bar.set_state("loading", "Downloading GPU acceleration… 0%", 0.0)
-        self.assertEqual(bar._toast._text, "Downloading GPU acceleration… 0%")
-        first_size = bar._toast.size()
+        self.assertEqual(bar._detail, "Downloading GPU acceleration… 0%")
+        first_width = bar._state_width()
 
-        # Same "loading" state, later progress ticks -- update_text(), not a
-        # second show_message() call, so no repeated slide-in/fade-in.
+        # Same "loading" state, later progress ticks -- the same-state fast
+        # path in set_state() still re-measures the label width live.
         bar.set_state("loading", "Downloading GPU acceleration… 42%", 0.42)
-        self.assertEqual(bar._toast._text, "Downloading GPU acceleration… 42%")
-        self.assertTrue(bar._loading_notice_active)
+        self.assertEqual(bar._detail, "Downloading GPU acceleration… 42%")
+        self.assertEqual(bar._progress, 0.42)
 
         bar.set_state("loading", "Downloading GPU acceleration… 100%", 1.0)
-        self.assertEqual(bar._toast._text, "Downloading GPU acceleration… 100%")
-        # A wider label can grow the toast; a narrower one won't crash either.
-        self.assertGreaterEqual(bar._toast.size().width(), first_size.width() - 40)
+        self.assertEqual(bar._detail, "Downloading GPU acceleration… 100%")
+        # A wider label can grow the pill; a narrower one won't crash either.
+        self.assertGreaterEqual(bar._state_width(), first_width - 40)
 
-    def test_gpu_download_and_update_labels_flow_through_the_same_toast_path(self):
+    def test_gpu_download_and_update_captions_flow_through_the_same_state(self):
         import bar as bar_mod
 
         bar = bar_mod.Bar(config.Settings())
         bar._state_since = 0.0
 
         bar.set_state("loading", "Downloading GPU acceleration… 10%", 0.10)
-        self.assertEqual(bar._toast._text, "Downloading GPU acceleration… 10%")
+        self.assertEqual(bar._detail, "Downloading GPU acceleration… 10%")
 
         bar.set_state("loaded", "GPU acceleration ready")
-        self.assertFalse(bar._loading_notice_active)
+        self.assertIsNone(bar._progress)
 
         bar._state_since = 0.0
-        bar.set_state("loading", "Downloading update 1.2.3 — 55%", 0.55)
-        self.assertEqual(bar._toast._text, "Downloading update 1.2.3 — 55%")
+        bar.set_state("loading", "Downloading update 1.2.3 · 55%", 0.55)
+        self.assertEqual(bar._detail, "Downloading update 1.2.3 · 55%")
 
 
 class BarClickWiringTests(unittest.TestCase):
@@ -3467,6 +3981,7 @@ class BarClickWiringTests(unittest.TestCase):
         app.cues = Mock()
         app._dictation_active = True
         app._busy = False
+        app._live_silence_reported = False
         app._start_cue_at = 0.0
         return app, main
 
@@ -4664,6 +5179,7 @@ class DictationDeliveryTests(unittest.TestCase):
         app = main.App.__new__(main.App)
         app._busy = True
         app._dictation_active = False
+        app._live_silence_reported = False
         app.bar = Mock()
         app.mic = Mock()
         app.meter_timer = Mock()

@@ -24,3 +24,7 @@ AGENTS.md
 
 # Local release-note preview output. The changelog remains the publishable source.
 release-notes.md
+
+# Local design-review scratch output (screenshots, critique notes) from the
+# impeccable skill -- never published or tracked.
+.impeccable/

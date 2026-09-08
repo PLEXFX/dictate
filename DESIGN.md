@@ -30,3 +30,16 @@ Dictate is a minimal Windows 11 utility. The interface should feel at home besid
 - The post-update page is version-specific and presents the GitHub release body for the version just installed.
 - A version change opens What's New once over Settings. The same theme-matched modal remains available from a quiet footer link directly above GitHub and ends with one explicit Close action.
 - `CHANGELOG.md` is the release-note source. Prepare the GitHub release body with `prepare-release-notes.bat`; do not hand-maintain a second list inside the app.
+
+## Approved September 5 refinement
+
+- Dictation groups are Recording, Transcription, and Stay ready. Memory controls live in Advanced. Keep all existing settings and update actions functional.
+- The activity surface is a 36 px opaque capsule. Listening uses the selected width, a locked recording adds a lock, and success contracts to a 145 px Inserted receipt. Errors expand to a 260 px actionable status with details above.
+- State feedback is immediate: no minimum dwell before the next state. The waveform morphs from its current shape over 190 ms including the small stagger. Content crossfades and width springs preserve interruptions.
+- Idle is a quiet short line with no decorative loop. Windows Animation effects off gives a static working signal, direct width changes, and no reveal motion. Hidden bars reset their receipt and stop rendering.
+
+## September 6 icon and update refinement
+
+- Render the Fluent navigation family at native Windows display scales. Update symbols use the native Windows 11 Segoe Fluent Icons Sync glyph (U+E895), with the bundled Microsoft SVG as a font-unavailable fallback. Thomas rejected the custom-drawn returning arrows. Downloads, checks, and warnings retain matching rounded outlines.
+- The 208 px Settings rail gives the update notice room for a readable title and action. Use 10 pt semibold for its title, 9 pt for secondary text, a 3 px gap, and actual wrapped-label heights to prevent clipping. Use a quiet amber surface for availability, a solid amber restart action, and measured wrapped copy for longer status messages.
+- A small amber dot on the existing tray logo indicates a known update, including downloading and verified restart readiness. Restore it for a staged update on launch, retain it after a failed transfer, and clear it on a confirmed up-to-date result. Availability does not raise a popup or activity-bar notice. Compose plain and dotted tray frames at explicit physical-pixel DPR 1.0 so display scaling cannot resize one state differently.

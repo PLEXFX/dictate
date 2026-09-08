@@ -1,7 +1,7 @@
 """The floating bar: a small Windows 11 flyout centred above the taskbar.
 
 Drawn by hand rather than assembled from widgets. A solid Fluent surface keeps
-the compact flyout legible in both light and dark mode, with an 8px radius, a
+the compact flyout legible in both light and dark mode, with a compact capsule shape, a
 1px light stroke, and an ambient shadow so the bar sits *above* the taskbar.
 
 Fluent gets its polish from material and geometry, not from lighting. There is
@@ -62,6 +62,7 @@ already typing in, and a bar that steals focus would paste into itself.
 
 from __future__ import annotations
 
+import ctypes
 import math
 import time
 
@@ -115,13 +116,23 @@ WAVE_W = N_BARS * BAR_W + (N_BARS - 1) * BAR_GAP
 
 PAD = 18
 PILL_W = int(2 * PAD + WAVE_W)
-PILL_H = 40
-RADIUS = 8             # Windows 11 flyout radius; 16 read as iOS
+PILL_H = 36
+RADIUS = PILL_H / 2    # Compact capsule approved in the Settings preview
 SHADOW_PAD = 12        # room around the pill for the ambient shadow
 PILL_TOP = SHADOW_PAD
 WIDTH = PILL_W + 2 * SHADOW_PAD
 HEIGHT = PILL_TOP + PILL_H + SHADOW_PAD
 MAX_BAR_H = PILL_H - 12
+
+# The pill's own width range. The floor matches the "done" receipt; the
+# ceiling is sized for a full error/notice sentence on one line now that
+# message text lives inline instead of in a separate floating toast (see
+# _label_width) -- well past the 145-280 range Settings' own width slider
+# uses, which config.py clamps independently, so raising this never lets
+# that slider go wider than it already promises.
+PILL_W_MIN = 145.0
+PILL_W_MAX = 420.0
+DEFAULT_ERROR_TEXT = "Something isn't working"
 
 # One hairline runs the width of the bar and never moves. At rest the bars sit
 # flush in it; speaking grows them out of it; loading sinks them back into it
@@ -170,12 +181,19 @@ MARGIN_ZETA = 1.0
 # could take 694 ms end to end and read as lag. These are sized so the worst
 # case is 470 ms and the common case is 230 ms.
 MORPH_SECONDS = 0.15
+# The idle squish (bar.py's _idle_mix, below) has to stay behind the bar
+# heights collapsing to the hairline -- otherwise the wave visibly narrows
+# while still-tall capsules are inside it, reading as a squashed accordion
+# rather than bars settling into a quiet line. This is slower than the
+# 0.045 s crossfade used for content/lock so the squish only becomes
+# noticeable once the morph above has mostly finished.
+IDLE_SQUISH_SECONDS = 0.16
 # Bars begin their morph a beat apart rather than all at once, so a state
 # change ripples across the bar instead of snapping as one block. 21 bars at
 # 4 ms spread it over 80 ms -- enough to read as a ripple, short enough that
 # the whole morph still lands inside the dwell floor below.
-STAGGER_SECONDS = 0.004
-MIN_DWELL_SECONDS = 0.24   # no state is on screen for less time than this
+STAGGER_SECONDS = 0.002
+MIN_DWELL_SECONDS = 0.0   # state feedback never waits behind a previous animation
 BURST_TAU = 0.24
 SWEEP_TAU = 0.07           # how fast the bars collapse into the progress track
 SLICE_SECONDS = 0.07       # one new amplitude column; 21 of them ~= 1.5 s
@@ -184,12 +202,12 @@ SLICE_SECONDS = 0.07       # one new amplitude column; 21 of them ~= 1.5 s
 # and it has to be wrap-corrected. Two components crossing at different speeds
 # and in opposite directions interfere, so the line undulates and never
 # settles into an obvious loop -- and being sines, there is no seam at all.
-TRANSCRIBE_HZ = 1.1        # speed of the primary component
+TRANSCRIBE_HZ = 0.75        # speed of the primary component
 TRANSCRIBE_HARMONIC = 2.0  # crests across the bar in the counter-moving one
 # A low floor lets the troughs sink most of the way back into the hairline,
 # so the crests stand out instead of the whole bar reading as a dense block.
 TRANSCRIBE_FLOOR = 0.10
-TRANSCRIBE_SWING = 0.66
+TRANSCRIBE_SWING = 0.32
 # Loading segments. Two speeds rather than one, so the pair drifts apart
 # instead of travelling locked together like a single rigid object.
 SWEEP_HZ = 0.55
@@ -364,6 +382,17 @@ ENTER_MS = 200
 EXIT_MS = 150
 
 
+def _animations_enabled() -> bool:
+    """Follow Windows Accessibility > Visual effects > Animation effects."""
+    enabled = ctypes.c_int(1)
+    try:
+        if ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0):
+            return bool(enabled.value)
+    except (AttributeError, OSError):
+        pass
+    return True
+
+
 class Bar(QWidget):
     clicked = Signal()   # only fires while set_clickable(True) -- see mouseReleaseEvent
 
@@ -372,13 +401,13 @@ class Bar(QWidget):
         self._settings = settings
         self._dark = resolve_dark(settings.theme_mode)
         self._palette = colors(self._dark)
+        self._reduced_motion = not _animations_enabled()
         self._state = "idle"
         self._detail = ""
         self._progress: float | None = None  # 0..1 once a download reports real bytes
-        self._notice_tone = "info"       # "info" or "success" -- picks the toast's dot colour
+        self._notice_tone = "info"       # "info" or "success" -- picks the notice's dot colour
         self._notice_duration_ms: int | None = None
-        self._toast_on_click = None      # optional callback for an actionable notice
-        self._loading_notice_active = False
+        self._notice_on_click = None     # optional callback for an actionable notice
         self._linger_ms = settings.bar_linger_ms
         self._margin_value = float(settings.bar_margin)
         self._margin_target = self._margin_value
@@ -390,6 +419,9 @@ class Bar(QWidget):
         self._width_last_tick = time.perf_counter()
         self._width_anchor_x: float | None = None
 
+        self._content = {"wave": 1.0, "done": 0.0, "loaded": 0.0, "error": 0.0, "notice": 0.0}
+        self._lock_mix = 0.0
+        self._idle_mix = 1.0
         self._clickable = False          # only true while a locked recording is running
         self._press_scale = 1.0
         self._press_vel = 0.0
@@ -434,9 +466,6 @@ class Bar(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setFixedSize(self._window_width(), HEIGHT)
 
-        self._toast = Toast(self._dark)
-        self._toast.clicked.connect(self._on_toast_clicked)
-
         # Everything about the entrance -- fade, scale and rise -- is driven
         # from this one value, so the three can never disagree.
         self._reveal_anim = QPropertyAnimation(self, b"reveal", self)
@@ -473,10 +502,34 @@ class Bar(QWidget):
         self._accent = system_accent(dark)
         if self._state == "idle":
             self._tint = QColor(self._palette["idle"])
-        self._toast.set_theme(dark)
         self.update()
 
     # --- placement ---
+
+    def _state_width(self) -> int:
+        if self._state == "done":
+            return 145
+        if self._state == "error":
+            return self._label_width(self._detail or DEFAULT_ERROR_TEXT)
+        if self._state == "notice":
+            return self._label_width(self._detail)
+        if self._state == "loaded":
+            return self._label_width(self._detail or "Ready")
+        if self._state == "loading" and self._progress is not None and self._detail:
+            return self._label_width(self._detail, has_icon=False)
+        return self._settings.bar_width
+
+    def _label_width(self, text: str, has_icon: bool = True) -> int:
+        """Pill width that fits ``text`` (plus its icon, if any) on one line
+        with a little breathing room -- so a real error/notice message never
+        has to be clipped down to a canned short label the way it did when
+        the full text lived in a separate floating toast instead of here.
+        """
+        font = QFont("Segoe UI Variable Text", 10 if has_icon else 9)
+        text_w = QFontMetrics(font).horizontalAdvance(text)
+        icon_allowance = 25.0 if has_icon else 0.0
+        width = text_w + icon_allowance + 2 * PAD + 16
+        return int(max(PILL_W_MIN, min(PILL_W_MAX, width)))
 
     def _window_width(self) -> int:
         return int(round(self._pill_width)) + 2 * SHADOW_PAD
@@ -488,7 +541,7 @@ class Bar(QWidget):
         return max(0.0, (self._wave_width() - N_BARS * BAR_W) / (N_BARS - 1))
 
     def _set_pill_width(self, width: float) -> None:
-        width = min(280.0, max(180.0, float(width)))
+        width = min(PILL_W_MAX, max(PILL_W_MIN, float(width)))
         if abs(width - self._pill_width) < 0.01:
             return
         anchor_x = self._width_anchor_x
@@ -498,13 +551,16 @@ class Bar(QWidget):
         self.setFixedSize(self._window_width(), HEIGHT)
         if self.isVisible():
             self.move(round(anchor_x - self.width() / 2.0), self.y())
-        if hasattr(self, "_toast"):
-            self._toast.follow(self.pill_geometry())
         self.update()
 
     def _animate_width(self, width: int) -> None:
-        target = float(min(280, max(180, width)))
+        target = float(min(PILL_W_MAX, max(PILL_W_MIN, width)))
         self._width_target = target
+        if self._reduced_motion:
+            self._width_timer.stop()
+            self._width_velocity = 0.0
+            self._set_pill_width(target)
+            return
         if abs(target - self._pill_width) < 0.05 and abs(self._width_velocity) < 0.05:
             self._set_pill_width(target)
             return
@@ -592,7 +648,6 @@ class Bar(QWidget):
         x = area.center().x() - self._window_width() // 2
         y = area.bottom() + 1 - max(0.0, margin) - PILL_H - PILL_TOP
         self.move(x, round(y))
-        self._toast.follow(self.pill_geometry())
 
     def reposition(self) -> None:
         """Centre horizontally, sit just above the taskbar.
@@ -603,7 +658,16 @@ class Bar(QWidget):
         out so the configured gap applies to the pill, not to the window.
         """
         self._move_for_margin(self._margin_value)
-        if not self._width_timer.isActive():
+        if self._width_timer.isActive():
+            # This move just recomputed the true on-screen centre from real
+            # screen geometry. If the width spring is mid-flight, its next
+            # tick calls _set_pill_width(), which re-derives x from
+            # _width_anchor_x rather than from the screen -- a stale anchor
+            # (e.g. captured while the bar was hidden at a leftover position)
+            # would silently overwrite the correct position just set above,
+            # snapping the bar away from centre on the very next frame.
+            self._width_anchor_x = self.x() + self.width() / 2.0
+        else:
             self._width_anchor_x = None
 
     def _sync_frame_rate(self, screen) -> None:
@@ -631,8 +695,8 @@ class Bar(QWidget):
         # settings save while the app was in light mode.
         self._accent = system_accent(self._dark)
         self._linger_ms = settings.bar_linger_ms
-        if abs(self._width_target - settings.bar_width) >= 0.5:
-            self._animate_width(settings.bar_width)
+        if abs(self._width_target - self._state_width()) >= 0.5:
+            self._animate_width(self._state_width())
         if abs(self._margin_target - settings.bar_margin) >= 0.5:
             self._animate_margin(settings.bar_margin)
         if self._state == "idle":
@@ -681,23 +745,16 @@ class Bar(QWidget):
         on_click=None,
         duration_ms: int | None = None,
     ) -> None:
-        """Show an informational toast above the bar, in the same style and
-        position as the error toast, instead of a Windows system tray
-        balloon -- so a manual "check for updates" reads as this app's own
-        notification system rather than a different one bolted on for just
-        that button.
+        """Show an informational notice inline in the bar itself, expanding
+        the pill to fit the message on one line -- the same surface every
+        other state already speaks from, rather than a separate floating
+        window bolted on above it.
         """
         self._notice_tone = tone
         self._notice_duration_ms = duration_ms
-        self._toast_on_click = on_click
-        self._toast.setCursor(Qt.PointingHandCursor if on_click else Qt.ArrowCursor)
+        self._notice_on_click = on_click
+        self._refresh_mouse_transparency()
         self.set_state("notice", text)
-
-    def _on_toast_clicked(self) -> None:
-        if self._toast_on_click is not None:
-            callback = self._toast_on_click
-            self._toast_on_click = None
-            callback()
 
     def set_state(
         self, state: str, detail: str = "", progress: float | None = None
@@ -713,31 +770,19 @@ class Bar(QWidget):
         first-time model download, a GPU-runtime download, or an update
         download reports real bytes, switching the track from the
         indeterminate sweep to a fill. Left ``None`` for an ordinary cached
-        load, which stays on the sweep.
+        load, which stays on the sweep. Whenever it carries a live
+        percentage, ``detail`` is painted as a small caption above the track
+        (see paintEvent) and the pill widens to fit it -- kept current on
+        every call, not just the first, so the caption tracks the fill
+        instead of freezing at whatever it said when downloading started.
         """
-        # A download in progress has two honest pieces of feedback: the bar
-        # becomes a real progress fill, while the attached label says why
-        # it's on screen -- and, since ``detail`` already carries a live
-        # percentage from the caller, keeps that label current on every
-        # call rather than freezing it at whatever it said the moment the
-        # toast first appeared. Cached loads (progress is None) keep the
-        # quieter sweep alone, no label.
-        if state == "loading" and progress is not None:
-            label = detail or "Downloading…"
-            if not self._loading_notice_active:
-                self._loading_notice_active = True
-                self._toast.show_message(label, self.pill_geometry(), dot_color=self._accent)
-            else:
-                self._toast.update_text(label, self.pill_geometry())
-        elif self._loading_notice_active:
-            self._loading_notice_active = False
-            self._toast.dismiss()
-
         if state == self._state:
             self._pending = None            # latest request wins; it says "stay"
             self._dwell_timer.stop()
             self._detail = detail
             self._progress = progress
+            self._animate_width(self._state_width())
+            self.update()
             return
 
         remaining = MIN_DWELL_SECONDS - (time.perf_counter() - self._state_since)
@@ -757,6 +802,12 @@ class Bar(QWidget):
     def _apply_state(
         self, state: str, detail: str, progress: float | None = None
     ) -> None:
+        if state != "notice" and self._notice_on_click is not None:
+            # A new state means whatever the last notice offered to do on
+            # click is no longer on screen to click -- an idle bar must not
+            # keep the pointing-hand cursor from a message that already left.
+            self._notice_on_click = None
+            self._refresh_mouse_transparency()
         if state != self._state:
             # Morph out of what is actually on screen (_drawn), not out of
             # wherever the spring happened to be heading (_target) -- the
@@ -771,6 +822,7 @@ class Bar(QWidget):
         self._detail = detail
         self._progress = progress
         self._state_since = time.perf_counter()
+        self._animate_width(self._state_width())
 
         if state == "listening":
             self._history[:] = 0.0
@@ -791,14 +843,6 @@ class Bar(QWidget):
             else:
                 hide_after = self._linger_ms
             self._hide_timer.start(hide_after)
-            if state == "error":
-                self._toast_on_click = None
-                self._toast.show_message(
-                    detail or "Something isn't working", self.pill_geometry(), dot_color=ERROR
-                )
-            elif state == "notice":
-                dot = SUCCESS if self._notice_tone == "success" else self._accent
-                self._toast.show_message(detail, self.pill_geometry(), dot_color=dot)
         elif state == "idle":
             if self._settings.always_visible:
                 self.show_bar()             # keeps the clock alive for the morph
@@ -819,21 +863,39 @@ class Bar(QWidget):
         broken, not premium.
         """
         self._clickable = clickable
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, not clickable)
-        self.setCursor(Qt.PointingHandCursor if clickable else Qt.ArrowCursor)
+        self._refresh_mouse_transparency()
+
+    def _refresh_mouse_transparency(self) -> None:
+        """WA_TransparentForMouseEvents and the cursor both follow whichever
+        click gesture is currently armed -- the tap-to-lock finish click
+        (set_clickable) or an actionable notice's on_click -- so a bar with
+        neither active stays fully click-through, and either one alone still
+        looks and behaves exactly as it did before the other existed.
+        """
+        active = self._clickable or self._notice_on_click is not None
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not active)
+        self.setCursor(Qt.PointingHandCursor if active else Qt.ArrowCursor)
 
     def mousePressEvent(self, event) -> None:
-        if self._clickable:
-            self._press_target = PRESS_DIP
-            if not self._timer.isActive():
-                self._last_tick = time.perf_counter()
-                self._timer.start()
+        if not (self._clickable or self._notice_on_click is not None):
+            return
+        self._press_target = PRESS_DIP
+        if not self._timer.isActive():
+            self._last_tick = time.perf_counter()
+            self._timer.start()
 
     def mouseReleaseEvent(self, event) -> None:
-        if not self._clickable:
+        if not (self._clickable or self._notice_on_click is not None):
             return
         self._press_target = 1.0
-        if self.rect().contains(event.position().toPoint()):
+        if not self.rect().contains(event.position().toPoint()):
+            return
+        if self._notice_on_click is not None:
+            callback = self._notice_on_click
+            self._notice_on_click = None
+            self._refresh_mouse_transparency()
+            callback()
+        elif self._clickable:
             self.clicked.emit()
 
     def set_levels(self, levels: np.ndarray) -> None:
@@ -869,13 +931,14 @@ class Bar(QWidget):
     reveal = Property(float, _get_reveal, _set_reveal)
 
     def show_bar(self) -> None:
+        self._reduced_motion = not _animations_enabled()
         if not self.isVisible():
             self.reposition()
             self.show()
         running = self._reveal_anim.state() == QPropertyAnimation.Running
         if not running or self._reveal_anim.endValue() != 1.0:
             self._reveal_anim.stop()
-            self._reveal_anim.setDuration(ENTER_MS)
+            self._reveal_anim.setDuration(0 if self._reduced_motion else ENTER_MS)
             self._reveal_anim.setEasingCurve(FLUENT_DECELERATE)
             self._reveal_anim.setStartValue(self._reveal)
             self._reveal_anim.setEndValue(1.0)
@@ -885,16 +948,11 @@ class Bar(QWidget):
             self._timer.start()
 
     def _auto_hide(self) -> None:
-        # Dismissed here, at the exact moment the bar itself starts leaving,
-        # rather than on its own independent timer -- both then run the same
-        # EXIT_MS/FLUENT_ACCELERATE fade, so a toast never lingers after the
-        # bar it is anchored to has already gone.
-        self._toast.dismiss()
         if self._settings.always_visible:
             self._apply_state("idle", "")
             return
         self._reveal_anim.stop()
-        self._reveal_anim.setDuration(EXIT_MS)
+        self._reveal_anim.setDuration(0 if self._reduced_motion else EXIT_MS)
         self._reveal_anim.setEasingCurve(FLUENT_ACCELERATE)
         self._reveal_anim.setStartValue(self._reveal)
         self._reveal_anim.setEndValue(0.0)
@@ -909,6 +967,13 @@ class Bar(QWidget):
         # Reset while nothing is on screen, so the next appearance starts from
         # a clean idle rather than morphing out of a shape from minutes ago.
         self._state = "idle"
+        self._content = {"wave": 1.0, "done": 0.0, "loaded": 0.0, "error": 0.0, "notice": 0.0}
+        self._lock_mix = 0.0
+        self._idle_mix = 1.0
+        self._width_timer.stop()
+        self._width_velocity = 0.0
+        self._width_target = float(self._settings.bar_width)
+        self._set_pill_width(self._width_target)
         self._state_since = time.perf_counter() - MIN_DWELL_SECONDS
         for arr in (self._drawn, self._vel, self._target,
                     self._burst, self._history, self._morph_from):
@@ -928,7 +993,8 @@ class Bar(QWidget):
             return
         dt = min(dt, MAX_DT)
 
-        self._clock = (self._clock + dt) % 86400.0
+        if not self._reduced_motion:
+            self._clock = (self._clock + dt) % 86400.0
         # Held at full strength until the morph has finished delivering it.
         # Decaying from the moment the state applied meant the confirmation
         # was already 62% gone by the time it was fully on screen, so "done"
@@ -986,11 +1052,37 @@ class Bar(QWidget):
             self._drawn, self._vel, self._target, SPRING_OMEGA, SPRING_ZETA, dt
         )
 
+        # Crossfade from the currently rendered composition on every interrupt.
+        content_target = (
+            self._state if self._state in ("done", "loaded", "error", "notice") else "wave"
+        )
+        blend = 1.0 if self._reduced_motion else 1.0 - math.exp(-dt / 0.045)
+        for name in self._content:
+            self._content[name] += (float(name == content_target) - self._content[name]) * blend
+        self._lock_mix += (float(self._clickable and self._state == "listening") - self._lock_mix) * blend
+        # Squishing the wave narrower is only allowed to start once the bar
+        # heights have actually finished collapsing to the hairline (morph
+        # complete) -- otherwise the width closes in around still-tall
+        # capsules and reads as a squashed accordion instead of bars settling
+        # quietly before the track narrows. Leaving idle un-squishes right
+        # away, since there is nothing tall inside yet for it to clip.
+        idle_target = 1.0 if (self._state == "idle" and self._morph_elapsed is None) else 0.0
+        idle_blend = 1.0 if self._reduced_motion else 1.0 - math.exp(-dt / IDLE_SQUISH_SECONDS)
+        self._idle_mix += (idle_target - self._idle_mix) * idle_blend
+
+        if self._reduced_motion:
+            self._drawn[:] = live
+            self._vel[:] = 0.0
+            self._press_scale = 1.0
+            self._morph_elapsed = None
+
         # A permanently visible idle bar should cost nothing once it has come
         # to rest, so the clock stops when there is provably nothing moving.
         if (
             self._state == "idle"
             and self._morph_elapsed is None
+            and self._idle_mix > 0.999
+            and self._content["wave"] > 0.999
             and self._reveal_anim.state() != QPropertyAnimation.Running
             and self._sweep < 0.01
             and float(np.abs(self._drawn - self._target).max()) < 0.002
@@ -1023,14 +1115,7 @@ class Bar(QWidget):
         if state == "loading":
             return np.zeros(N_BARS, dtype=np.float32)    # collapsed to the track
         if state == "idle":
-            if not self._settings.always_visible:
-                return np.zeros(N_BARS, dtype=np.float32)
-            # A slow, centre-weighted breath rather than a flat line, so an
-            # always-visible idle bar reads as listening rather than stuck.
-            # Kept under LIFT_FADE_PX at its peak -- felt, not seen.
-            breath = 0.5 - 0.5 * math.cos(2.0 * math.pi * self._clock * IDLE_BREATH_HZ)
-            shape = np.clip(1.0 - _CENTRE_D * IDLE_BREATH_SPAN, 0.0, 1.0) ** 2
-            return (IDLE_BREATH_AMPLITUDE * breath * shape).astype(np.float32)
+            return np.zeros(N_BARS, dtype=np.float32)
         if state == "transcribing":
             # Two travelling components moving in opposite directions at
             # different speeds. Where they reinforce, a crest rises; where they
@@ -1117,31 +1202,119 @@ class Bar(QWidget):
         p.drawPath(_surface_path(pill_width=self._pill_width, pixel_inset=0.5))
         p.setPen(Qt.NoPen)
 
-        # The hairline is the one thing that never moves or fades, so the bars
-        # and the sweep are only ever *on* it. Drawing it once, outside the
-        # crossfade, is what stops the collapse into loading from reading as
-        # one widget being swapped for another.
-        cy = PILL_TOP + PILL_H / 2.0
+        # Wave, lock, and receipts share the same surface and transition clock.
+        p.save()
+        wave_alpha = self._reveal * self._content["wave"]
+        p.setOpacity(wave_alpha)
+        # A live download caption sits above the track (see below), so the
+        # track itself nudges down to leave it room -- the pill stays one
+        # 36 px surface rather than growing a second row for it.
+        show_loading_caption = (
+            self._state == "loading" and self._progress is not None and bool(self._detail)
+        )
+        track_offset = 7.0 if show_loading_caption else 0.0
+        track_cy = PILL_TOP + PILL_H / 2.0 + track_offset
+        cx = SHADOW_PAD + self._pill_width / 2.0
+        p.translate(cx + 9 * self._lock_mix, track_cy)
+        p.scale((1.0 - 0.64 * self._idle_mix) * (1.0 - 0.16 * self._lock_mix), 1.0)
+        p.translate(-cx, -track_cy)
         x0 = SHADOW_PAD + PAD
         hairline = QPainterPath()
-        hairline.addRoundedRect(
-            QRectF(x0, cy - TRACK_H / 2, self._wave_width(), TRACK_H),
-            TRACK_H / 2,
-            TRACK_H / 2,
-        )
+        hairline.addRoundedRect(QRectF(x0, track_cy - TRACK_H / 2, self._wave_width(), TRACK_H), 1, 1)
         p.fillPath(hairline, self._palette["track"])
-
         if self._sweep < 0.995:
-            p.setOpacity(self._reveal * (1.0 - self._sweep))
-            self._paint_bars(p)
+            p.setOpacity(wave_alpha * (1.0 - self._sweep))
+            self._paint_bars(p, track_cy)
         if self._sweep > 0.005:
-            p.setOpacity(self._reveal * self._sweep)
+            p.setOpacity(wave_alpha * self._sweep)
             if self._state == "loading" and self._progress is not None:
-                self._paint_determinate(p, self._progress)
+                self._paint_determinate(p, self._progress, track_cy)
             else:
-                self._paint_sweep(p)
+                self._paint_sweep(p, track_cy)
+        if show_loading_caption:
+            p.setOpacity(wave_alpha)
+            cap_font = QFont("Segoe UI Variable Text", 8)
+            p.setFont(cap_font)
+            p.setPen(self._palette["text"])
+            # Always this one short word, never the raw detail text (which
+            # could be "Downloading Small · CPU · 42%" or similar) --
+            # the fill underneath already shows the real percentage, so
+            # repeating it here just made the pill busier to read at a
+            # glance. Settings' own progress rows still show the full detail.
+            p.drawText(
+                QRectF(x0, PILL_TOP + 4, self._wave_width(), 14),
+                Qt.AlignHCenter | Qt.AlignVCenter,
+                "Downloading…",
+            )
+        p.restore()
+        if self._lock_mix > 0.001:
+            p.setOpacity(self._reveal * self._lock_mix)
+            p.setPen(QPen(self._accent, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            x = SHADOW_PAD + 18
+            p.drawRoundedRect(QRectF(x, cy - 2, 9, 7), 2, 2)
+            p.drawArc(QRectF(x + 2, cy - 8, 5, 9), 0, 180 * 16)
+        # Real message text, not a canned short label -- now that it lives on
+        # the bar's own surface instead of a separate floating toast, nothing
+        # is lost by keeping it short, so the actual detail is what's shown.
+        labels = {
+            "done": "Inserted",
+            "loaded": self._detail or "Ready",
+            "error": self._detail or DEFAULT_ERROR_TEXT,
+            "notice": self._detail,
+        }
+        notice_dot = SUCCESS if self._notice_tone == "success" else self._accent
+        icon_tone = {
+            "done": SUCCESS if self._dark else QColor("#25752C"),
+            "loaded": SUCCESS if self._dark else QColor("#25752C"),
+            "error": ERROR if self._dark else QColor("#C42B1C"),
+            "notice": notice_dot,
+        }
+        for name in ("done", "loaded", "error", "notice"):
+            weight = self._content[name]
+            if weight <= 0.001:
+                continue
+            p.setOpacity(self._reveal * weight)
+            font = QFont("Segoe UI Variable Text", 10)
+            p.setFont(font)
+            metrics = QFontMetrics(font)
+            # Measured against the pill's *target* width, not its current,
+            # still-animating one: the width spring takes noticeably longer
+            # to settle than the opacity crossfade above, so eliding against
+            # the live width used to show the message truncated -- shorter,
+            # with an ellipsis -- for the first several frames, un-truncating
+            # itself as the pill kept growing underneath. _label_width already
+            # sized the target width for this exact text, so the target is
+            # the width it is entitled to; elided here only as a defensive
+            # floor so a future caller passing something unexpectedly long
+            # still can't overflow the pill.
+            target_wave_width = max(1.0, self._width_target - 2 * PAD)
+            max_text_w = max(40.0, target_wave_width - 25.0)
+            label = metrics.elidedText(labels[name], Qt.ElideRight, int(max_text_w))
+            text_width = metrics.horizontalAdvance(label)
+            x = cx - (text_width + 25) / 2
+            y = cy + 3 * (1.0 - weight)
+            tone = icon_tone[name]
+            if name == "notice":
+                p.setPen(Qt.NoPen)
+                p.setBrush(tone)
+                p.drawEllipse(QRectF(x + 2, y - 4, 8, 8))
+            else:
+                p.setPen(QPen(tone, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                p.setBrush(Qt.NoBrush)
+                if name in ("done", "loaded"):
+                    check = QPainterPath(QPointF(x, y))
+                    check.lineTo(x + 4, y + 4)
+                    check.lineTo(x + 12, y - 5)
+                    p.drawPath(check)
+                else:
+                    p.drawEllipse(QRectF(x, y - 6, 12, 12))
+                    p.drawLine(QPointF(x + 6, y - 3), QPointF(x + 6, y))
+                    p.drawPoint(QPointF(x + 6, y + 3))
+            p.setPen(self._palette["text"])
+            p.drawText(QRectF(x + 25, y - 12, text_width + 2, 24), Qt.AlignVCenter, label)
 
-    def _paint_bars(self, p: QPainter) -> None:
+    def _paint_bars(self, p: QPainter, cy: float) -> None:
         """Slim capsules growing out of the hairline.
 
         A capsule fades in over its first few pixels of lift rather than
@@ -1151,7 +1324,6 @@ class Bar(QWidget):
         to be -- and the faintness of a quiet voice becomes part of the
         signal instead of an on/off edge.
         """
-        cy = PILL_TOP + PILL_H / 2.0
         x0 = SHADOW_PAD + PAD
         base_alpha = self._tint.alphaF()
 
@@ -1174,10 +1346,9 @@ class Bar(QWidget):
             )
             p.fillPath(capsule, colour)
 
-    def _paint_sweep(self, p: QPainter) -> None:
+    def _paint_sweep(self, p: QPainter, cy: float) -> None:
         """Windows' indeterminate ProgressBar, running along the same hairline
         the bars just sank into: two accent segments, the longer one leading."""
-        cy = PILL_TOP + PILL_H / 2.0
         x0 = SHADOW_PAD + PAD
         width = self._wave_width()
 
@@ -1204,14 +1375,13 @@ class Bar(QWidget):
             grad.setColorAt(1.0, head)
             p.fillPath(path, QBrush(grad))
 
-    def _paint_determinate(self, p: QPainter, fraction: float) -> None:
+    def _paint_determinate(self, p: QPainter, fraction: float, cy: float) -> None:
         """A filling hairline once a download reports real byte progress.
 
         Replaces the indeterminate sweep on the same track rather than
         introducing a second widget, for the same reason the sweep collapses
         onto the hairline instead of appearing beside it.
         """
-        cy = PILL_TOP + PILL_H / 2.0
         x0 = SHADOW_PAD + PAD
         filled = self._wave_width() * float(np.clip(fraction, 0.0, 1.0))
         if filled <= 0.5:
@@ -1309,184 +1479,3 @@ def _lerp_color(a: QColor, b: QColor, t: float) -> QColor:
         int(round(a.blue() + (b.blue() - a.blue()) * t)),
         int(round(a.alpha() + (b.alpha() - a.alpha()) * t)),
     )
-
-
-class Toast(QWidget):
-    """A small Fluent alert glued above the bar -- a real failure (no
-    microphone, a model that failed to load), or an informational notice
-    (an update check result) that would otherwise have been a separate
-    Windows system tray balloon. The bar changing colour says *something*
-    happened; this says *what*.
-
-    Deliberately has no auto-dismiss timer of its own: whoever shows it also
-    owns a Bar hide timer, and calls dismiss() from that same callback, so
-    the toast's exit and the bar's exit are the same animation started at
-    the same instant rather than two clocks that can drift apart.
-    """
-
-    PAD = 12
-    GAP = 8       # px between the toast's bottom edge and the pill's top edge
-    HEIGHT = 38
-    # A realistic update message ("Update 0.2.10-beta.12 available — click
-    # to download & install") measures ~750px at this font -- far past any
-    # single-line width worth showing at the bar's own compact scale. Rather
-    # than growing MAX_W to match (an oversized pill, and still not proof
-    # against the next longer message), text past this width wraps to a
-    # second line instead of eliding, so nothing is ever cut off.
-    MAX_W = 400
-    RADIUS = 8
-
-    clicked = Signal()
-
-    def __init__(self, dark: bool | None = None) -> None:
-        super().__init__(None)
-        self.setWindowFlags(
-            Qt.FramelessWindowHint
-            | Qt.WindowStaysOnTopHint
-            | Qt.Tool
-            | Qt.WindowDoesNotAcceptFocus
-        )
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
-        self.setWindowOpacity(0.0)
-        self.setFixedSize(self.MAX_W, self.HEIGHT)
-
-        self._text = ""
-        self._dot_color = ERROR
-        self._dark = system_is_dark() if dark is None else dark
-        self._font = QFont("Segoe UI Variable Text", 9)
-        if not self._font.exactMatch():
-            self._font = QFont("Segoe UI", 9)
-
-        self._opacity_anim = QPropertyAnimation(self, b"windowOpacity", self)
-        self._slide_anim = QPropertyAnimation(self, b"pos", self)
-
-    def set_theme(self, dark: bool) -> None:
-        self._dark = dark
-        self.update()
-
-    def _resize_for_text(self, text: str) -> None:
-        metrics = QFontMetrics(self._font)
-        chrome = self.PAD * 2 + 22  # dot + its left offset + the pill's own side padding
-        if metrics.horizontalAdvance(text) + chrome <= self.MAX_W:
-            w = max(160, metrics.horizontalAdvance(text) + chrome)
-            h = self.HEIGHT
-        else:
-            # Wrap rather than elide once one line at MAX_W isn't enough --
-            # see the MAX_W comment above.
-            w = self.MAX_W
-            wrapped = metrics.boundingRect(
-                QRect(0, 0, w - chrome, 10_000), Qt.TextWordWrap, text
-            )
-            h = max(self.HEIGHT, wrapped.height() + self.PAD * 2)
-        self.setFixedSize(w, h)
-
-    def show_message(self, text: str, anchor_rect: QRect, dot_color: QColor = ERROR) -> None:
-        self._text = text
-        self._dot_color = dot_color
-        self._resize_for_text(text)
-
-        end_pos = self._anchor_pos(anchor_rect)
-        start_pos = QPoint(end_pos.x(), end_pos.y() + 10)
-        self.move(start_pos)
-        self.show()
-        self.raise_()
-
-        for anim, start, end in (
-            (self._opacity_anim, self.windowOpacity(), 1.0),
-            (self._slide_anim, start_pos, end_pos),
-        ):
-            anim.stop()
-            anim.setDuration(ENTER_MS)
-            anim.setEasingCurve(FLUENT_DECELERATE)
-            anim.setStartValue(start)
-            anim.setEndValue(end)
-            anim.start()
-
-        self.update()
-
-    def update_text(self, text: str, anchor_rect: QRect | None = None) -> None:
-        """Refresh an already-visible toast's label in place -- no slide-in,
-        no re-fade, just the new text (and a resize if it changed width).
-
-        For a live percentage ("Downloading… 42%" -> "43%") ticking every
-        throttled progress callback, replaying show_message()'s full entrance
-        animation on every tick would look like the toast restarting itself
-        several times a second instead of one steady counter. A no-op if the
-        toast isn't visible -- the caller's own next show_message() call
-        establishes the first text instead.
-        """
-        if not self.isVisible() or text == self._text:
-            return
-        self._text = text
-        self._resize_for_text(text)
-        if anchor_rect is not None:
-            self.move(self._anchor_pos(anchor_rect))
-        self.update()
-
-    def mousePressEvent(self, event) -> None:
-        self.clicked.emit()
-
-    def follow(self, anchor_rect: QRect) -> None:
-        """Keep glued to the bar if it moves while the toast is visible."""
-        if self.isVisible():
-            self.move(self._anchor_pos(anchor_rect))
-
-    def dismiss(self) -> None:
-        if not self.isVisible():
-            return
-        for anim, start, end in (
-            (self._opacity_anim, self.windowOpacity(), 0.0),
-            (self._slide_anim, self.pos(), QPoint(self.x(), self.y() + 10)),
-        ):
-            anim.stop()
-            anim.setDuration(EXIT_MS)
-            anim.setEasingCurve(FLUENT_ACCELERATE)
-            anim.setStartValue(start)
-            anim.setEndValue(end)
-            anim.start()
-        QTimer.singleShot(EXIT_MS + 20, self._finish_hide)
-
-    def _finish_hide(self) -> None:
-        if self.windowOpacity() < 0.05:
-            self.hide()
-
-    def _anchor_pos(self, anchor_rect: QRect) -> QPoint:
-        x = anchor_rect.center().x() - self.width() // 2
-        y = anchor_rect.top() - self.height() - self.GAP
-        # The bar itself is always screen-centred (Bar.reposition), so this
-        # only ever bites on an unusually narrow or heavily-zoomed display --
-        # but a wider MAX_W makes it worth guarding rather than assuming.
-        screen = QApplication.screenAt(anchor_rect.center()) or QApplication.primaryScreen()
-        if screen is not None:
-            area = screen.availableGeometry()
-            x = max(area.left(), min(x, area.right() - self.width()))
-        return QPoint(x, y)
-
-    def paintEvent(self, event) -> None:
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-
-        body = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
-        path = QPainterPath()
-        path.addRoundedRect(body, self.RADIUS, self.RADIUS)
-        palette = colors(self._dark)
-        p.fillPath(path, palette["surface"])
-        p.setPen(QPen(palette["stroke"], 1))
-        p.drawPath(path)
-
-        cy = self.height() / 2
-        p.setPen(Qt.NoPen)
-        p.setBrush(self._dot_color)
-        p.drawEllipse(QRectF(self.PAD, cy - 4, 8, 8))
-
-        p.setFont(self._font)
-        p.setPen(palette["text"])
-        rect = QRectF(self.PAD + 16, 0, self.width() - self.PAD * 2 - 16, self.height())
-        metrics = QFontMetrics(self._font)
-        if metrics.horizontalAdvance(self._text) <= rect.width():
-            p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, self._text)
-        else:
-            # show_message() already sized the box to fit this wrapped -- see
-            # its MAX_W comment -- so this is a real reflow, not a fallback.
-            p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft | Qt.TextWordWrap, self._text)

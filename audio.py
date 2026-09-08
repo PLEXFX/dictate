@@ -48,6 +48,27 @@ class InputDevice:
     index: int
 
 
+# Windows exposes the same physical microphone once per audio API (MME,
+# DirectSound, WASAPI, WDM-KS), so an unfiltered PortAudio listing shows the
+# same device three or four times over. Keep only the best-ranked API per
+# device name so the picker lists each real microphone once. WASAPI is
+# Windows' modern shared-mode API and the one Dictate already prefers
+# elsewhere; the rest are legacy compatibility layers over the same driver.
+_HOST_API_PRIORITY = (
+    "Windows WASAPI",
+    "Windows DirectSound",
+    "MME",
+    "Windows WDM-KS",
+)
+
+
+def _host_api_rank(name: str) -> int:
+    try:
+        return _HOST_API_PRIORITY.index(name)
+    except ValueError:
+        return len(_HOST_API_PRIORITY)
+
+
 def input_devices() -> list[InputDevice]:
     """Return the currently available microphones without opening any of them.
 
@@ -61,9 +82,7 @@ def input_devices() -> list[InputDevice]:
     except Exception:
         return []
 
-    candidates: list[tuple[str, str, int]] = []
-    occurrences: dict[tuple[str, str], int] = {}
-    name_counts: dict[str, int] = {}
+    raw: list[tuple[str, str, int]] = []  # (name, api_name, index)
     for index, device in enumerate(devices):
         if int(device.get("max_input_channels", 0)) <= 0:
             continue
@@ -73,6 +92,32 @@ def input_devices() -> list[InputDevice]:
             api_name = str(host_apis[api_index].get("name", "Windows audio"))
         except (IndexError, KeyError, TypeError):
             api_name = "Windows audio"
+        raw.append((name, api_name, index))
+
+    # Prefer a format-compatible API before API recency. Some WASAPI
+    # devices (including Yeti) reject 16 kHz even though their MME/DS route
+    # accepts it. This validates formats without opening a recording stream.
+    ranks: dict[int, tuple[int, int]] = {}
+    best_rank: dict[str, tuple[int, int]] = {}
+    for name, api_name, index in raw:
+        try:
+            sd.check_input_settings(
+                device=index, samplerate=SAMPLE_RATE, channels=1, dtype="float32"
+            )
+            incompatible = 0
+        except Exception:
+            incompatible = 1
+        rank = (incompatible, _host_api_rank(api_name))
+        ranks[index] = rank
+        if name not in best_rank or rank < best_rank[name]:
+            best_rank[name] = rank
+
+    candidates: list[tuple[str, str, int]] = []
+    occurrences: dict[tuple[str, str], int] = {}
+    name_counts: dict[str, int] = {}
+    for name, api_name, index in raw:
+        if ranks[index] != best_rank[name]:
+            continue
         duplicate_number = occurrences.get((api_name, name), 0)
         occurrences[(api_name, name)] = duplicate_number + 1
         key = f"{api_name}|{name}|{duplicate_number}"
@@ -94,6 +139,10 @@ class MicCapture:
         self._device_key = device_key
         self._frames: list[np.ndarray] = []
         self._stream: sd.InputStream | None = None
+        # A launch-time driver warm-up and a real talk-key press can arrive
+        # at almost the same time. Serialize opening/closing the PortAudio
+        # stream so the warm-up can never close a person's real recording.
+        self._stream_guard = threading.Lock()
         self._latest = np.zeros(VIS_WINDOW, dtype=np.float32)
         self._lock = threading.Lock()
 
@@ -104,9 +153,17 @@ class MicCapture:
     def _device_index(self) -> int | None:
         if not self._device_key:
             return None
-        for device in input_devices():
+        devices = input_devices()
+        for device in devices:
             if device.key == self._device_key:
                 return device.index
+        # A saved binding can name the formerly preferred API. Keep the same
+        # microphone when compatibility now selects a different API for it.
+        identity = self._device_key.partition("|")[2]
+        if identity:
+            matches = [d for d in devices if d.key.partition("|")[2] == identity]
+            if len(matches) == 1:
+                return matches[0].index
         raise RuntimeError(
             "The selected microphone is not available. Open Settings and choose another."
         )
@@ -123,31 +180,75 @@ class MicCapture:
                 self._latest = np.concatenate([self._latest[chunk.size:], chunk])
 
     def start(self) -> None:
-        with self._lock:
-            self._frames = []
-            self._latest = np.zeros(VIS_WINDOW, dtype=np.float32)
-        self._stream = sd.InputStream(
-            device=self._device_index(),
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            blocksize=0,  # let the driver pick; lowest latency it can manage
-            callback=self._callback,
-        )
-        self._stream.start()
+        with self._stream_guard:
+            with self._lock:
+                self._frames = []
+                self._latest = np.zeros(VIS_WINDOW, dtype=np.float32)
+            stream = sd.InputStream(
+                device=self._device_index(),
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+                blocksize=0,  # let the driver pick; lowest latency it can manage
+                callback=self._callback,
+            )
+            try:
+                stream.start()
+            except Exception:
+                stream.close()
+                raise
+            self._stream = stream
 
     def stop(self) -> np.ndarray:
-        if self._stream is None:
-            return np.zeros(0, dtype=np.float32)
-        self._stream.stop()
-        self._stream.close()
-        self._stream = None
+        with self._stream_guard:
+            if self._stream is None:
+                return np.zeros(0, dtype=np.float32)
+            stream = self._stream
+            self._stream = None
+            stream.stop()
+            stream.close()
         with self._lock:
             self._latest = np.zeros(VIS_WINDOW, dtype=np.float32)
         with self._lock:
             if not self._frames:
                 return np.zeros(0, dtype=np.float32)
             return np.concatenate(self._frames)
+
+    def warm_up(self) -> None:
+        """Prime the audio driver once at launch without retaining audio.
+
+        The first ``InputStream.start()`` after Windows signs in can take a
+        noticeable moment while PortAudio wakes the selected device's driver.
+        Doing that work in the background here makes the first hotkey press
+        behave like every later one. A failure is deliberately silent: the
+        normal recording path still owns the useful microphone error.
+        """
+        with self._stream_guard:
+            if self._stream is not None:
+                return
+            stream = None
+            try:
+                stream = sd.InputStream(
+                    device=self._device_index(),
+                    samplerate=SAMPLE_RATE,
+                    channels=1,
+                    dtype="float32",
+                    blocksize=0,
+                    callback=self._callback,
+                )
+                stream.start()
+            except Exception:
+                return
+            finally:
+                if stream is not None:
+                    try:
+                        stream.stop()
+                        stream.close()
+                    except Exception:
+                        pass
+            with self._lock:
+                self._frames = []
+                self._latest = np.zeros(VIS_WINDOW, dtype=np.float32)
 
     def snapshot(self, max_seconds: float | None = None) -> np.ndarray:
         """Copy the audio captured so far without stopping the microphone.

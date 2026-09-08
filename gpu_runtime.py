@@ -18,8 +18,10 @@ already has these three packages as ordinary pyproject.toml dependencies.
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -43,17 +45,25 @@ _PACKAGE_SUBDIRS = {
 _CUDNN_MAX_MAJOR = 10
 
 
-def runtime_dir() -> Path:
-    """Where the CUDA DLLs live (or should end up).
+def _bundled_runtime_dir() -> Path:
+    """Return the optional runtime laid down by the installer, if any."""
+    base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    return base / "nvidia"
 
-    A frozen onedir build's sys._MEIPASS is the _internal folder PyInstaller
-    already isolates these into at build time -- see dictate.spec. In dev
-    mode this is informational only (uv pip install already manages it);
-    is_installed()/needs_download() gate on sys.frozen before this matters.
+
+def runtime_dir() -> Path:
+    """Where Settings installs CUDA DLLs for a frozen Dictate build.
+
+    ``_internal`` is part of the installed program.  It is fine for the
+    installer to write there, but it is not a dependable write target for a
+    normal, non-elevated Dictate process (and can be locked after CUDA has
+    loaded).  Put a later Settings download in Dictate's existing user data
+    instead.  ``is_installed`` still accepts an installer-provided runtime in
+    ``_internal`` so checked installs continue to work unchanged.
     """
     if getattr(sys, "frozen", False):
-        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
-        return base / "nvidia"
+        appdata = Path(os.environ.get("APPDATA", Path.home()))
+        return appdata / "dictate" / "gpu-runtime" / "nvidia"
     try:
         spec = importlib.util.find_spec("nvidia")
         if spec and spec.submodule_search_locations:
@@ -63,11 +73,56 @@ def runtime_dir() -> Path:
     return Path()
 
 
+def runtime_dirs() -> tuple[Path, ...]:
+    """All usable frozen-runtime locations, preferred user copy first."""
+    if not getattr(sys, "frozen", False):
+        return ()
+    candidates = (runtime_dir(), _bundled_runtime_dir())
+    return tuple(dict.fromkeys(candidates))
+
+
+def _has_required_bins(base: Path) -> bool:
+    return all((base / subdir / "bin").is_dir() for subdir in _PACKAGE_SUBDIRS.values())
+
+
+def installed_runtime_dir() -> Optional[Path]:
+    """Return a complete CUDA runtime location, preferring the user copy."""
+    for base in runtime_dirs():
+        if _has_required_bins(base):
+            return base
+    return None
+
+
+def activate_runtime() -> None:
+    """Make the selected downloaded ``nvidia`` namespace importable.
+
+    PyInstaller's ``_internal`` folder is already on ``sys.path``.  A
+    post-install runtime is intentionally not, so add its parent before
+    engine.py asks importlib for the namespace package and refresh import
+    caches.  This is a no-op until all required DLL folders exist.
+    """
+    base = installed_runtime_dir()
+    if base is None:
+        return
+    parent = str(base.parent)
+    if parent in sys.path:
+        sys.path.remove(parent)
+    sys.path.insert(0, parent)
+    importlib.invalidate_caches()
+
+    # Normally nothing imports ``nvidia`` before engine.py registers the
+    # DLLs.  Keep this safe when a diagnostic or a future dependency did:
+    # namespace packages need the new package directory in __path__ too.
+    package = sys.modules.get("nvidia")
+    locations = getattr(package, "__path__", None)
+    if locations is not None and str(base) not in locations:
+        locations.insert(0, str(base))
+
+
 def is_installed() -> bool:
     if not getattr(sys, "frozen", False):
         return False
-    base = runtime_dir()
-    return all((base / subdir / "bin").is_dir() for subdir in _PACKAGE_SUBDIRS.values())
+    return installed_runtime_dir() is not None
 
 
 def ready_for_cuda() -> bool:

@@ -96,10 +96,15 @@ def _register_cuda_dlls() -> None:
     global _cuda_dlls_registered
     if _cuda_dlls_registered or sys.platform != "win32":
         return
-    _cuda_dlls_registered = True
 
     import ctypes
     import importlib.util
+
+    # A Settings-installed runtime lives in Dictate's writable app-data
+    # folder, not the read-only install tree.  Make its nvidia namespace
+    # visible before finding the DLL subfolders.  Installer-provided files
+    # remain supported by the same helper.
+    gpu_runtime.activate_runtime()
 
     spec = importlib.util.find_spec("nvidia")
     if spec is None or not spec.submodule_search_locations:
@@ -111,6 +116,13 @@ def _register_cuda_dlls() -> None:
             lib = Path(root) / pkg / "bin"
             if lib.is_dir():
                 bin_dirs.append(lib)
+
+    # Settings can open before its optional runtime has been downloaded.
+    # Leave this retryable in that state: otherwise the early probe sets the
+    # one-shot guard and the fresh DLL folders are never registered after the
+    # download completes.
+    if not bin_dirs:
+        return
 
     for lib in bin_dirs:
         try:
@@ -141,6 +153,8 @@ def _register_cuda_dlls() -> None:
                     )
                 except OSError:
                     pass
+
+    _cuda_dlls_registered = True
 
 
 _cuda_available: bool | None = None
@@ -260,43 +274,83 @@ def _make_progress_reporter(on_bytes: Callable[[int, Optional[int]], None]):
     return _HubProgress
 
 
+def _snapshot_has_model_bin(snapshot: object) -> bool:
+    """Return whether a Hub snapshot is safe to hand to CTranslate2.
+
+    Hugging Face can retain the metadata for an interrupted snapshot.  Its
+    local-only lookup may then return that directory even though the large
+    model file never finished landing; faster-whisper eventually turns that
+    into the unhelpful ``Unable to open file 'model.bin'`` error.  Check the
+    one file CTranslate2 must open before treating a cache hit as complete.
+    """
+    try:
+        model_bin = Path(snapshot) / "model.bin"
+        return model_bin.is_file() and model_bin.stat().st_size > 0
+    except (TypeError, OSError):
+        return False
+
+
+def _is_model_bin_error(exc: Exception) -> bool:
+    """Whether CTranslate2 rejected the cached model weights specifically."""
+    return "model.bin" in str(exc).lower()
+
+
 def _predownload_with_progress(
-    size: str, on_bytes: Callable[[int, Optional[int]], None]
-) -> None:
+    size: str,
+    on_bytes: Callable[[int, Optional[int]], None],
+    *,
+    force_download: bool = False,
+) -> str | None:
     """Pull a model into the local Hub cache while reporting real byte progress.
 
-    Silent no-op on anything unexpected -- callers always fall through to
-    faster-whisper's own download afterward, so a failure here costs only
-    the percentage, never the model load itself.
+    Returns the verified snapshot directory when available. Passing that
+    directory directly to WhisperModel prevents its second Hub lookup from
+    selecting an older, incomplete snapshot after a repair.
+
+    Silent no-op on anything unexpected -- callers normally fall through to
+    faster-whisper's own download afterward, so a failure here costs only the
+    percentage, never the model load itself. A caller explicitly recovering
+    a model.bin load failure can distinguish that ``None`` result and report a
+    clear repair error instead of surfacing CTranslate2's cache detail.
     """
     repo_id = _resolve_repo_id(size)
     if not repo_id:
-        return
+        return None
     try:
         import huggingface_hub
     except Exception:
-        return
+        return None
+
+    incomplete_snapshot = force_download
+    if not force_download:
+        try:
+            cached = huggingface_hub.snapshot_download(
+                repo_id,
+                allow_patterns=_MODEL_ALLOW_PATTERNS,
+                cache_dir=config.model_dir(),
+                local_files_only=True,
+            )
+            if _snapshot_has_model_bin(cached):
+                return str(cached)
+            incomplete_snapshot = True
+        except Exception:
+            pass
 
     try:
-        huggingface_hub.snapshot_download(
+        kwargs = {
+            "allow_patterns": _MODEL_ALLOW_PATTERNS,
+            "cache_dir": config.model_dir(),
+            "tqdm_class": _make_progress_reporter(on_bytes),
+        }
+        if incomplete_snapshot:
+            kwargs["force_download"] = True
+        snapshot = huggingface_hub.snapshot_download(
             repo_id,
-            allow_patterns=_MODEL_ALLOW_PATTERNS,
-            cache_dir=config.model_dir(),
-            local_files_only=True,
+            **kwargs,
         )
-        return  # already cached -- nothing to download, nothing to report
+        return str(snapshot) if _snapshot_has_model_bin(snapshot) else None
     except Exception:
-        pass
-
-    try:
-        huggingface_hub.snapshot_download(
-            repo_id,
-            allow_patterns=_MODEL_ALLOW_PATTERNS,
-            cache_dir=config.model_dir(),
-            tqdm_class=_make_progress_reporter(on_bytes),
-        )
-    except Exception:
-        pass
+        return None
 
 
 class Engine:
@@ -454,33 +508,55 @@ class Engine:
             compute_type = "float16" if device == "cuda" else "int8"
             self._set_state(LOADING, f"Preparing {_model_status_name(size, device)}")
             _register_cuda_dlls()
-            self._download_with_progress(size, device)
+            snapshot = self._download_with_progress(size, device)
             from faster_whisper import WhisperModel
 
-            try:
-                self._model = WhisperModel(
-                    size,
-                    device=device,
-                    compute_type=compute_type,
+            model_ref = str(snapshot) if _snapshot_has_model_bin(snapshot) else size
+
+            def load_model(model_device: str, model_compute_type: str):
+                return WhisperModel(
+                    model_ref,
+                    device=model_device,
+                    compute_type=model_compute_type,
                     download_root=config.model_dir(),
                 )
-            except Exception:
-                # A GPU load can fail after detection succeeded (VRAM already
-                # spoken for, driver mismatch). Falling back beats failing.
-                if device != "cpu":
+
+            try:
+                self._model = load_model(device, compute_type)
+            except Exception as exc:
+                if _is_model_bin_error(exc):
                     self._set_state(
                         LOADING,
-                        f"Preparing {config.model_display_name(size)} · CPU (GPU unavailable)",
+                        f"Repairing {config.model_display_name(size)} download",
                     )
-                    self._model = WhisperModel(
-                        size,
-                        device="cpu",
-                        compute_type="int8",
-                        download_root=config.model_dir(),
+                    repaired = self._download_with_progress(
+                        size, device, force_download=True
                     )
-                    device = "cpu"
-                else:
-                    raise
+                    if not _snapshot_has_model_bin(repaired):
+                        raise RuntimeError(
+                            "Couldn't repair the speech model download. "
+                            "Check your connection and try again."
+                        ) from exc
+                    model_ref = str(repaired)
+                    try:
+                        self._model = load_model(device, compute_type)
+                    except Exception as repaired_exc:
+                        exc = repaired_exc
+                    else:
+                        exc = None
+
+                if exc is not None:
+                    # A GPU load can fail after detection succeeded (VRAM already
+                    # spoken for, driver mismatch). Falling back beats failing.
+                    if device != "cpu":
+                        self._set_state(
+                            LOADING,
+                            f"Preparing {config.model_display_name(size)} · CPU (GPU unavailable)",
+                        )
+                        self._model = load_model("cpu", "int8")
+                        device = "cpu"
+                    else:
+                        raise exc
 
             wanted = (size, device)
 
@@ -601,7 +677,9 @@ class Engine:
         pattern as last_status. progress is None while indeterminate."""
         return (self._gpu_downloading, self._gpu_progress)
 
-    def _download_with_progress(self, size: str, device: str) -> None:
+    def _download_with_progress(
+        self, size: str, device: str, *, force_download: bool = False
+    ) -> str | None:
         """Report real percentage while a first-time model download runs.
 
         A no-op for an already-cached model: _predownload_with_progress's own
@@ -629,7 +707,9 @@ class Engine:
                 frac,
             )
 
-        _predownload_with_progress(size, on_bytes)
+        if force_download:
+            return _predownload_with_progress(size, on_bytes, force_download=True)
+        return _predownload_with_progress(size, on_bytes)
 
     def _unload_locked(self) -> None:
         self._model = None

@@ -7,6 +7,26 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.2-beta.1] - 2026-08-24
+
+### Fixed
+
+- Speech-model loading now repairs a corrupt or partial cached `model.bin`
+  once and retries from the repaired download, instead of showing the raw
+  internal filename error.
+
+## [1.3.1-beta.1] - 2026-08-24
+
+### Fixed
+
+- On a Core-only install, downloading optional NVIDIA GPU support later from
+  Settings now saves the runtime in Dictate's writable app-data folder. It no
+  longer completes and immediately asks to download the same files again.
+- GPU DLL setup now retries after those optional files arrive, so opening
+  Settings before the download no longer prevents Dictate from using the GPU.
+- An incomplete locally cached speech-model download now refreshes itself
+  instead of failing with an `Unable to open file 'model.bin'` error.
+
 ## [1.3.0-beta.1] - 2026-08-20
 
 ### Changed

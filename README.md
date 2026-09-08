@@ -68,7 +68,7 @@ Read the full [privacy statement](PRIVACY.md).
 
 Dictate checks GitHub for updates at launch and every 24 hours while it is running. It never installs or restarts without your action: when an update is available, choose it from the activity bar or Settings; after the installer is downloaded and verified, choose the orange **Restart Dictate** action.
 
-Every release has notes in [CHANGELOG.md](CHANGELOG.md). The current beta, **v1.3.0-beta.1**, refreshes Settings with responsive rows, Fluent navigation icons, clearer update controls, and a stable footer that no longer shifts when status text changes.
+Every release has notes in [CHANGELOG.md](CHANGELOG.md). The current beta, **v1.3.2-beta.1**, repairs a corrupt local speech-model download once and retries it instead of showing a `model.bin` error.
 
 ## Run from source
 

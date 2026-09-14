@@ -75,7 +75,10 @@ _USER_AGENT = "dictate-updater"
 _REQUEST_TIMEOUT = 10
 _DOWNLOAD_CHUNK = 1 << 16  # 64 KiB
 _MAX_RELEASE_NOTES_CHARS = 5000
-_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-[a-zA-Z]+\.(\d+))?$")
+# Accept both the older ``-beta.1`` spelling and the compact ``-beta1``
+# spelling used by v1.4.1-beta1.  They represent the same prerelease rank;
+# rejecting either format would make the updater silently skip a real release.
+_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-[a-zA-Z]+\.?(\d+))?$")
 _DIGEST_RE = re.compile(r"^sha256:([0-9a-fA-F]{64})$")
 
 

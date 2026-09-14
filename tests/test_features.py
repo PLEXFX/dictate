@@ -4243,6 +4243,9 @@ class UpdaterVersionTests(unittest.TestCase):
     def test_parses_a_beta_tag(self):
         self.assertEqual(updater.parse_version("0.1.0-beta.2"), (0, 1, 0, 0, 2))
 
+    def test_parses_a_compact_beta_tag(self):
+        self.assertEqual(updater.parse_version("1.4.1-beta1"), (1, 4, 1, 0, 1))
+
     def test_strips_a_leading_v(self):
         self.assertEqual(updater.parse_version("v0.1.0-beta.2"), (0, 1, 0, 0, 2))
 

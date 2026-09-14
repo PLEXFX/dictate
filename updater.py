@@ -255,6 +255,10 @@ def _verify_authenticode(path: Path, trusted_thumbprint: str) -> bool:
             text=True,
             timeout=30,
             check=False,
+            # powershell.exe is a console app; without this, verifying every
+            # downloaded update flashes a real console window open and closed
+            # on top of Dictate's own windowed UI.
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return False

@@ -7,6 +7,22 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-09-14
+
+### Fixed
+
+- Holding the talk key can no longer interrupt a recording with a false
+  **No microphone detected** message when you pause to think. Dictate now
+  checks for silent audio only after you release the key.
+- Rapidly pressing the talk key no longer reopens the Windows microphone
+  stream faster than the audio driver can safely settle.
+- The activity bar no longer double-exposes two messages during a fast state
+  change, and its resize animation now stays synchronized on high-refresh-rate
+  displays.
+- Update verification and GPU detection no longer flash a console window.
+- The tray icon now remains a correctly sized plain microphone icon; available
+  updates are shown in its tooltip and in Settings instead of with a tray dot.
+
 ## [1.4.0-beta.1] - 2026-09-07
 
 ### Added

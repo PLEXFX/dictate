@@ -55,6 +55,10 @@ def _nvidia_gpu() -> tuple[str, int]:
             text=True,
             timeout=1.0,
             check=False,
+            # nvidia-smi is a console app; without this a windowed build of
+            # Dictate still flashes a real console window open and closed
+            # every time Settings opens and probes the GPU.
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         line = result.stdout.splitlines()[0].strip()
         name, memory = (part.strip() for part in line.rsplit(",", 1))

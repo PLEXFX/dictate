@@ -77,14 +77,14 @@ MAX_LOCKED_SECONDS = 5 * 60
 # message rather than two differently worded guesses.
 NO_MIC_TEXT = "No microphone detected."
 
-# _check_live_silence waits this long after a hold starts before judging it
-# silent, so the mic driver waking up and an ordinary breath before speaking
-# never look like a dead microphone. After that, it only needs to see this
-# much more near-silent audio to decide -- short enough to catch a broken
-# mic while the person is still mid-sentence instead of making them finish
-# talking and let go first.
-LIVE_SILENCE_GRACE_SECONDS = 0.7
-LIVE_SILENCE_WINDOW_SECONDS = 0.7
+# Shortest gap allowed between the microphone stream actually closing and a
+# new press reopening it. Opening and closing a real WASAPI stream is a
+# blocking OS/driver call, not a Python-level toggle -- hammering the talk
+# key faster than the driver can settle between closes and reopens is what
+# eventually crashes the process rather than raising a catchable exception.
+# Human speech never needs a restart faster than this; only spamming the key
+# does, so this is invisible in ordinary use.
+MIC_REOPEN_COOLDOWN_SECONDS = 0.2
 
 # How long "Undo last dictation" stays on offer. Dictate cannot read another
 # app's undo history, so it can never *prove* its paste is still the top of
@@ -257,43 +257,31 @@ def make_icon(color: QColor = QColor(76, 194, 255)) -> QIcon:
 
 # The native pixel sizes Windows can ask a tray icon for, across every common
 # display scale (100% through 250%, including 28 for 175%) plus every larger
-# size icon.ico itself ships (a hover/peek surface can request one). The two
-# tray icons -- plain and the update-available badge -- must register the
-# *exact* same size list: Thomas reported them looking like two different
-# sizes, and the actual bug was that update_badged_icon only ever pre-baked
-# this narrower list while the plain tray icon was built straight from
-# self.icon, which also carries icon.ico's 96/128/256 frames. Any size
-# Windows asked for that fell outside the narrower list made the two icons
-# resolve through different fallback scaling and could visibly disagree.
-# tray_icon and update_badged_icon now both build from this one list, so the
-# two states can no longer diverge, at any size either is ever asked for.
+# size icon.ico itself ships (a hover/peek surface can request one). Building
+# every frame from this one explicit list, rather than handing Windows
+# self.icon directly (which also carries icon.ico's 96/128/256 frames), means
+# any size Windows asks for always resolves to a frame actually built for it
+# instead of falling back to different, inconsistent scaling.
 _TRAY_ICON_SIZES = (16, 20, 24, 28, 32, 40, 48, 64, 96, 128, 256)
-
-# The app's own logo art (icon.ico) is drawn edge to edge with no breathing
-# room, which is fine for a taskbar/alt-tab icon but reads oversized next to
-# other apps' tray icons, which all keep a small margin. This is how much of
-# the tray icon's canvas the glyph actually fills once tray_icon insets it.
-_TRAY_GLYPH_FILL = 0.82
-
 
 def tray_icon(base: QIcon) -> QIcon:
     """The tray's own presentation of the app icon: the same art as the
-    window icon, inset with a small transparent margin at every native tray
-    size instead of filling the slot edge to edge.
+    window icon, rebuilt at each native tray size from a single explicit
+    size list (see ``_TRAY_ICON_SIZES``) instead of handed to Windows as-is.
 
-    Exists as a separate icon from ``self.icon`` (used for the window/taskbar
-    icon, which stays full-bleed) for two reasons: it makes the tray icon
-    read at the same visual weight as its neighbours instead of looking
-    oversized, and it gives update_badged_icon's corner dot genuine empty
-    space to sit in rather than overlapping the artwork -- the plain and
-    badged tray icons share this exact same inset base, so switching between
-    them (see main.App._refresh_tray_update_indicator) never changes the
-    glyph's own size, only whether the dot is present.
+    A previous version of this function also shrank the glyph inward,
+    working from the assumption that icon.ico's art was drawn edge to edge
+    and needed a margin added to avoid looking oversized next to other
+    apps' tray icons. Measuring the actual shipped art disproved that: at
+    every tray size, icon.ico's own real content already leaves roughly
+    5-8% empty at the top and 25-30% at the sides (it is a tall, narrow
+    microphone glyph, not a full-bleed square) -- close to what a real
+    Windows tray icon looks like already. The extra inset was shrinking an
+    already-margined icon a second time, which is what read as too small
+    next to its neighbours. This function no longer adds any inset.
     """
     icon = QIcon()
     for size in _TRAY_ICON_SIZES:
-        glyph = size * _TRAY_GLYPH_FILL
-        offset = (size - glyph) / 2.0
         pixmap = QPixmap(size, size)
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
@@ -308,45 +296,10 @@ def tray_icon(base: QIcon) -> QIcon:
         # current screen DPR and would resize frames again at 125/150/200%.
         source = base.pixmap(QSize(size, size), 1.0)
         painter.drawPixmap(
-            QRectF(offset, offset, glyph, glyph),
+            QRectF(0, 0, size, size),
             source,
             QRectF(0, 0, source.width(), source.height()),
         )
-        painter.end()
-        icon.addPixmap(pixmap)
-    return icon
-
-
-def update_badged_icon(base: QIcon) -> QIcon:
-    """An amber corner dot, rendered at native tray sizes with a dark keyline.
-
-    ``base`` is expected to already be ``tray_icon(...)``'s inset result, not
-    the raw window icon -- the dot's own coordinates are fixed to the full
-    canvas corner and rely on that margin being empty.
-
-    The dot's outer edge sits at 18.5 of the 20-unit canvas -- inside the
-    same margin band ``tray_icon``'s own 0.82 fill leaves around the glyph
-    (whose edge falls at 18.2), rather than reaching all the way to 19.5/20
-    (the canvas edge, sometimes the literal last pixel at small tray sizes).
-    Thomas reported the badged icon looking like a different size from the
-    plain one; the actual bug was that the old coordinates let the dot hug
-    the canvas corner with almost no margin while the plain glyph keeps a
-    visible one, so the two states read as different overall icon sizes even
-    though the glyph itself never moves or resizes between them.
-    """
-    icon = QIcon()
-    for size in _TRAY_ICON_SIZES:
-        # Match the plain icon's physical pixels, independent of monitor DPI.
-        pixmap = base.pixmap(QSize(size, size), 1.0)
-        pixmap.setDevicePixelRatio(1.0)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.scale(pixmap.width() / 20.0, pixmap.height() / 20.0)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#202020"))
-        painter.drawEllipse(QRectF(12.5, 12.5, 6, 6))
-        painter.setBrush(QColor("#FFB900"))
-        painter.drawEllipse(QRectF(13.3, 13.3, 4.4, 4.4))
         painter.end()
         icon.addPixmap(pixmap)
     return icon
@@ -415,7 +368,7 @@ class App:
         self._apply_appearance()
         self._busy = False
         self._dictation_active = False  # mic open or its captured audio is still processing
-        self._live_silence_reported = False  # _check_live_silence already ended this hold
+        self._mic_closed_at = 0.0  # last time the stream actually closed, for the reopen cooldown
         self._ptt_preload_pending = False  # background warm-up started by a PTT press
         self._startup_preload_pending = False  # silent warm-up started after sign-in
         self._start_cue_at = 0.0  # when the "start" cue began, so "lock" can wait it out
@@ -571,12 +524,10 @@ class App:
             self._apply_appearance()
 
     def _build_tray(self) -> None:
-        self._tray_update_badged = False
-        # A dedicated, inset copy of the icon for the tray specifically (see
-        # tray_icon's own docstring) -- self.icon itself stays full-bleed and
-        # keeps going to the window/taskbar icon below.
+        # A dedicated copy of the icon rebuilt at the tray's own exact size
+        # list (see tray_icon's own docstring) -- self.icon itself keeps
+        # going to the window/taskbar icon below unmodified.
         self._tray_icon = tray_icon(self.icon)
-        self._tray_update_icon = update_badged_icon(self._tray_icon)
         self.tray = QSystemTrayIcon(self._tray_icon)
         self.tray.setToolTip(_tray_tip(self.settings))
 
@@ -748,6 +699,13 @@ class App:
             # started.
             self.hotkeys.cancel_lock()
             return
+        if time.monotonic() - self._mic_closed_at < MIC_REOPEN_COOLDOWN_SECONDS:
+            # The talk key is being spammed faster than a real utterance ever
+            # needs -- reopening the audio stream this fast is what risks
+            # crashing the driver, not just wasting a press. Drop it silently,
+            # the same way a press during _busy is dropped.
+            self.hotkeys.cancel_lock()
+            return
         # Shown before anything else so the press always has instant visual
         # feedback, even when opening the audio device is slow (worst on a
         # cold first press, since PortAudio has not touched the driver yet).
@@ -762,6 +720,7 @@ class App:
             self.mic.start()
         except Exception as exc:
             self._dictation_active = False
+            self._mic_closed_at = time.monotonic()
             self.hotkeys.cancel_lock()
             self.bar.set_state("error", NO_MIC_TEXT)
             print(f"[dictate] mic error: {exc}")
@@ -819,19 +778,13 @@ class App:
         self.lock_limit_timer.stop()
         self.meter_timer.stop()
         self.mic.stop()
+        self._mic_closed_at = time.monotonic()
         self._dictation_active = False
         self.bar.set_clickable(False)
         self.bar.set_state("idle")
         print("[dictate] recording cancelled")
 
     def _stop_listening(self, duration: float) -> None:
-        if self._live_silence_reported:
-            # _check_live_silence already ended this hold and put the error
-            # on the bar while the key was still down; the real release just
-            # arrived a moment later and the recording it thinks it is ending
-            # is already gone -- nothing left to do.
-            self._live_silence_reported = False
-            return
         if self._busy:
             # _start_listening declined this press because the previous
             # dictation is still being transcribed and pasted, so there is no
@@ -843,6 +796,7 @@ class App:
         self.meter_timer.stop()
         self.bar.set_clickable(False)
         clip = self.mic.stop()
+        self._mic_closed_at = time.monotonic()
         if duration < hotkeys_mod.MIN_HOLD_SECONDS or clip.size == 0:
             self._dictation_active = False
             self.bar.set_state("idle")
@@ -919,41 +873,6 @@ class App:
 
     def _pump_meter(self) -> None:
         self.bar.set_levels(self.meter.update(self.mic.latest_window()))
-        self._check_live_silence()
-
-    def _check_live_silence(self) -> None:
-        """Catch a mic that is open but delivering nothing, while the key is
-        still held, instead of waiting for release.
-
-        A muted or disconnected device streams near-zero samples for the
-        whole hold and used to only get caught by the rms check at the end of
-        _stop_listening -- which meant a person talking into a dead mic had
-        to finish the sentence and let go before finding out. This runs the
-        same check continuously against a trailing window of what has
-        actually arrived, so it fires the moment enough real silence has
-        accumulated instead of after the fact.
-        """
-        if not self._dictation_active:
-            return
-        if time.monotonic() - self._start_cue_at < LIVE_SILENCE_GRACE_SECONDS:
-            return
-        recent = self.mic.snapshot(max_seconds=LIVE_SILENCE_WINDOW_SECONDS)
-        if recent.size == 0 or audio_mod.rms_level(recent) >= audio_mod.SILENCE_RMS_THRESHOLD:
-            return
-        self._live_silence_reported = True
-        self.lock_limit_timer.stop()
-        self.meter_timer.stop()
-        self.mic.stop()
-        # Resets any tap-to-lock state so a stray later press starts a fresh
-        # dictation instead of thinking it is ending one that already ended
-        # here. If a lock was actually active this also fires talk_cancelled
-        # (-> _cancel_listening), which is harmless to run before the error
-        # below -- it repeats cleanup already done above and its own "idle"
-        # state is immediately overwritten by the "error" set right after.
-        self.hotkeys.cancel_lock()
-        self._dictation_active = False
-        self.bar.set_clickable(False)
-        self.bar.set_state("error", NO_MIC_TEXT)
 
     # --- settings ---
 
@@ -1255,27 +1174,31 @@ class App:
     # --- updates ---
 
     def _on_update_available(self, version: str, notes: str) -> None:
-        # Availability is quiet: persistent Settings status and a tray dot.
+        # Availability is quiet: persistent Settings status and a tray tooltip.
         self._refresh_tray_update_indicator()
         print(f"[dictate] update {version} available; see Settings to download")
 
     def _refresh_tray_update_indicator(self) -> None:
+        """Keep the tray tooltip naming a known update; the icon itself never
+        changes. Settings' own Updates page and adaptive rail already carry
+        the visual "an update exists" signal -- the tray icon stays the
+        plain logo at every state, matching every other app's tray icon
+        instead of growing a badge of its own.
+        """
         if not hasattr(self, "tray") or not hasattr(self, "updater"):
             return
         state = self.updater.last_status[0]
-        badge = getattr(self, "_tray_update_badged", False)
+        known = getattr(self, "_tray_update_known", False)
         if state in (updater_mod.AVAILABLE, updater_mod.DOWNLOADING,
                      updater_mod.VERIFYING, updater_mod.READY_TO_RESTART,
                      updater_mod.INSTALLING):
-            badge = True
+            known = True
         elif state == updater_mod.UP_TO_DATE:
-            badge = False
+            known = False
         # A failed transfer/check must not erase a previously known update.
-        if badge != getattr(self, "_tray_update_badged", False):
-            self._tray_update_badged = badge
-            self.tray.setIcon(self._tray_update_icon if badge else self._tray_icon)
+        self._tray_update_known = known
         tip = _tray_tip(self.settings)
-        if badge:
+        if known:
             tip += ("\nUpdate ready to restart. Open Settings."
                     if state == updater_mod.READY_TO_RESTART
                     else "\nUpdate available. Open Settings.")

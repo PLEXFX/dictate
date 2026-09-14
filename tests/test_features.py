@@ -1162,10 +1162,12 @@ class HotkeyTests(unittest.TestCase):
 
 
 class TrayIconRenderTests(unittest.TestCase):
-    """tray_icon/update_badged_icon: the tray gets its own inset presentation
-    of the app icon (see main.py's _TRAY_GLYPH_FILL comment) instead of the
-    window icon's full-bleed art, so it doesn't read oversized next to other
-    apps' tray icons, and so the update dot has real empty space to sit in."""
+    """tray_icon: rebuilds the app icon at the tray's own explicit size list
+    for DPI consistency (see main.py's _TRAY_ICON_SIZES comment), without
+    otherwise changing the art -- a previous version also shrank the glyph
+    inward, but the shipped icon.ico art already carries its own margin, so
+    that extra inset just made it read smaller than other apps' tray icons.
+    There is exactly one tray icon -- no separate badged variant."""
 
     @classmethod
     def setUpClass(cls):
@@ -1175,7 +1177,7 @@ class TrayIconRenderTests(unittest.TestCase):
             ["dictate-tests", "-platform", "offscreen"]
         )
 
-    def test_plain_and_badged_frames_stay_identical_outside_dot_at_scaled_dpi(self):
+    def test_frames_are_stable_at_scaled_dpi(self):
         # QApplication reads scaling at startup. Separate processes exercise
         # the actual Qt DPI selection, not a mock of QIcon.pixmap.
         import subprocess
@@ -1184,20 +1186,10 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QSize
 import main
 app = QApplication([])
-plain = main.tray_icon(main.load_icon())
-original = {n: plain.pixmap(QSize(n, n), 1.0).toImage() for n in main._TRAY_ICON_SIZES}
-badged = main.update_badged_icon(plain)
-assert plain.availableSizes() == badged.availableSizes(), (app.devicePixelRatio(), plain.availableSizes(), badged.availableSizes())
-for size, before in original.items():
-    clean = plain.pixmap(QSize(size, size), 1.0).toImage()
-    dotted = badged.pixmap(QSize(size, size), 1.0).toImage()
-    assert clean.size() == dotted.size() == QSize(size, size)
-    assert clean == before, 'badging mutated the plain icon'
-    # Compare every pixel outside the bottom-right badge area, not just
-    # an opaque point that can stay opaque even when the logo changes size.
-    safe = int(size * 0.6)
-    assert clean.copy(0, 0, size, safe) == dotted.copy(0, 0, size, safe), (size, 'top')
-    assert clean.copy(0, 0, safe, size) == dotted.copy(0, 0, safe, size), (size, 'left')
+icon = main.tray_icon(main.load_icon())
+for n in main._TRAY_ICON_SIZES:
+    img = icon.pixmap(QSize(n, n), 1.0).toImage()
+    assert img.size() == QSize(n, n), (app.devicePixelRatio(), n, img.size())
 """
         for scale in ("1", "1.25", "1.5", "1.75", "2", "2.5", "3"):
             with self.subTest(scale=scale):
@@ -1226,59 +1218,20 @@ for size, before in original.items():
             icon.addPixmap(pixmap)
         return icon
 
-    def test_tray_icon_insets_the_glyph_with_a_transparent_margin(self):
+    def test_tray_icon_does_not_shrink_or_margin_the_source_art(self):
+        """A fully-opaque base must stay fully opaque edge to edge -- tray_icon
+        only resamples into its own size list, it must never add an inset of
+        its own on top of whatever margin the source art already has."""
         import main
         from PySide6.QtCore import QSize
 
         base = self._opaque_square_icon()
-        inset = main.tray_icon(base)
+        rebuilt = main.tray_icon(base)
         for size in main._TRAY_ICON_SIZES:
             with self.subTest(size=size):
-                img = inset.pixmap(QSize(size, size)).toImage()
-                # A fully-opaque base must leave its own corner transparent
-                # once inset -- the whole point of the margin.
-                self.assertEqual(img.pixelColor(0, 0).alpha(), 0)
-                # But the centre is still the genuine glyph, not empty.
+                img = rebuilt.pixmap(QSize(size, size)).toImage()
+                self.assertGreater(img.pixelColor(0, 0).alpha(), 0)
                 self.assertGreater(img.pixelColor(size // 2, size // 2).alpha(), 0)
-
-    def test_badged_icon_keeps_the_same_glyph_scale_as_the_plain_tray_icon(self):
-        import main
-        from PySide6.QtCore import QSize
-
-        base = self._opaque_square_icon()
-        plain = main.tray_icon(base)
-        badged = main.update_badged_icon(plain)
-        size = 32
-        plain_img = plain.pixmap(QSize(size, size)).toImage()
-        badged_img = badged.pixmap(QSize(size, size)).toImage()
-        # A point well inside the glyph is unaffected by the corner dot, so
-        # the two states must agree there -- the badge should never look
-        # like it shrank or grew the icon itself, only added a dot.
-        probe = (size // 2, size // 4)
-        self.assertEqual(
-            plain_img.pixelColor(*probe).alpha(),
-            badged_img.pixelColor(*probe).alpha(),
-        )
-
-    def test_badge_dot_lands_in_the_margin_tray_icon_left_empty(self):
-        import main
-        from PySide6.QtCore import QSize
-
-        base = self._opaque_square_icon()
-        plain = main.tray_icon(base)
-        badged = main.update_badged_icon(plain)
-        size = 32
-        img = badged.pixmap(QSize(size, size)).toImage()
-        found = False
-        for y in range(size):
-            for x in range(size):
-                c = img.pixelColor(x, y)
-                if c.red() > 200 and 120 < c.green() < 220 and c.blue() < 80 and c.alpha() > 0:
-                    found = True
-                    break
-            if found:
-                break
-        self.assertTrue(found, "no amber badge pixel found in the badged tray icon")
 
 
 class PttWarmStartTests(unittest.TestCase):
@@ -1289,6 +1242,7 @@ class PttWarmStartTests(unittest.TestCase):
         app = main.App.__new__(main.App)
         app._busy = False
         app._dictation_active = False
+        app._mic_closed_at = 0.0
         app._ptt_preload_pending = False
         app._startup_preload_pending = False
         app._reload_pending = False
@@ -1309,8 +1263,6 @@ class PttWarmStartTests(unittest.TestCase):
         app.updater.last_status = (main.updater_mod.IDLE, "", None)
         app.icon = Mock()
         app._tray_icon = Mock()
-        app._tray_update_icon = Mock()
-        app._tray_update_badged = False
         app.settings_window = None
         return app, main
 
@@ -1402,40 +1354,44 @@ class PttWarmStartTests(unittest.TestCase):
         app._notify.assert_not_called()
         app.bar.notify.assert_not_called()
 
-    def test_tray_update_dot_survives_transfer_errors_and_clears_when_current(self):
+    def test_tray_tooltip_survives_transfer_errors_and_clears_when_current(self):
+        """The tray icon itself must never change -- only the tooltip names
+        a known update. Thomas asked for the tray icon to just be the
+        normal, unbadged icon at all times, matching every other app's tray
+        icon instead of growing a dot of its own."""
         app, main = self._app()
         for state in (updater.AVAILABLE, updater.DOWNLOADING, updater.VERIFYING,
                       updater.ERROR, updater.IDLE, updater.READY_TO_RESTART):
             app.updater.last_status = (state, "", None)
             app._refresh_tray_update_indicator()
-            self.assertTrue(app._tray_update_badged)
-        # Progress events don't reassign the icon and flicker the Windows tray.
-        app.tray.setIcon.assert_called_once_with(app._tray_update_icon)
+            self.assertTrue(app._tray_update_known)
+        app.tray.setIcon.assert_not_called()
         self.assertIn("ready to restart", app.tray.setToolTip.call_args.args[0])
         app.updater.last_status = (updater.UP_TO_DATE, "", None)
         app._refresh_tray_update_indicator()
-        self.assertFalse(app._tray_update_badged)
-        app.tray.setIcon.assert_called_with(app._tray_icon)
+        self.assertFalse(app._tray_update_known)
+        app.tray.setIcon.assert_not_called()
         self.assertNotIn("Update available", app.tray.setToolTip.call_args.args[0])
 
-    def test_tray_dot_updates_during_dictation_without_touching_bar(self):
+    def test_tray_tooltip_updates_during_dictation_without_touching_bar_or_icon(self):
         app, main = self._app()
         app._dictation_active = True
         app.updater.last_status = (updater.AVAILABLE, "", None)
         app._on_update_status_changed()
-        app.tray.setIcon.assert_called_once_with(app._tray_update_icon)
+        app.tray.setIcon.assert_not_called()
+        self.assertIn("Update available", app.tray.setToolTip.call_args.args[0])
         app.bar.set_state.assert_not_called()
         app.tray.showMessage.assert_not_called()
 
-    def test_restored_staged_update_badges_tray_but_plain_check_error_does_not(self):
+    def test_restored_staged_update_never_touches_the_tray_icon(self):
         app, main = self._app()
         app.updater.last_status = (updater.ERROR, "Offline", None)
         app._refresh_tray_update_indicator()
-        self.assertFalse(app._tray_update_badged)
-        app.tray.setIcon.assert_not_called()
+        self.assertFalse(app._tray_update_known)
         app.updater.last_status = (updater.READY_TO_RESTART, "", None)
         app._refresh_tray_update_indicator()
-        app.tray.setIcon.assert_called_once_with(app._tray_update_icon)
+        self.assertTrue(app._tray_update_known)
+        app.tray.setIcon.assert_not_called()
 
     def test_update_terminal_state_clears_the_flag_without_a_second_bar_call(self):
         """UP_TO_DATE/ERROR/AVAILABLE each already have their own dedicated
@@ -1676,6 +1632,30 @@ class PttWarmStartTests(unittest.TestCase):
 
         app.mic.start.assert_not_called()
         app.hotkeys.cancel_lock.assert_called_once()
+
+    def test_reopening_the_mic_too_soon_after_a_close_is_declined(self):
+        """Spamming the talk key must never hammer the real audio stream --
+        opening/closing it is a blocking OS driver call, and doing that
+        faster than the driver can settle is what eventually crashed the
+        app, not just a wasted key press."""
+        app, main = self._app()
+        app._mic_closed_at = main.time.monotonic()
+
+        app._start_listening()
+
+        app.mic.start.assert_not_called()
+        app.bar.set_state.assert_not_called()
+        app.hotkeys.cancel_lock.assert_called_once()
+        self.assertFalse(app._dictation_active)
+
+    def test_reopening_the_mic_after_the_cooldown_elapses_proceeds(self):
+        app, main = self._app()
+        app._mic_closed_at = main.time.monotonic() - main.MIC_REOPEN_COOLDOWN_SECONDS - 0.05
+
+        app._start_listening()
+
+        app.mic.start.assert_called_once()
+        app.bar.set_state.assert_called_once_with("listening")
 
 
 class UndoLastPasteTests(unittest.TestCase):
@@ -1969,7 +1949,6 @@ class StopListeningTests(unittest.TestCase):
         app = main.App.__new__(main.App)
         app._busy = False
         app._dictation_active = True
-        app._live_silence_reported = False
         app._start_cue_at = 0.0
         app.bridge = Mock()
         app.meter = Mock()
@@ -2053,90 +2032,6 @@ class StopListeningTests(unittest.TestCase):
 
         app.bar.set_state.assert_called_once_with("transcribing")
         self.assertTrue(app._busy)
-
-
-class LiveSilenceTests(unittest.TestCase):
-    """_check_live_silence: catching a dead mic while the key is still held,
-    instead of making the person finish talking and let go first."""
-
-    @staticmethod
-    def _app(held_seconds: float = 5.0):
-        import main
-
-        app = main.App.__new__(main.App)
-        app._dictation_active = True
-        app._live_silence_reported = False
-        app._start_cue_at = time.monotonic() - held_seconds
-        app.bridge = Mock()
-        app.mic = Mock()
-        app.bar = Mock()
-        app.meter = Mock()
-        app.meter_timer = Mock()
-        app.lock_limit_timer = Mock()
-        app.hotkeys = Mock()
-        return app, main
-
-    def test_sustained_silence_after_the_grace_period_reports_no_microphone(self):
-        app, main = self._app()
-        app.mic.snapshot.return_value = np.full(400, 1e-6, dtype=np.float32)
-
-        app._check_live_silence()
-
-        app.mic.snapshot.assert_called_once_with(
-            max_seconds=main.LIVE_SILENCE_WINDOW_SECONDS
-        )
-        app.bar.set_state.assert_called_once_with("error", main.NO_MIC_TEXT)
-        app.bar.set_clickable.assert_called_once_with(False)
-        app.mic.stop.assert_called_once()
-        app.meter_timer.stop.assert_called_once()
-        app.lock_limit_timer.stop.assert_called_once()
-        app.hotkeys.cancel_lock.assert_called_once()
-        self.assertTrue(app._live_silence_reported)
-        self.assertFalse(app._dictation_active)
-
-    def test_a_key_release_after_live_detection_is_a_silent_no_op(self):
-        """The real key-up arrives a moment after _check_live_silence already
-        ended the hold; _stop_listening must not re-report or reset the bar
-        it already put an error on."""
-        app, main = self._app()
-        app.mic.snapshot.return_value = np.full(400, 1e-6, dtype=np.float32)
-        app._check_live_silence()
-        app.bar.reset_mock()
-        app.mic.reset_mock()
-
-        app._stop_listening(2.0)
-
-        app.bar.set_state.assert_not_called()
-        app.mic.stop.assert_not_called()
-        self.assertFalse(app._live_silence_reported)
-
-    def test_still_within_the_grace_period_is_ignored(self):
-        app, main = self._app(held_seconds=0.1)
-        app.mic.snapshot.return_value = np.full(400, 1e-6, dtype=np.float32)
-
-        app._check_live_silence()
-
-        app.mic.snapshot.assert_not_called()
-        app.bar.set_state.assert_not_called()
-        self.assertFalse(app._live_silence_reported)
-
-    def test_real_signal_present_is_not_flagged(self):
-        app, main = self._app()
-        app.mic.snapshot.return_value = np.linspace(-0.4, 0.4, 400).astype(np.float32)
-
-        app._check_live_silence()
-
-        app.bar.set_state.assert_not_called()
-        self.assertFalse(app._live_silence_reported)
-
-    def test_not_dictating_is_ignored(self):
-        app, main = self._app()
-        app._dictation_active = False
-
-        app._check_live_silence()
-
-        app.mic.snapshot.assert_not_called()
-        app.bar.set_state.assert_not_called()
 
 
 class LastDictationTests(unittest.TestCase):
@@ -3891,6 +3786,123 @@ class InlineLabelWidthTests(unittest.TestCase):
         self.assertEqual(width, bar_mod.PILL_W_MAX)
 
 
+class MessageToMessageSnapTests(unittest.TestCase):
+    """Going straight from one message state to a different one (error to
+    notice, or a second notify() before the first has faded) must show only
+    the new message -- not a crossfading double-exposure of both."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication(
+            ["dictate-tests", "-platform", "offscreen"]
+        )
+
+    def test_error_to_notice_snaps_instead_of_crossfading(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        b.set_state("error", "No microphone detected.")
+        # Simulates the animation timer having already fully crossfaded the
+        # error in -- _tick, not set_state, is what actually raises this in
+        # real use; the fix cares about the state *transition*, not how
+        # content got to its prior value.
+        b._content["error"] = 1.0
+
+        b.set_state("notice", "Update ready to restart.")
+
+        self.assertEqual(b._content["error"], 0.0)
+        self.assertEqual(b._content["notice"], 1.0)
+
+    def test_a_second_notice_before_the_first_fades_also_snaps(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        b.set_state("notice", "First message.")
+        b._content["notice"] = 1.0
+
+        b.set_state("notice", "Second message.")
+
+        # Same key throughout (still "notice"), so the fix's snap branch
+        # never fires for this case -- nothing to break, just confirming a
+        # same-key update stays a clean single value rather than drifting.
+        self.assertEqual(b._content["notice"], 1.0)
+        self.assertEqual(b._detail, "Second message.")
+
+    def test_wave_to_message_is_left_for_the_normal_crossfade(self):
+        """The fix must not touch the ordinary, already-correct case of a
+        message arriving from the wave (idle/listening) -- only entering
+        "wave" never draws text, so there was nothing to double-render, and
+        that transition should keep its existing smooth fade-in."""
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        self.assertEqual(b._state, "idle")
+
+        b.set_state("done", "Inserted")
+
+        # Not snapped to 1.0 by the fix -- left at 0.0 for _tick's own timer
+        # -driven blend to bring up gradually, exactly as before this fix.
+        self.assertEqual(b._content["done"], 0.0)
+
+
+class FrameRateSyncTests(unittest.TestCase):
+    """_sync_frame_rate must keep the content timer and the two spring
+    timers (width, margin) on the exact same interval -- on any display that
+    isn't 60 Hz, letting them drift apart is what made a resizing bar look
+    jittery: the capsules/opacity would animate at the real refresh rate
+    while the window's own resize/reposition kept ticking at a fixed 60 Hz."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication(
+            ["dictate-tests", "-platform", "offscreen"]
+        )
+
+    @staticmethod
+    def _fake_screen(hz):
+        class _Screen:
+            def refreshRate(self):
+                return hz
+        return _Screen()
+
+    def test_all_three_timers_share_a_high_refresh_rate_interval(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        b._sync_frame_rate(self._fake_screen(144.0))
+
+        interval = round(1000.0 / 144.0)
+        self.assertEqual(b._timer.interval(), interval)
+        self.assertEqual(b._width_timer.interval(), interval)
+        self.assertEqual(b._margin_timer.interval(), interval)
+
+    def test_all_three_timers_share_a_low_refresh_rate_interval(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        b._sync_frame_rate(self._fake_screen(30.0))
+
+        interval = round(1000.0 / 30.0)
+        self.assertEqual(b._timer.interval(), interval)
+        self.assertEqual(b._width_timer.interval(), interval)
+        self.assertEqual(b._margin_timer.interval(), interval)
+
+    def test_an_unreasonable_reported_rate_falls_back_to_60hz_for_all_three(self):
+        import bar as bar_mod
+
+        b = bar_mod.Bar(config.Settings())
+        b._sync_frame_rate(self._fake_screen(0.0))
+
+        interval = round(1000.0 / 60.0)
+        self.assertEqual(b._timer.interval(), interval)
+        self.assertEqual(b._width_timer.interval(), interval)
+        self.assertEqual(b._margin_timer.interval(), interval)
+
+
 class ModelDownloadBarTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -3981,7 +3993,6 @@ class BarClickWiringTests(unittest.TestCase):
         app.cues = Mock()
         app._dictation_active = True
         app._busy = False
-        app._live_silence_reported = False
         app._start_cue_at = 0.0
         return app, main
 
@@ -5179,7 +5190,6 @@ class DictationDeliveryTests(unittest.TestCase):
         app = main.App.__new__(main.App)
         app._busy = True
         app._dictation_active = False
-        app._live_silence_reported = False
         app.bar = Mock()
         app.mic = Mock()
         app.meter_timer = Mock()

@@ -194,6 +194,12 @@ IDLE_SQUISH_SECONDS = 0.16
 # the whole morph still lands inside the dwell floor below.
 STAGGER_SECONDS = 0.002
 MIN_DWELL_SECONDS = 0.0   # state feedback never waits behind a previous animation
+
+# States that paint their own icon+text composition, independently centred
+# on that message's own text width -- as opposed to "wave"/"listening",
+# which never draw text here at all. Shared between paintEvent's draw loop
+# and _apply_state's message-to-message snap (see there for why).
+_MESSAGE_STATES = ("done", "loaded", "error", "notice")
 BURST_TAU = 0.24
 SWEEP_TAU = 0.07           # how fast the bars collapse into the progress track
 SLICE_SECONDS = 0.07       # one new amplitude column; 21 of them ~= 1.5 s
@@ -671,14 +677,29 @@ class Bar(QWidget):
             self._width_anchor_x = None
 
     def _sync_frame_rate(self, screen) -> None:
-        """Draw at the display's refresh rate rather than a hardcoded 60 Hz."""
+        """Draw at the display's refresh rate rather than a hardcoded 60 Hz.
+
+        All three animation timers (content, width spring, margin spring)
+        must share the exact same interval. They used to only sync this one
+        -- on any display refreshing faster or slower than 60 Hz (which is
+        most of them now: 75/120/144/165 Hz monitors are common), the pill's
+        resize/reposition kept ticking at a fixed 60 Hz while its capsule
+        heights, opacity, and tint animated at the real refresh rate. Two
+        parts of the same motion advancing at two different rates is what
+        read as the whole bar looking jittery during any transition that
+        changes width -- the content was smooth, the window resizing around
+        it was not, and the two visibly fought each other every few frames.
+        """
         try:
             rate = float(screen.refreshRate())
         except (TypeError, ValueError):
             rate = 0.0
         if not 24.0 <= rate <= 400.0:
             rate = 60.0
-        self._timer.setInterval(max(5, int(round(1000.0 / rate))))
+        interval = max(5, int(round(1000.0 / rate)))
+        self._timer.setInterval(interval)
+        self._width_timer.setInterval(interval)
+        self._margin_timer.setInterval(interval)
 
     # --- state ---
 
@@ -818,6 +839,22 @@ class Bar(QWidget):
             self._morph_from = self._drawn.copy()
             self._morph_from_tint = QColor(self._tint)
             self._morph_elapsed = 0.0
+            if state in _MESSAGE_STATES and self._state in _MESSAGE_STATES:
+                # Going straight from one message/icon+text composition to a
+                # different one (e.g. an error immediately followed by a
+                # notice, or two notify() calls close together) instead of
+                # passing through the wave first. _tick's content crossfade
+                # blends the old and new labels' opacity over ~45ms, but
+                # paintEvent centres each one independently on its own text
+                # width -- for those few frames two different icons and
+                # messages were both partially visible at two different
+                # x positions, which read as a glitchy double-exposure
+                # instead of a clean swap. Snapping straight to the new
+                # target here (skipped only for the wave, where this never
+                # double-renders any text) makes a message-to-message change
+                # an instant, legible swap instead of a cross-dissolve.
+                for key in self._content:
+                    self._content[key] = 1.0 if key == state else 0.0
         self._state = state
         self._detail = detail
         self._progress = progress
@@ -1054,7 +1091,7 @@ class Bar(QWidget):
 
         # Crossfade from the currently rendered composition on every interrupt.
         content_target = (
-            self._state if self._state in ("done", "loaded", "error", "notice") else "wave"
+            self._state if self._state in _MESSAGE_STATES else "wave"
         )
         blend = 1.0 if self._reduced_motion else 1.0 - math.exp(-dt / 0.045)
         for name in self._content:
@@ -1270,7 +1307,7 @@ class Bar(QWidget):
             "error": ERROR if self._dark else QColor("#C42B1C"),
             "notice": notice_dot,
         }
-        for name in ("done", "loaded", "error", "notice"):
+        for name in _MESSAGE_STATES:
             weight = self._content[name]
             if weight <= 0.001:
                 continue

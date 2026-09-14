@@ -31,7 +31,7 @@
 ;   ISCC.exe dictate.iss /DMyAppVersion=0.1.0-beta.3
 
 #ifndef MyAppVersion
-#define MyAppVersion "1.4.1-beta1"
+#define MyAppVersion "1.4.2-beta1"
 #endif
 #define MyAppName "Dictate"
 #define MyAppPublisher "PLEXFX"
@@ -86,6 +86,16 @@ Source: "{#UpdaterSourceDir}\_internal\*"; DestDir: "{app}\updater\_internal"; F
 ; below extracts it to {tmp} (Setup's own scratch folder, auto-cleaned)
 ; only when the gpuaccel task actually needs it.
 Source: "download-gpu-runtime.ps1"; DestDir: "{tmp}"; Flags: dontcopy
+
+[InstallDelete]
+; PySide's binary extension modules and Qt DLLs are one version-locked
+; runtime.  Leaving an older member beside a newer member lets Windows load
+; mismatched exports and fails at startup with "specified procedure could not
+; be found" while importing QtCore.  Replace these generated trees as a unit
+; on every upgrade; do not touch _internal\nvidia, where the optional and
+; expensive GPU runtime is deliberately retained.
+Type: filesandordirs; Name: "{app}\_internal\PySide6"
+Type: filesandordirs; Name: "{app}\_internal\shiboken6"
 
 [Icons]
 Name: "{group}\Dictate"; Filename: "{app}\{#MyAppExeName}"

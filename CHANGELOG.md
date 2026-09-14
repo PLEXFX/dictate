@@ -7,6 +7,14 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.2-beta1] - 2026-09-14
+
+### Fixed
+
+- Updates now replace PySide6 and Qt's version-locked runtime files as one
+  set, preventing the Windows startup error where `QtCore` cannot load a
+  required procedure.
+
 ## [1.4.1-beta1] - 2026-09-14
 
 ### Fixed

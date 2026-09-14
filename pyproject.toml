@@ -1,6 +1,6 @@
 [project]
 name = "dictate"
-version = "1.4.1-beta1"
+version = "1.4.2-beta1"
 description = "Hold-to-talk local dictation for Windows 11, with a Fluent-styled bar above the taskbar."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

@@ -122,7 +122,7 @@ wheels = [
 
 [[package]]
 name = "dictate"
-version = "1.4.2b1"
+version = "1.4.3b1"
 source = { virtual = "." }
 dependencies = [
     { name = "comtypes" },

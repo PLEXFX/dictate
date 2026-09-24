@@ -7,6 +7,27 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.3-beta1] - 2026-09-24
+
+### Added
+
+- **Lower other audio** (Settings > Dictation > Recording, off by default):
+  while the talk key is held, every other app plays at half its own volume
+  so speaker audio bleeds less into the microphone. Dictate's own cues are
+  unaffected, a slider moved mid-recording is left where the user put it,
+  and a crash mid-recording is repaired on the next launch.
+
+### Changed
+
+- Opening GPU setup or update details from the Settings downloads rail now
+  briefly highlights the button you were sent to.
+
+### Fixed
+
+- Dictate no longer fails to start after installing 1.4.2-beta1. That
+  installer bundled an incompatible ICU library that broke Qt at launch; the
+  build no longer includes it and this update removes the leftover copy.
+
 ## [1.4.2-beta1] - 2026-09-14
 
 ### Fixed

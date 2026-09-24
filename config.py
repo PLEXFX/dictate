@@ -162,6 +162,9 @@ class Settings:
 
     # --- feedback ---
     sound_cues: bool = True       # short tones when the mic opens and closes
+    # Turn other apps down while recording, so speakers don't bleed into the
+    # mic. Off by default: changing other apps' volume should never surprise.
+    duck_other_audio: bool = False
 
     # --- updates ---
     auto_update_enabled: bool = True  # periodically check GitHub for a new release
@@ -214,6 +217,7 @@ class Settings:
         out.start_with_windows = bool(out.start_with_windows)
         out.tap_to_lock = bool(out.tap_to_lock)
         out.sound_cues = bool(out.sound_cues)
+        out.duck_other_audio = bool(out.duck_other_audio)
         out.auto_update_enabled = bool(out.auto_update_enabled)
         out.system_notifications_enabled = bool(out.system_notifications_enabled)
         out.theme_mode = _as_choice(

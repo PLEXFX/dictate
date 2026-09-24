@@ -68,7 +68,7 @@ Read the full [privacy statement](PRIVACY.md).
 
 Dictate checks GitHub for updates at launch and every 24 hours while it is running. It never installs or restarts without your action: when an update is available, choose it from the activity bar or Settings; after the installer is downloaded and verified, choose the orange **Restart Dictate** action.
 
-Every release has notes in [CHANGELOG.md](CHANGELOG.md). **v1.4.2-beta1** repairs the update installer so Dictate replaces its Qt runtime as one matched set instead of failing at startup with a QtCore DLL error.
+Every release has notes in [CHANGELOG.md](CHANGELOG.md). **v1.4.3-beta1** adds an optional **Lower other audio** setting that turns other apps down while you talk, and fixes Dictate failing to start after the 1.4.2-beta1 installer.
 
 ## Run from source
 

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 import audio as audio_mod
 import bar as bar_mod
 import config
+import ducking
 import engine as engine_mod
 import gpu_runtime
 import hotkeys as hotkeys_mod
@@ -364,6 +365,7 @@ class App:
         self.bar = Bar(self.settings)
         self.theme_watcher.changed.connect(self._on_theme_changed)
         self.cues = sounds_mod.Cues(self.settings.sound_cues)
+        self.ducker = ducking.Ducker(self.settings.duck_other_audio)
         self.settings_window: SettingsWindow | None = None
         self._apply_appearance()
         self._busy = False
@@ -730,6 +732,7 @@ class App:
         # silent rather than chiming and then showing an error.
         self.cues.play("start")
         self._start_cue_at = time.monotonic()
+        self._duck_other_audio()
         # Capture is already live. Warming an unloaded model now overlaps its
         # cold-start cost with the user's speech instead of making them wait
         # after release. ``preload`` is asynchronous and ``ensure_loaded``
@@ -778,11 +781,23 @@ class App:
         self.lock_limit_timer.stop()
         self.meter_timer.stop()
         self.mic.stop()
+        self._restore_other_audio()
         self._mic_closed_at = time.monotonic()
         self._dictation_active = False
         self.bar.set_clickable(False)
         self.bar.set_state("idle")
         print("[dictate] recording cancelled")
+
+    def _duck_other_audio(self) -> None:
+        # getattr: tests build App via __new__ with only the parts they use.
+        ducker = getattr(self, "ducker", None)
+        if ducker is not None:
+            ducker.duck()
+
+    def _restore_other_audio(self) -> None:
+        ducker = getattr(self, "ducker", None)
+        if ducker is not None:
+            ducker.restore()
 
     def _stop_listening(self, duration: float) -> None:
         if self._busy:
@@ -796,6 +811,7 @@ class App:
         self.meter_timer.stop()
         self.bar.set_clickable(False)
         clip = self.mic.stop()
+        self._restore_other_audio()
         self._mic_closed_at = time.monotonic()
         if duration < hotkeys_mod.MIN_HOLD_SECONDS or clip.size == 0:
             self._dictation_active = False
@@ -1061,6 +1077,9 @@ class App:
             self.hotkeys.cancel_lock()
         self.bar.update_settings(settings)
         self.cues.update_settings(settings)
+        ducker = getattr(self, "ducker", None)
+        if ducker is not None:
+            ducker.update_settings(settings)
         self._refresh_tray_update_indicator()
 
     # --- undoing a paste ---
@@ -1335,6 +1354,10 @@ class App:
 
     def _quit(self) -> None:
         self.hotkeys.stop()
+        ducker = getattr(self, "ducker", None)
+        if ducker is not None:
+            # Before anything slower, so other apps are never left turned down.
+            ducker.shutdown()
         self.engine.shutdown()
         self.updater.shutdown()
         running_notice_handle = getattr(self, "_running_notice_handle", None)

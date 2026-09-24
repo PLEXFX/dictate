@@ -31,7 +31,7 @@
 ;   ISCC.exe dictate.iss /DMyAppVersion=0.1.0-beta.3
 
 #ifndef MyAppVersion
-#define MyAppVersion "1.4.2-beta1"
+#define MyAppVersion "1.4.3-beta1"
 #endif
 #define MyAppName "Dictate"
 #define MyAppPublisher "PLEXFX"
@@ -96,6 +96,12 @@ Source: "download-gpu-runtime.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 ; expensive GPU runtime is deliberately retained.
 Type: filesandordirs; Name: "{app}\_internal\PySide6"
 Type: filesandordirs; Name: "{app}\_internal\shiboken6"
+; 1.4.2-beta1 shipped a foreign ICU (Poppler's icuuc.dll) that QtCore loads
+; instead of Windows' own copy and then fails to start. The build no longer
+; bundles it, but Inno never removes files a newer build simply omits, so an
+; upgrade must delete the stale copy explicitly.
+Type: files; Name: "{app}\_internal\icuuc.dll"
+Type: files; Name: "{app}\_internal\icudt78.dll"
 
 [Icons]
 Name: "{group}\Dictate"; Filename: "{app}\{#MyAppExeName}"

@@ -199,6 +199,7 @@ QPushButton#apply:disabled { background: #3A3A3A; color: #6D6D6D; }
 QPushButton#apply[updateState="restart"] { background: #F59E0B; color: #1A1A1A; }
 QPushButton#apply[updateState="restart"]:hover { background: #FDBA3B; }
 QPushButton#apply[updateState="restart"]:pressed { background: #D97706; }
+QPushButton#apply[attention="true"], QPushButton#apply[attention="true"]:hover, QPushButton#secondary[attention="true"], QPushButton#secondary[attention="true"]:hover { background: #4CC2FF; color: #101010; border: 2px solid #FFFFFF; }
 QPushButton#secondary {
     background: #333333;
     color: #FFFFFF;
@@ -374,6 +375,7 @@ QPushButton#apply:hover { background: #006CBE; } QPushButton#apply:pressed { bac
 QPushButton#apply[updateState="restart"] { background: #B54708; color: #FFFFFF; }
 QPushButton#apply[updateState="restart"]:hover { background: #963800; }
 QPushButton#apply[updateState="restart"]:pressed { background: #7A2E00; }
+QPushButton#apply[attention="true"], QPushButton#apply[attention="true"]:hover, QPushButton#secondary[attention="true"], QPushButton#secondary[attention="true"]:hover { background: #0078D4; color: #FFFFFF; border: 2px solid #183B58; }
 QPushButton#secondary { background: #FFFFFF; color: #1A1A1A; border: 1px solid #C9C9C9; border-radius: 4px; padding: 6px 18px; }
 QPushButton#secondary:hover { background: #F3F3F3; }
 QPushButton#downloadOverview { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 0px; text-align: left; }
@@ -1673,6 +1675,10 @@ class SettingsWindow(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(250)
         self._save_timer.timeout.connect(self._save_now)
+        self._attention_timer = QTimer(self)
+        self._attention_timer.setSingleShot(True)
+        self._attention_timer.timeout.connect(self._clear_button_attention)
+        self._attention_button = None
         self._current_section = "dictation"
         self.setObjectName("root")
         self.setWindowTitle("Dictate settings")
@@ -2035,6 +2041,26 @@ class SettingsWindow(QWidget):
 
         QTimer.singleShot(0, start)
 
+    def _clear_button_attention(self) -> None:
+        self._attention_timer.stop()
+        button = self._attention_button
+        self._attention_button = None
+        if button is not None:
+            button.setProperty("attention", "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def _highlight_button(self, button: QPushButton) -> None:
+        """Make the destination action easy to spot for ten seconds."""
+        self._clear_button_attention()
+        if not button.isVisible() or not button.isEnabled():
+            return
+        self._attention_button = button
+        button.setProperty("attention", "true")
+        button.style().unpolish(button)
+        button.style().polish(button)
+        self._attention_timer.start(10_000)
+
     def _open_download_overview(self) -> None:
         """Run the rail control's current action or open its detailed page."""
         action = self._download_action
@@ -2059,11 +2085,16 @@ class SettingsWindow(QWidget):
             self._navigate_to_section("dictation")
             if not self.advanced_btn.isChecked():
                 self.advanced_btn.setChecked(True)
-                QTimer.singleShot(ENTER_MS + 30, lambda: self._scroll_to_widget(self.gpu_download_row))
+                QTimer.singleShot(ENTER_MS + 30, lambda: (
+                    self._scroll_to_widget(self.gpu_download_row),
+                    self._highlight_button(self.gpu_download_btn),
+                ))
             else:
                 self._scroll_to_widget(self.gpu_download_row)
+                self._highlight_button(self.gpu_download_btn)
             return
         self._navigate_to_section("updates")
+        QTimer.singleShot(ENTER_MS + 50, lambda: self._highlight_button(self.update_btn))
 
     # --- construction ---
 
@@ -2391,6 +2422,14 @@ class SettingsWindow(QWidget):
             self.sound_check,
         )
 
+        self.duck_check = ToggleSwitch(self._settings.duck_other_audio)
+        self.duck_check.toggled.connect(self._queue_save)
+        duck_row = _card(
+            "Lower other audio",
+            "Turns other apps down while you talk, so speakers don't bleed into the mic.",
+            self.duck_check,
+        )
+
         self.startup_check = ToggleSwitch(self._settings.start_with_windows)
         self.startup_check.toggled.connect(self._queue_save)
         startup_row = _card(
@@ -2410,7 +2449,7 @@ class SettingsWindow(QWidget):
         essentials.setContentsMargins(0, 0, 0, 0)
         essentials.setSpacing(8)
         for heading, rows in (
-            ("Recording", (mic_row, ptt_row, self.tap_lock_row)),
+            ("Recording", (mic_row, ptt_row, self.tap_lock_row, duck_row)),
             (
                 "Transcription",
                 (device_row, model_row, self.model_download_row, vocabulary_row),
@@ -2448,7 +2487,9 @@ class SettingsWindow(QWidget):
         # dictation from unexpectedly starting a 1.3 GB download or
         # pretending it is already on GPU.
         self.gpu_download_btn = QPushButton("Download now")
+        self.gpu_download_btn.setObjectName("secondary")
         self.gpu_download_btn.clicked.connect(self._start_gpu_download_clicked)
+        self.gpu_download_btn.clicked.connect(self._clear_button_attention)
         self.gpu_download_row = _card(
             "GPU acceleration",
             "Not downloaded yet. Dictate keeps using CPU until this finishes "
@@ -2629,6 +2670,7 @@ class SettingsWindow(QWidget):
         self.update_btn.setProperty("updateState", "default")
         self.update_btn.setVisible(self._updater is not None)
         self.update_btn.clicked.connect(self._check_for_updates)
+        self.update_btn.clicked.connect(self._clear_button_attention)
         update_row = _card(
             "You're up to date",
             "Dictate checks GitHub for a newer official release.",
@@ -3346,6 +3388,7 @@ class SettingsWindow(QWidget):
             input_device=self.mic_box.currentData() or "",
             sleep_enabled=self.sleep_check.isChecked(),
             sound_cues=self.sound_check.isChecked(),
+            duck_other_audio=self.duck_check.isChecked(),
             sleep_after_minutes=self.sleep_slider.value(),
             ptt_key=self.ptt_edit.binding() or config.DEFAULT_PTT_KEY,
             tap_to_lock=self.tap_lock_check.isChecked(),

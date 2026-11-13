@@ -270,6 +270,7 @@ def _verify_authenticode(path: Path, trusted_thumbprint: str) -> bool:
 
 _DOWNLOAD_TEMP_PREFIX = "dictate-update-"
 _SPLASH_TEMP_PREFIX = "dictate-update-splash-"
+_FOREIGN_ICU = ("icuuc.dll", "icudt78.dll")
 _SPLASH_STALE_AFTER_SECONDS = 10 * 60
 _PENDING_METADATA_NAME = "pending-update.json"
 
@@ -379,7 +380,12 @@ def stage_update_splash(source_dir: Path) -> Optional[Path]:
     root = Path(tempfile.mkdtemp(prefix=_SPLASH_TEMP_PREFIX))
     target_dir = root / "updater"
     try:
-        shutil.copytree(source_dir, target_dir)
+        # 1.4.2-beta1 shipped a foreign ICU in updater\_internal that QtCore
+        # loads instead of Windows' own and then fails to import. An upgrade
+        # can leave it behind, so never carry it into the running copy.
+        shutil.copytree(
+            source_dir, target_dir, ignore=shutil.ignore_patterns(*_FOREIGN_ICU)
+        )
     except OSError:
         shutil.rmtree(root, ignore_errors=True)
         return None

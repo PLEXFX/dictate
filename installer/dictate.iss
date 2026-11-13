@@ -26,22 +26,39 @@
 ; Build with (from the installer\ folder):
 ;   ISCC.exe dictate.iss
 ; after first producing dist\dictate\ via: uv run pyinstaller ..\dictate.spec
+; and staging the WinUI program with: ..\ui\Publish.bat (into ..\ui\publish\)
 ;
 ; Override the version at build time without editing this file:
 ;   ISCC.exe dictate.iss /DMyAppVersion=0.1.0-beta.3
 
 #ifndef MyAppVersion
-#define MyAppVersion "1.4.3-beta1"
+#define MyAppVersion "1.5.0-beta1"
 #endif
 #define MyAppName "Dictate"
 #define MyAppPublisher "PLEXFX"
 #define MyAppURL "https://github.com/PLEXFX/dictate"
 #define MyAppExeName "dictate.exe"
+; Where each built piece comes from. Override any of them (and MyAppId, so a test install never touches the real one's
+; uninstall entry) on the command line to build a test installer without disturbing dist\ or Output\:
+;   ISCC.exe dictate.iss /DSourceDir=... /DUpdaterSourceDir=... /DUiSourceDir=... /DMyAppId={{GUID} /DNoLaunch
+; NoLaunch leaves out the two post-install launches below, so a test install never starts a second Dictate.
+#ifndef SourceDir
 #define SourceDir "..\dist\dictate"
+#endif
+#ifndef UpdaterSourceDir
 #define UpdaterSourceDir "..\dist\dictate-updater"
+#endif
+; The WinUI program that draws the activity bar, the tray icon and Settings (ui\Publish.bat stages it in ui\publish).
+; dictate.exe starts {app}\ui\DictateUI.exe when asked to (ui_bridge.find_ui_exe); it is self-contained, so nothing else is needed.
+#ifndef UiSourceDir
+#define UiSourceDir "..\ui\publish"
+#endif
+#ifndef MyAppId
+#define MyAppId "{{65B8AB9F-FF1B-4148-8ED5-76F30681FD64}"
+#endif
 
 [Setup]
-AppId={{65B8AB9F-FF1B-4148-8ED5-76F30681FD64}
+AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -81,6 +98,9 @@ Source: "{#SourceDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignorever
 ; trees never risk colliding on a same-named file.
 Source: "{#UpdaterSourceDir}\dictate-updater.exe"; DestDir: "{app}\updater"; Flags: ignoreversion
 Source: "{#UpdaterSourceDir}\_internal\*"; DestDir: "{app}\updater\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The WinUI program, in its own subfolder for the same reason: it is a separately built tree (.NET and Windows App SDK
+; runtimes included), never mixed into the PyInstaller output. No debug symbols.
+Source: "{#UiSourceDir}\*"; DestDir: "{app}\ui"; Excludes: "*.pdb"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Setup-time only -- never installed alongside the app itself. "dontcopy"
 ; keeps it out of {app} and the uninstall list entirely; CurStepChanged
 ; below extracts it to {tmp} (Setup's own scratch folder, auto-cleaned)
@@ -102,9 +122,22 @@ Type: filesandordirs; Name: "{app}\_internal\shiboken6"
 ; upgrade must delete the stale copy explicitly.
 Type: files; Name: "{app}\_internal\icuuc.dll"
 Type: files; Name: "{app}\_internal\icudt78.dll"
+Type: files; Name: "{app}\_internal\icuuc.dll.disabled"
+; The update-progress helper is pure generated binary with no user data, so
+; replace it as a unit too. 1.4.3-beta1 cleaned only the main runtime and
+; left 1.4.2-beta1's foreign ICU in updater\_internal, which made the splash
+; fail with the same QtCore error during the next update.
+Type: filesandordirs; Name: "{app}\updater"
+; The WinUI program is generated binary too, with no user data: replace it as a unit so a file a newer build no longer
+; has (a Windows App SDK DLL, say) never lingers beside the new ones.
+Type: filesandordirs; Name: "{app}\ui"
 
 [Icons]
 Name: "{group}\Dictate"; Filename: "{app}\{#MyAppExeName}"
+; Starts Dictate with the new interface (activity bar, tray icon and Settings drawn by the WinUI program). The normal
+; shortcut, and Start with Windows, keep the built-in interface until the new one is approved. Quit Dictate first: only
+; one copy runs at a time.
+Name: "{group}\Dictate (new interface, beta)"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--winui"
 Name: "{group}\Uninstall Dictate"; Filename: "{uninstallexe}"
 
 [Run]
@@ -112,17 +145,20 @@ Name: "{group}\Uninstall Dictate"; Filename: "{uninstallexe}"
 ; second install-time checkbox -- startup.py already registers correctly
 ; against the installed exe path once running frozen, so a separate
 ; installer-side mechanism would only duplicate it.
+#ifndef NoLaunch
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch Dictate"; Flags: nowait postinstall skipifsilent
 ; A verified in-app update runs Setup silently.  Inno Setup skips the normal
 ; post-install checkbox in that mode, so launch the new version explicitly
 ; and mark it as updated so Dictate can show the release's What's New window.
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--updated"; Flags: nowait skipifnotsilent
+#endif
 
 [UninstallDelete]
 ; The updater helper is pure app binary, same as everything else Inno
 ; already tracks per-file from [Files] -- always safe to remove outright,
 ; no prompt needed.
 Type: filesandordirs; Name: "{app}\updater"
+Type: filesandordirs; Name: "{app}\ui"
 ; {app}\_internal (Dictate's own runtime files, individually tracked and
 ; removed by Inno automatically -- no entry needed for those) and
 ; {userappdata}\dictate (settings.json, downloaded speech models, GPU

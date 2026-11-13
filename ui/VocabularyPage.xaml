@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="DictateUI.VocabularyPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:DictateUI">
+
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" MaxWidth="900" />
+        </Grid.ColumnDefinitions>
+        <Grid Margin="36,16,36,28" RowSpacing="8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Button Style="{StaticResource QuietButtonStyle}" HorizontalAlignment="Left" Padding="8,6"
+                    AutomationProperties.Name="Back to Dictation settings" Click="OnBack">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <FontIcon Glyph="&#xE72B;" FontSize="12" />
+                    <TextBlock Text="Back to Dictation" />
+                </StackPanel>
+            </Button>
+
+            <TextBlock Grid.Row="1" Text="Words I use" Style="{StaticResource PageTitleStyle}" />
+            <TextBlock Grid.Row="2" Style="{StaticResource PageDescStyle}" Margin="0,0,0,8"
+                       Text="Add names, brands, places, or technical terms one per line. Dictate uses them only as local recognition hints." />
+
+            <TextBox x:Name="Editor" Grid.Row="3" AcceptsReturn="True" TextWrapping="NoWrap" VerticalAlignment="Stretch"
+                     PlaceholderText="Northwind Studio&#x0A;CTranslate2&#x0A;Springfield"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                     AutomationProperties.Name="Words Dictate should recognize" TextChanged="OnTextChanged" />
+
+            <TextBlock x:Name="Note" Grid.Row="4" Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </Grid>
+    </Grid>
+</Page>

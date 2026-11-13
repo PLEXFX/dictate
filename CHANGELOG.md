@@ -7,6 +7,22 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0-beta1] - 2026-11-13
+
+### Added
+
+- **A new interface, available as a beta.** Settings, the activity bar and
+  the tray icon and menu are redrawn as a native Windows 11 program. It is
+  off by default: start it from the Start Menu shortcut **Dictate (new
+  interface, beta)**. Your current interface stays the default and is used
+  automatically if the new one cannot start.
+
+### Fixed
+
+- Updating no longer fails to relaunch the update window when another
+  program's ICU library is on the system path; the build leaves those files
+  out and the installer removes stale copies.
+
 ## [1.4.3-beta1] - 2026-09-24
 
 ### Added

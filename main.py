@@ -24,10 +24,10 @@ import sys
 import threading
 import time
 from ctypes import wintypes
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEventLoop, QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
@@ -37,11 +37,14 @@ import config
 import ducking
 import engine as engine_mod
 import gpu_runtime
+import hardware
 import hotkeys as hotkeys_mod
 import inject
 import release_notes as release_notes_mod
 import sounds as sounds_mod
 import startup
+import ui_bridge
+import ui_shell
 import updater as updater_mod
 from theme import ThemeWatcher, resolve_dark
 from bar import Bar
@@ -70,6 +73,13 @@ UPDATED_WINDOW_READY_EVENT = "Local\\DictateUpdatedWindowReady"
 # transcribes what it has. A hold is bounded by the user's finger; a lock is
 # not, so a forgotten one would otherwise hold the microphone open all day.
 MAX_LOCKED_SECONDS = 5 * 60
+
+# The WinUI program (ui\DictateUI.exe) has this long to connect at start. If it
+# later closes by itself it is started again, at most this many times in two
+# minutes, after which the built-in bar and tray take over.
+UI_START_SECONDS = 8.0
+UI_MAX_RESTARTS = 3
+UI_RESTART_WINDOW_SECONDS = 120.0
 
 # Both microphone-error paths land on the same short label: a device that
 # never opens (mic.start() raised) and one that opens but streams nothing
@@ -362,11 +372,22 @@ class App:
             on_state=self.bridge.engine_state.emit,
             on_gpu_status=self.bridge.gpu_status.emit,
         )
-        self.bar = Bar(self.settings)
+        # With DICTATE_WINUI=1 and ui\DictateUI.exe present, the WinUI program draws the
+        # activity bar, owns the tray icon and shows Settings; these stand-ins forward
+        # to it (ui_shell.py). If it cannot start, _fallback_to_builtin_ui() swaps in the
+        # built-in bar and tray, so there is always one of each.
+        self._ui_mode = ui_bridge.winui_requested() and ui_bridge.find_ui_exe() is not None
+        self._shell = ui_shell.ShellChannel()
+        self.bar = ui_shell.RemoteBar(self.settings, self._shell) if self._ui_mode else Bar(self.settings)
         self.theme_watcher.changed.connect(self._on_theme_changed)
         self.cues = sounds_mod.Cues(self.settings.sound_cues)
         self.ducker = ducking.Ducker(self.settings.duck_other_audio)
         self.settings_window: SettingsWindow | None = None
+        self._ui_server = None  # the pipe to the WinUI program, see ui_bridge.py
+        self._ui_proc = None
+        self._ui_starts: list[float] = []  # recent restarts of the WinUI program, to stop a crash loop
+        self._quitting = False
+        self._settings_pending = False  # Settings was asked for while the WinUI program was not connected
         self._apply_appearance()
         self._busy = False
         self._dictation_active = False  # mic open or its captured audio is still processing
@@ -468,7 +489,10 @@ class App:
         self.meter_timer.setInterval(16)
         self.meter_timer.timeout.connect(self._pump_meter)
 
-        self._build_tray()
+        if self._ui_mode:
+            self._build_remote_tray()
+        else:
+            self._build_tray()
         self.hotkeys.start()
         self._start_command_listener()
         self.updater = updater_mod.Updater(
@@ -480,6 +504,8 @@ class App:
             on_status_change=self.bridge.update_status_changed.emit,
             enabled=self.settings.auto_update_enabled,
         )
+        if self._ui_mode:
+            self._start_ui_shell()
 
         self._refresh_tray_update_indicator()
         self._warm_after_launch()
@@ -982,6 +1008,9 @@ class App:
                 self.bar.set_state("loaded", "GPU acceleration ready")
 
     def _show_settings(self) -> None:
+        if self._ui_mode:
+            self._show_shell_settings()
+            return
         if self.settings_window is None:
             self.settings_window = SettingsWindow(
                 self.settings,
@@ -997,6 +1026,177 @@ class App:
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
+
+    # --- the WinUI program (opt-in: DICTATE_WINUI=1) owns the bar, the tray and Settings ---
+
+    def _build_remote_tray(self) -> None:
+        """The icon and menu live in the WinUI program; these carry the same entries."""
+        self.tray = ui_shell.RemoteTray(self._shell, _tray_tip(self.settings))
+        self.act_settings = self.tray.add_action(
+            "settings", f"Settings\t{hotkeys_mod.format_combo(self.settings.settings_hotkey)}"
+        )
+        self.act_settings.triggered.connect(self._show_settings)
+        act_load = self.tray.add_action("load", "Load model now")
+        act_load.triggered.connect(self.engine.preload)
+        act_unload = self.tray.add_action("unload", "Unload model")
+        act_unload.triggered.connect(self.engine.unload)
+        self.act_copy_last = self.tray.add_action("copy_last", "Copy last dictation", enabled=False)
+        self.act_copy_last.triggered.connect(self._copy_last_dictation)
+        self.act_undo = self.tray.add_action("undo", "Undo last dictation", enabled=False)
+        self.act_undo.triggered.connect(self._undo_last_paste)
+        self.act_check_update = self.tray.add_action(
+            "check_update", "Check for updates", enabled=self.settings.auto_update_enabled
+        )
+        self.act_check_update.triggered.connect(self._check_for_updates)
+        act_quit = self.tray.add_action("quit", "Quit")
+        act_quit.triggered.connect(self._quit)
+
+    def _start_ui_shell(self) -> None:
+        """Start the WinUI program and wait for it. Any failure swaps in the built-in bar and tray."""
+        server = ui_bridge.make_pipe_server(ui_bridge.UiBridge(self._ui_host()), self.qt)
+        if not server.start():
+            print("[dictate] could not open the pipe to the new window; using the built-in window")
+            self._fallback_to_builtin_ui()
+            return
+        self._ui_server = server
+        self._shell.server = server
+        server.connected.connect(self._on_ui_connected)
+        server.disconnected.connect(self._on_ui_disconnected)
+        self._ui_proc = ui_bridge.launch_ui(server.name)
+        if self._ui_proc is None:
+            print("[dictate] ui\\DictateUI.exe could not be started; using the built-in window")
+            self._fallback_to_builtin_ui()
+            return
+        if not self._wait_for_ui(UI_START_SECONDS):
+            print("[dictate] the new window did not connect; using the built-in window")
+            self._fallback_to_builtin_ui()
+
+    def _wait_for_ui(self, seconds: float) -> bool:
+        loop = QEventLoop()
+        self._ui_server.connected.connect(loop.quit)
+        QTimer.singleShot(int(seconds * 1000), loop.quit)
+        if not self._ui_server.has_client:
+            loop.exec()
+        return self._ui_server.has_client
+
+    def _on_ui_connected(self) -> None:
+        if self._settings_pending:
+            self._settings_pending = False
+            self._shell.send({"type": "show_settings"})
+
+    def _on_ui_disconnected(self) -> None:
+        # Not at once: a newer window replacing an older one drops the old pipe first.
+        QTimer.singleShot(1000, self._ensure_ui)
+
+    def _ensure_ui(self) -> None:
+        """The program owns the tray, so if it is gone and nobody quit, start it again or give up."""
+        if self._quitting or not self._ui_mode or self._ui_server is None:
+            return
+        if self._ui_server.has_client:
+            return
+        proc = self._ui_proc
+        if proc is not None and proc.poll() is None:
+            return  # still starting
+        now = time.monotonic()
+        self._ui_starts = [t for t in self._ui_starts if now - t < UI_RESTART_WINDOW_SECONDS]
+        if len(self._ui_starts) >= UI_MAX_RESTARTS:
+            print("[dictate] the new window keeps closing; using the built-in window")
+            self._fallback_to_builtin_ui()
+            return
+        self._ui_starts.append(now)
+        print("[dictate] the new window closed; starting it again")
+        self._ui_proc = ui_bridge.launch_ui(self._ui_server.name)
+        if self._ui_proc is None:
+            self._fallback_to_builtin_ui()
+            return
+        QTimer.singleShot(int(UI_START_SECONDS * 1000), self._ensure_ui)  # never connected: try again or give up
+
+    def _fallback_to_builtin_ui(self) -> None:
+        """Back to the built-in activity bar, tray icon and Settings window."""
+        self._ui_mode = False
+        self._shell.server = None
+        server, self._ui_server = self._ui_server, None
+        if server is not None:
+            server.close()
+        proc, self._ui_proc = self._ui_proc, None
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+        self.bar = Bar(self.settings)
+        self.bar.clicked.connect(self._on_bar_clicked)
+        self._apply_appearance()
+        self._build_tray()
+        self._refresh_tray_update_indicator()
+        if self.settings.always_visible:
+            self.bar.set_state("idle")
+            self.bar.show_bar()
+
+    def _show_shell_settings(self) -> None:
+        if self._shell.connected:
+            self._shell.send({"type": "show_settings"})
+        else:
+            self._settings_pending = True  # sent the moment the window connects
+
+    def _shell_snapshot(self) -> dict:
+        return {"tray": self.tray.snapshot(), "bar": self.bar.snapshot()}
+
+    def _ui_host(self) -> ui_bridge.UiHost:
+        return ui_bridge.UiHost(
+            version=VERSION,
+            notes=self._whats_new_notes,
+            model_dir=lambda: str(config.model_dir()),
+            get_settings=lambda: self.settings,
+            save_settings=self._save_settings_from_ui,
+            engine=self.engine,
+            updater=self.updater,
+            cuda_available=engine_mod.cuda_available,
+            gpu_needs_download=lambda: gpu_runtime.needs_download(gpu_available=True),
+            hardware=hardware.probe,
+            input_devices=audio_mod.input_devices,
+            set_capture_active=self.hotkeys.set_capture_active,
+            preview_width=self.bar.preview_width,
+            preview_margin=self.bar.preview_margin,
+            shell_snapshot=self._shell_snapshot,
+            tray_action=self.tray.trigger,
+            bar_clicked=self.bar.handle_click,
+        )
+
+    def _save_settings_from_ui(self, new: config.Settings) -> None:
+        """Apply a change from the WinUI window exactly as the built-in window does."""
+        old = self.settings
+        if asdict(new) == asdict(old):
+            return
+        if new.start_with_windows != old.start_with_windows:
+            try:
+                startup.set_enabled(new.start_with_windows)
+            except OSError:
+                # Windows refused; keep the old value and let the window show the truth.
+                new = replace(new, start_with_windows=old.start_with_windows)
+                if asdict(new) == asdict(old):
+                    return
+        needs_reload = (new.model_size, new.device) != (old.model_size, old.device)
+        config.save(new)
+        self._apply_settings(new)
+        if needs_reload:
+            self.engine.preload()
+
+    def _close_winui(self) -> None:
+        self._quitting = True
+        # getattr, like the ducker in _quit: a test's bare App, or a built-in-window run,
+        # never created either.
+        server = getattr(self, "_ui_server", None)
+        proc = getattr(self, "_ui_proc", None)
+        if server is not None and server.has_client:
+            server.send({"type": "quit"})  # the program removes its tray icon and exits
+            server.flush()
+        if proc is not None:
+            try:
+                proc.wait(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                pass
+        if server is not None:
+            server.close()
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
 
     def _show_update_complete(self) -> None:
         # Keep Settings as the stable parent surface. The release notes are a
@@ -1268,6 +1468,8 @@ class App:
         # Hide every Dictate-owned window *before* the splash goes up, so
         # the two are never visible at the same time -- one closes before
         # the other opens, not both at once.
+        # The installer may close the WinUI program by itself before _quit gets to it; that is not a crash to recover from.
+        self._quitting = True
         self.bar.hide()
         if self.settings_window is not None:
             self.settings_window.hide()
@@ -1353,6 +1555,8 @@ class App:
             self._update_showing = False
 
     def _quit(self) -> None:
+        # First, before anything slow: an installer closing the WinUI program must not make us start it again.
+        self._quitting = True
         self.hotkeys.stop()
         ducker = getattr(self, "ducker", None)
         if ducker is not None:
@@ -1364,6 +1568,7 @@ class App:
         if running_notice_handle and _kernel32 is not None:
             _kernel32.CloseHandle(running_notice_handle)
             self._running_notice_handle = None
+        self._close_winui()
         self.tray.hide()
         self.qt.quit()
 

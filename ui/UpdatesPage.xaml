@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="DictateUI.UpdatesPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:DictateUI"
+    NavigationCacheMode="Required">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" MaxWidth="900" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Margin="36,24,36,36" Spacing="8">
+
+                <TextBlock Text="Updates" Style="{StaticResource PageTitleStyle}" />
+                <TextBlock Text="See your update status and choose when a new version is installed." Style="{StaticResource PageDescStyle}" Margin="0,0,0,12" />
+
+                <local:SettingsGroup>
+                    <local:SettingsRow x:Name="StatusRow" Title="You're up to date" Description="Dictate checks GitHub for a newer official release.">
+                        <local:SettingsRow.Icon>
+                            <FontIcon x:Name="StatusIcon" FontSize="20" />
+                        </local:SettingsRow.Icon>
+                        <Button x:Name="UpdateButton" Style="{StaticResource AccentButtonStyle}" MinWidth="140"
+                                AutomationProperties.Name="Check for updates" Click="OnUpdateClick" />
+                        <local:SettingsRow.Detail>
+                            <StackPanel Spacing="8">
+                                <TextBlock x:Name="MetaText" Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <ProgressBar x:Name="UpdateBar" Visibility="Collapsed" AutomationProperties.Name="Update progress" />
+                            </StackPanel>
+                        </local:SettingsRow.Detail>
+                    </local:SettingsRow>
+                </local:SettingsGroup>
+
+                <TextBlock Text="Update Settings" Style="{StaticResource SectionStyle}" />
+                <local:SettingsGroup>
+                    <local:SettingsRow Title="Check automatically" Description="Check at startup and every 24 hours while Dictate keeps running.">
+                        <ToggleSwitch x:Name="AutoToggle" AutomationProperties.Name="Check automatically" Toggled="OnAutoToggled" />
+                    </local:SettingsRow>
+                    <local:SettingsRow x:Name="NotesRow" Title="What's new">
+                        <Button Content="View release notes" AutomationProperties.Name="View release notes" Click="OnNotes" />
+                    </local:SettingsRow>
+                    <local:SettingsRow Title="Download and install" Description="Downloads only when you choose. Restart to install." />
+                </local:SettingsGroup>
+
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</Page>

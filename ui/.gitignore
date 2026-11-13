@@ -1,0 +1,9 @@
+bin/
+obj/
+*.user
+screens/
+tools/e2e-appdata/
+tools/*.png
+tools/e2e-out.txt
+tools/e2e-err.txt
+publish/

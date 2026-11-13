@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="DictateUI.PrivacyPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:DictateUI"
+    NavigationCacheMode="Required">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" MaxWidth="900" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Margin="36,24,36,36" Spacing="8">
+
+                <TextBlock Text="Your voice stays on this PC" Style="{StaticResource PageTitleStyle}" />
+                <TextBlock Text="Dictate runs locally with no account and no cloud transcription. Below is exactly what it accesses and the few things that leave this PC."
+                           Style="{StaticResource PageDescStyle}" Margin="0,0,0,4" />
+
+                <TextBlock Text="Stays on this PC" Style="{StaticResource SectionStyle}" />
+                <local:SettingsGroup>
+                    <local:SettingsRow Title="Microphone"
+                                       Description="Opens only while you hold the talk key. Audio is transcribed in memory and never saved to disk." />
+                    <local:SettingsRow Title="Transcription"
+                                       Description="Processed locally by faster-whisper. No audio or text is uploaded to any service." />
+                    <local:SettingsRow Title="Last dictation"
+                                       Description="The most recent result is held in memory only and never written to disk. It clears when Dictate closes." />
+                    <local:SettingsRow Title="Clipboard"
+                                       Description="Used briefly to insert text, then your prior contents are restored. &quot;Copy last dictation&quot; does the same: your clipboard returns after 5 seconds." />
+                    <local:SettingsRow Title="Words I use"
+                                       Description="Saved to your local settings file as recognition hints for Whisper. Never sent anywhere." />
+                    <local:SettingsRow Title="Your settings"
+                                       Description="Saved as plain JSON at %APPDATA%\dictate\settings.json. No account, no sync." />
+                    <local:SettingsRow Title="Diagnostics"
+                                       Description="Reports status and errors only, never the words you dictated." />
+                </local:SettingsGroup>
+
+                <TextBlock Text="Leaves this PC" Style="{StaticResource SectionStyle}" />
+                <local:SettingsGroup>
+                    <local:SettingsRow Title="Speech model downloads"
+                                       Description="Model files download from Hugging Face the first time you use them. No audio or text is part of the request." />
+                    <local:SettingsRow Title="GPU acceleration files"
+                                       Description="NVIDIA CUDA runtime files download from PyPI when you switch to GPU processing. No audio or text is included." />
+                    <local:SettingsRow Title="Update checks"
+                                       Description="Dictate asks GitHub's release page once a day whether a newer version exists. No account, hardware ID, or usage data is sent. Disable &quot;Check automatically&quot; to stop these requests entirely." />
+                </local:SettingsGroup>
+
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</Page>

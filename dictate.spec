@@ -69,7 +69,8 @@ a = Analysis(
 # PyInstaller can pick up Poppler's icuuc.dll from the build machine's PATH.
 # QtCore then loads it instead of Windows 11's compatible ICU and fails at startup.
 # These are not Dictate dependencies; leave ICU to the target Windows system.
-a.binaries = [entry for entry in a.binaries if entry[0].lower() not in {"icuuc.dll", "icudt78.dll"}]
+FOREIGN_ICU = {"icuuc.dll", "icudt78.dll"}
+a.binaries = [entry for entry in a.binaries if entry[0].lower() not in FOREIGN_ICU]
 pyz = PYZ(a.pure, cipher=block_cipher)
 
 exe = EXE(
@@ -111,6 +112,9 @@ splash_a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# The splash imports QtCore too, so it needs the same filter; 1.4.2-beta1
+# shipped the foreign ICU in updater\_internal as well.
+splash_a.binaries = [entry for entry in splash_a.binaries if entry[0].lower() not in FOREIGN_ICU]
 splash_pyz = PYZ(splash_a.pure, cipher=block_cipher)
 
 splash_exe = EXE(

@@ -4502,6 +4502,29 @@ class UpdateCleanupTests(unittest.TestCase):
             self.assertEqual(staged.read_bytes(), b"splash")
             self.assertTrue((staged.parent / "_internal" / "runtime.dll").is_file())
 
+    def test_staging_drops_a_leftover_foreign_icu(self):
+        """1.4.2-beta1 left Poppler's ICU in updater\\_internal; carrying it
+        into the staged copy makes the splash fail to import QtCore."""
+        with (
+            tempfile.TemporaryDirectory() as source_root,
+            tempfile.TemporaryDirectory() as temp_root,
+        ):
+            source = Path(source_root) / "updater"
+            (source / "_internal").mkdir(parents=True)
+            (source / "dictate-updater.exe").write_bytes(b"splash")
+            (source / "_internal" / "icuuc.dll").write_bytes(b"foreign")
+            (source / "_internal" / "icudt78.dll").write_bytes(b"foreign")
+            (source / "_internal" / "Qt6Core.dll").write_bytes(b"qt")
+            staging_root = Path(temp_root) / "copy"
+            staging_root.mkdir()
+            with patch.object(updater.tempfile, "mkdtemp", return_value=str(staging_root)):
+                staged = updater.stage_update_splash(source)
+
+            internal = staged.parent / "_internal"
+            self.assertTrue((internal / "Qt6Core.dll").is_file())
+            self.assertFalse((internal / "icuuc.dll").exists())
+            self.assertFalse((internal / "icudt78.dll").exists())
+
     def test_cleanup_leaves_a_recent_running_splash_copy_alone(self):
         with tempfile.TemporaryDirectory() as fake_temp:
             active = Path(fake_temp) / f"{updater._SPLASH_TEMP_PREFIX}active"

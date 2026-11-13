@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="DictateUI.DictationPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:DictateUI"
+    NavigationCacheMode="Required">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" MaxWidth="900" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Margin="36,24,36,36" Spacing="8">
+
+                <TextBlock Text="Dictation" Style="{StaticResource PageTitleStyle}" />
+                <TextBlock Text="Your microphone, talk key, and speech preferences." Style="{StaticResource PageDescStyle}" Margin="0,0,0,4" />
+
+                <TextBlock Text="Recording" Style="{StaticResource SectionStyle}" />
+                <local:SettingsGroup>
+                    <local:SettingsRow Title="Microphone" Description="Choose where Dictate listens.">
+                        <ComboBox x:Name="MicBox" Width="200" DisplayMemberPath="Label" SelectedValuePath="Key"
+                                  AutomationProperties.Name="Microphone" SelectionChanged="OnMicChanged" />
+                    </local:SettingsRow>
+                    <local:SettingsRow Title="Hold to talk" Description="Hold the key, speak, then release.">
+                        <local:BindingBox x:Name="PttBox" AutomationProperties.Name="Hold to talk key" />
+                    </local:SettingsRow>
+                    <local:SettingsRow x:Name="TapRow" Title="Tap to keep recording">
+                        <ToggleSwitch x:Name="TapToggle" AutomationProperties.Name="Tap to keep recording" Toggled="OnTapToggled" />
+                    </local:SettingsRow>
+                    <local:SettingsRow Title="Lower other audio" Description="Turns other apps down while you talk, so speakers don't bleed into the mic.">
+                        <ToggleSwitch x:Name="DuckToggle" AutomationProperties.Name="Lower other audio" Toggled="OnDuckToggled" />
+                    </local:SettingsRow>
+                </local:SettingsGroup>
+
+                <TextBlock Text="Transcription" Style="{StaticResource SectionStyle}" />
+                <local:SettingsGroup x:Name="TranscriptionGroup">
+                    <local:SettingsRow x:Name="DeviceRow" Title="Processing" Description="Where Dictate runs the speech model.">
+                        <ComboBox x:Name="DeviceBox" Width="200" AutomationProperties.Name="Processing" SelectionChanged="OnDeviceChanged" />
+                    </local:SettingsRow>
+                    <local:SettingsRow x:Name="ModelRow" Title="Model" Description="Which speech model to use.">
+                        <ComboBox x:Name="ModelBox" Width="200" AutomationProperties.Name="Model" SelectionChanged="OnModelChanged" />
+                    </local:SettingsRow>
+                    <local:SettingsRow x:Name="ModelDownloadRow" Title="Speech model download" Description="Preparing Dictate's local speech model…" Visibility="Collapsed">
+                        <ProgressBar x:Name="ModelDownloadBar" Width="200" AutomationProperties.Name="Speech model download" />
+                    </local:SettingsRow>
+                    <local:SettingsRow Title="Words I use" Description="Help Dictate recognize names and uncommon terms.">
+                        <Button x:Name="WordsButton" MinWidth="120" AutomationProperties.Name="Edit words" Click="OnEditWords" />
+                    </local:SettingsRow>
+                </local:SettingsGroup>
+
+                <TextBlock Text="Stay ready" Style="{StaticResource SectionStyle}" />
+                <local:SettingsGroup>
+                    <local:SettingsRow Title="Recording sounds" Description="A short cue when recording starts and finishes.">
+                        <ToggleSwitch x:Name="SoundToggle" AutomationProperties.Name="Recording sounds" Toggled="OnSoundToggled" />
+                    </local:SettingsRow>
+                    <local:SettingsRow Title="Start with Windows" Description="Keep Dictate ready after you sign in.">
+                        <ToggleSwitch x:Name="StartupToggle" AutomationProperties.Name="Start with Windows" Toggled="OnStartupToggled" />
+                    </local:SettingsRow>
+                </local:SettingsGroup>
+
+                <Button x:Name="AdvancedButton" Style="{StaticResource QuietButtonStyle}" Margin="-12,12,0,0" Padding="12,8" HorizontalAlignment="Left"
+                        AutomationProperties.Name="Advanced settings" Click="OnAdvancedClick">
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <TextBlock Text="Advanced settings" Style="{StaticResource BodyStrongTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                        <FontIcon x:Name="AdvancedChevron" Glyph="&#xE70D;" FontSize="12" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <StackPanel x:Name="AdvancedPanel" Spacing="8" Visibility="Collapsed">
+                    <TextBlock Text="Memory" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <local:SettingsGroup>
+                        <local:SettingsRow Title="Sleep when idle" Description="Releases model memory after you stop dictating.">
+                            <ToggleSwitch x:Name="SleepToggle" AutomationProperties.Name="Sleep when idle" Toggled="OnSleepToggled" />
+                        </local:SettingsRow>
+                        <local:SettingsRow x:Name="SleepAfterRow" Title="Sleep after" Description="How long to wait before releasing model memory.">
+                            <local:SteppedSlider x:Name="SleepSlider" AutomationProperties.Name="Sleep after" />
+                        </local:SettingsRow>
+                    </local:SettingsGroup>
+
+                    <TextBlock Text="GPU acceleration" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,8,0,0" />
+                    <local:SettingsGroup x:Name="GpuGroup">
+                        <local:SettingsRow x:Name="GpuRow" Title="GPU acceleration" Visibility="Collapsed">
+                            <Button x:Name="GpuButton" MinWidth="120" AutomationProperties.Name="Download GPU acceleration" Click="OnGpuClick" />
+                            <local:SettingsRow.Detail>
+                                <ProgressBar x:Name="GpuBar" AutomationProperties.Name="GPU acceleration download" Visibility="Collapsed" />
+                            </local:SettingsRow.Detail>
+                        </local:SettingsRow>
+                        <local:SettingsRow Title="Speech-model files" Description="Stored only for Dictate, separate from other apps and downloads.">
+                            <Button Content="Open model folder" AutomationProperties.Name="Open model folder" Click="OnOpenModels" />
+                        </local:SettingsRow>
+                    </local:SettingsGroup>
+
+                    <TextBlock Text="Shortcuts" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,8,0,0" />
+                    <local:SettingsGroup>
+                        <local:SettingsRow Title="Open settings" Description="Click, then press a key or mouse button. Hold inputs together for a combination.">
+                            <local:BindingBox x:Name="SettingsKeyBox" AutomationProperties.Name="Open settings key" />
+                        </local:SettingsRow>
+                    </local:SettingsGroup>
+                </StackPanel>
+
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</Page>

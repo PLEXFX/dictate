@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="DictateUI.AppearancePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:DictateUI"
+    NavigationCacheMode="Required">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" MaxWidth="900" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Margin="36,24,36,36" Spacing="8">
+
+                <TextBlock Text="Appearance" Style="{StaticResource PageTitleStyle}" />
+                <TextBlock Text="Keep Dictate aligned with Windows and choose where notifications appear." Style="{StaticResource PageDescStyle}" Margin="0,0,0,12" />
+
+                <local:SettingsGroup>
+                    <local:SettingsRow Title="Color mode" Description="Follow Windows, or keep Dictate light or dark.">
+                        <ComboBox x:Name="ThemeBox" Width="190" AutomationProperties.Name="Color mode" SelectionChanged="OnThemeChanged">
+                            <ComboBoxItem Content="Use Windows setting" Tag="system" />
+                            <ComboBoxItem Content="Light" Tag="light" />
+                            <ComboBoxItem Content="Dark" Tag="dark" />
+                        </ComboBox>
+                    </local:SettingsRow>
+                </local:SettingsGroup>
+
+                <TextBlock Text="Notifications" Style="{StaticResource SectionStyle}" />
+                <local:SettingsGroup>
+                    <local:SettingsRow Title="Also show Windows notifications"
+                                       Description="Dictate's floating bar already shows every notification it raises: opening, an update, a second launch attempt. Turn this on to also mirror them as a Windows notification.">
+                        <ToggleSwitch x:Name="NoticeToggle" AutomationProperties.Name="Also show Windows notifications" Toggled="OnNoticeToggled" />
+                    </local:SettingsRow>
+                </local:SettingsGroup>
+
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</Page>

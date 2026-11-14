@@ -7,6 +7,12 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.3-beta1] - 2026-11-13
+
+### Fixed
+
+- Removed the rectangular Windows outline around the new activity bar.
+
 ## [1.5.2-beta1] - 2026-11-13
 
 ### Changed

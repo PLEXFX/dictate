@@ -68,7 +68,7 @@ Read the full [privacy statement](PRIVACY.md).
 
 Dictate checks GitHub for updates at launch and every 24 hours while it is running. It never installs or restarts without your action: when an update is available, choose it from the activity bar or Settings; after the installer is downloaded and verified, choose the orange **Restart Dictate** action.
 
-Every release has notes in [CHANGELOG.md](CHANGELOG.md). **v1.5.2-beta1** removes the outline around the new activity bar and adds a brief fade between Settings pages.
+Every release has notes in [CHANGELOG.md](CHANGELOG.md). **v1.5.3-beta1** removes the rectangular Windows outline around the new activity bar.
 
 ## Run from source
 

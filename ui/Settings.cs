@@ -27,6 +27,7 @@ public sealed class Settings
     [JsonPropertyName("auto_update_enabled")] public bool AutoUpdateEnabled { get; set; } = true;
     [JsonPropertyName("system_notifications_enabled")] public bool SystemNotificationsEnabled { get; set; }
     [JsonPropertyName("theme_mode")] public string ThemeMode { get; set; } = "system";
+    [JsonPropertyName("interface")] public string Interface { get; set; } = "new";
     [JsonPropertyName("always_visible")] public bool AlwaysVisible { get; set; }
     [JsonPropertyName("bar_width")] public int BarWidth { get; set; } = 200;
     [JsonPropertyName("bar_margin")] public int BarMargin { get; set; } = 8;
@@ -57,6 +58,7 @@ public sealed class Settings
         if (!ValidCombo(o.SettingsHotkey)) o.SettingsHotkey = DefaultSettingsHotkey;
         o.Vocabulary = CleanVocabulary(o.Vocabulary);
         if (o.ThemeMode != "system" && o.ThemeMode != "light" && o.ThemeMode != "dark") o.ThemeMode = d.ThemeMode;
+        if (o.Interface != "new" && o.Interface != "old") o.Interface = d.Interface;
         o.SleepAfterMinutes = double.IsNaN(o.SleepAfterMinutes) ? d.SleepAfterMinutes : Math.Min(Math.Max(o.SleepAfterMinutes, 0.5), 240.0);
         o.BarWidth = Math.Min(Math.Max(o.BarWidth, 180), 280);
         o.BarMargin = Math.Min(Math.Max(o.BarMargin, 0), 400);

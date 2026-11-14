@@ -68,7 +68,7 @@ Read the full [privacy statement](PRIVACY.md).
 
 Dictate checks GitHub for updates at launch and every 24 hours while it is running. It never installs or restarts without your action: when an update is available, choose it from the activity bar or Settings; after the installer is downloaded and verified, choose the orange **Restart Dictate** action.
 
-Every release has notes in [CHANGELOG.md](CHANGELOG.md). **v1.4.3-beta1** adds an optional **Lower other audio** setting that turns other apps down while you talk, and fixes Dictate failing to start after the 1.4.2-beta1 installer.
+Every release has notes in [CHANGELOG.md](CHANGELOG.md). **v1.5.1-beta1** makes the new Windows 11 interface the default. Switch between the new and old interfaces in **Settings > Appearance**; Dictate restarts with your choice.
 
 ## Run from source
 

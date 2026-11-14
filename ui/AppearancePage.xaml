@@ -17,6 +17,12 @@
                 <TextBlock Text="Keep Dictate aligned with Windows and choose where notifications appear." Style="{StaticResource PageDescStyle}" Margin="0,0,0,12" />
 
                 <local:SettingsGroup>
+                    <local:SettingsRow Title="Interface" Description="Dictate restarts when you change this.">
+                        <ComboBox x:Name="InterfaceBox" Width="190" AutomationProperties.Name="Interface" SelectionChanged="OnInterfaceChanged">
+                            <ComboBoxItem Content="New interface" Tag="new" />
+                            <ComboBoxItem Content="Old interface" Tag="old" />
+                        </ComboBox>
+                    </local:SettingsRow>
                     <local:SettingsRow Title="Color mode" Description="Follow Windows, or keep Dictate light or dark.">
                         <ComboBox x:Name="ThemeBox" Width="190" AutomationProperties.Name="Color mode" SelectionChanged="OnThemeChanged">
                             <ComboBoxItem Content="Use Windows setting" Tag="system" />

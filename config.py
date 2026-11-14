@@ -179,6 +179,7 @@ class Settings:
 
     # --- appearance ---
     theme_mode: str = "system"  # system | light | dark
+    interface: str = "new"  # new | old
     always_visible: bool = False  # keep the bar on screen even when idle
     bar_width: int = 200          # visible activity-bar width in logical pixels
     bar_margin: int = 8           # gap in px between the bar and the taskbar
@@ -223,6 +224,7 @@ class Settings:
         out.theme_mode = _as_choice(
             out.theme_mode, {"system", "light", "dark"}, fallback.theme_mode
         )
+        out.interface = _as_choice(out.interface, {"new", "old"}, fallback.interface)
         out.onboarding_complete = bool(out.onboarding_complete)
         out.sleep_after_minutes = min(
             max(_as_float(out.sleep_after_minutes, fallback.sleep_after_minutes), 0.5),

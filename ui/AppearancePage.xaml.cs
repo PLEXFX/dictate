@@ -19,9 +19,17 @@ public sealed partial class AppearancePage : Page
     {
         _loading = true;
         var s = App.Link.Settings;
+        InterfaceBox.SelectedIndex = s.Interface == "old" ? 1 : 0;
         ThemeBox.SelectedIndex = s.ThemeMode switch { "light" => 1, "dark" => 2, _ => 0 };
         NoticeToggle.IsOn = s.SystemNotificationsEnabled;
         _loading = false;
+    }
+
+    private void OnInterfaceChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loading || InterfaceBox.SelectedItem is not ComboBoxItem item) return;
+        App.Link.Settings.Interface = (string)item.Tag;
+        App.QueueSave();
     }
 
     // The window re-themes at once; the choice saves a moment later.

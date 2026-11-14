@@ -7,6 +7,14 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.1-beta1] - 2026-11-13
+
+### Changed
+
+- The new Windows 11 interface is now the default. In **Settings > Appearance**,
+  choose the new or old interface; Dictate restarts with your choice and keeps
+  your other settings. The old interface remains available as a fallback.
+
 ## [1.5.0-beta1] - 2026-11-13
 
 ### Added

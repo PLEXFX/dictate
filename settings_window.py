@@ -2654,7 +2654,14 @@ class SettingsWindow(QWidget):
             self.theme_box,
         )
 
-        self.appearance_group = _settings_group(theme_row)
+        self.interface_box = QComboBox()
+        self.interface_box.addItem("New interface", "new")
+        self.interface_box.addItem("Old interface", "old")
+        self.interface_box.setCurrentIndex(max(0, self.interface_box.findData(self._settings.interface)))
+        self.interface_box.setFixedWidth(190)
+        self.interface_box.currentIndexChanged.connect(self._queue_save)
+        interface_row = _card("Interface", "Dictate restarts when you change this.", self.interface_box)
+        self.appearance_group = _settings_group(interface_row, theme_row)
         col.addWidget(self.appearance_group)
 
         # Updates gets a dedicated rail destination, so the primary action is
@@ -3404,6 +3411,7 @@ class SettingsWindow(QWidget):
             auto_update_enabled=self.auto_update_check.isChecked(),
             system_notifications_enabled=self.system_notifications_check.isChecked(),
             theme_mode=self.theme_box.currentData(),
+            interface=self.interface_box.currentData(),
         ).clamped()
 
     def _queue_save(self, *_args) -> None:
@@ -3480,6 +3488,7 @@ class SettingsWindow(QWidget):
         self.auto_update_check.setChecked(s.auto_update_enabled)
         self.system_notifications_check.setChecked(s.system_notifications_enabled)
         self.theme_box.setCurrentIndex(max(0, self.theme_box.findData(s.theme_mode)))
+        self.interface_box.setCurrentIndex(max(0, self.interface_box.findData(s.interface)))
         self._loading = False
 
     def showEvent(self, event) -> None:

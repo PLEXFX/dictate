@@ -518,6 +518,28 @@ class WinuiLaunchTests(unittest.TestCase):
 
 
 class FindUiTests(unittest.TestCase):
+    def test_interface_setting_defaults_and_rejects_invalid_values(self):
+        self.assertEqual(config.Settings().interface, "new")
+        self.assertEqual(config.Settings(interface="old").clamped().interface, "old")
+        self.assertEqual(config.Settings(interface="invalid").clamped().interface, "new")
+
+    def test_restart_starts_successor_without_interface_overrides(self):
+        import main
+        import sys
+        from unittest.mock import Mock, patch
+        app = main.App.__new__(main.App)
+        app._quit = Mock()
+        with patch.object(sys, "argv", ["main.py", "--winui"]), \
+             patch.dict(os.environ, {"DICTATE_WINUI": "1"}), \
+             patch.object(main.subprocess, "Popen") as launch:
+            app._restart_for_interface()
+        command = launch.call_args.args[0]
+        self.assertNotIn("--winui", command)
+        self.assertIn("--restart-parent", command)
+        self.assertNotIn("DICTATE_WINUI", launch.call_args.kwargs["env"])
+        self.assertEqual(launch.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+        app._quit.assert_called_once()
+
     def test_the_override_wins_and_a_missing_file_is_none(self):
         old = os.environ.get("DICTATE_UI_EXE")
         try:
@@ -531,10 +553,11 @@ class FindUiTests(unittest.TestCase):
             else:
                 os.environ["DICTATE_UI_EXE"] = old
 
-    def test_the_window_is_opt_in(self):
+    def test_the_window_defaults_to_new_and_allows_overrides(self):
         old = os.environ.pop("DICTATE_WINUI", None)
         try:
-            self.assertFalse(ui_bridge.winui_requested())
+            self.assertTrue(ui_bridge.winui_requested())
+            self.assertFalse(ui_bridge.winui_requested([], interface="old"))
             os.environ["DICTATE_WINUI"] = "1"
             self.assertTrue(ui_bridge.winui_requested())
             os.environ["DICTATE_WINUI"] = "0"

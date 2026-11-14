@@ -376,7 +376,7 @@ class App:
         # activity bar, owns the tray icon and shows Settings; these stand-ins forward
         # to it (ui_shell.py). If it cannot start, _fallback_to_builtin_ui() swaps in the
         # built-in bar and tray, so there is always one of each.
-        self._ui_mode = ui_bridge.winui_requested() and ui_bridge.find_ui_exe() is not None
+        self._ui_mode = ui_bridge.winui_requested(interface=self.settings.interface) and ui_bridge.find_ui_exe() is not None
         self._shell = ui_shell.ShellChannel()
         self.bar = ui_shell.RemoteBar(self.settings, self._shell) if self._ui_mode else Bar(self.settings)
         self.theme_watcher.changed.connect(self._on_theme_changed)
@@ -1281,6 +1281,26 @@ class App:
         if ducker is not None:
             ducker.update_settings(settings)
         self._refresh_tray_update_indicator()
+        if settings.interface != old.interface:
+            QTimer.singleShot(0, self._restart_for_interface)
+
+    def _restart_for_interface(self) -> None:
+        """Start a successor that waits for this process to release the mutex."""
+        args = [arg for arg in sys.argv[1:] if arg not in ("--winui", "--builtin-ui")]
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, *args]
+        else:
+            command = [sys.executable, str(Path(__file__).resolve()), *args]
+        environment = os.environ.copy()
+        environment.pop("DICTATE_WINUI", None)
+        environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        try:
+            subprocess.Popen(command + ["--restart-parent", str(os.getpid())], env=environment,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except OSError as exc:
+            self._notify(f"Could not restart Dictate: {exc}", tone="error")
+            return
+        self._quit()
 
     # --- undoing a paste ---
 
@@ -1585,6 +1605,25 @@ class App:
 
 
 def main() -> int:
+    if "--restart-parent" in sys.argv:
+        index = sys.argv.index("--restart-parent")
+        try:
+            parent = int(sys.argv[index + 1])
+            del sys.argv[index:index + 2]
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+            kernel.WaitForSingleObject.restype = wintypes.DWORD
+            kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+            handle = kernel.OpenProcess(0x00100000, False, parent)
+            if handle:
+                result = kernel.WaitForSingleObject(handle, 30000)
+                kernel.CloseHandle(handle)
+                if result != WAIT_OBJECT_0:
+                    return 1
+        except (ValueError, IndexError, OSError):
+            return 1
     if already_running():
         _signal_running_notice()
         print("[dictate] already running")

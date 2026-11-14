@@ -112,10 +112,11 @@ class WhichInterfaceTests(unittest.TestCase):
     def tearDown(self):
         self._env.stop()
 
-    def test_the_built_in_interface_is_the_default_until_the_new_one_is_approved(self):
-        self.assertFalse(ui_bridge.WINUI_BY_DEFAULT)
-        self.assertFalse(ui_bridge.winui_requested([]))
-        self.assertFalse(ui_bridge.winui_requested(["--updated"]))
+    def test_new_interface_is_default_and_saved_choice_is_respected(self):
+        self.assertTrue(ui_bridge.winui_requested([]))
+        self.assertTrue(ui_bridge.winui_requested(["--updated"]))
+        self.assertFalse(ui_bridge.winui_requested([], interface="old"))
+        self.assertTrue(ui_bridge.winui_requested([], interface="new"))
 
     def test_the_shortcut_flag_and_the_environment_ask_for_the_new_one(self):
         self.assertTrue(ui_bridge.winui_requested(["--winui"]))
@@ -139,7 +140,7 @@ class WhichInterfaceTests(unittest.TestCase):
         with patch.object(sys, "argv", ["dictate.exe", "--winui"]):
             self.assertTrue(ui_bridge.winui_requested())
         with patch.object(sys, "argv", ["dictate.exe"]):
-            self.assertFalse(ui_bridge.winui_requested())
+            self.assertTrue(ui_bridge.winui_requested())
 
 
 if __name__ == "__main__":

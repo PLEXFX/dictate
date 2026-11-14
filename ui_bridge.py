@@ -402,16 +402,15 @@ def launch_ui(pipe_name: str) -> Optional[subprocess.Popen]:
         return None
 
 
-# The new interface is opt-in until Thomas approves it. Flip this to True then: the built-in interface stays as the
-# fallback and as the opt-out (--builtin-ui, or DICTATE_WINUI=0).
-WINUI_BY_DEFAULT = False
+# The built-in interface stays available as a saved preference and as a fallback.
+WINUI_BY_DEFAULT = True
 
 
-def winui_requested(argv: Optional[list[str]] = None) -> bool:
+def winui_requested(argv: Optional[list[str]] = None, interface: str = "new") -> bool:
     """Whether to use the WinUI program for the activity bar, the tray icon and Settings.
 
     ``--winui`` on the command line (the Start Menu's "new interface" shortcut) or DICTATE_WINUI=1 asks for it;
-    ``--builtin-ui`` or DICTATE_WINUI=0 refuses it; with neither, WINUI_BY_DEFAULT decides.
+    ``--builtin-ui`` or DICTATE_WINUI=0 refuses it; with neither, the saved choice decides.
     """
     args = sys.argv[1:] if argv is None else argv
     env = os.environ.get("DICTATE_WINUI", "").strip()
@@ -419,4 +418,4 @@ def winui_requested(argv: Optional[list[str]] = None) -> bool:
         return False
     if "--winui" in args or env == "1":
         return True
-    return WINUI_BY_DEFAULT
+    return interface == "new"

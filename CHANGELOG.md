@@ -7,6 +7,13 @@ and [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.2-beta1] - 2026-11-13
+
+### Changed
+
+- Settings pages now use a brief fade when Windows animations are enabled.
+- Removed the thin outline around the new activity bar.
+
 ## [1.5.1-beta1] - 2026-11-13
 
 ### Changed

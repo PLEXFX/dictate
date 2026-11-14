@@ -63,7 +63,7 @@ public sealed class BarWindow : Window
     private readonly nint _hwnd;
     private readonly ClickGrid _root = new() { Background = null };
     private readonly Grid _host = new() { HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
-    private readonly Shapes.Rectangle _surface = new() { RadiusX = PILL_H / 2, RadiusY = PILL_H / 2, StrokeThickness = 1 };
+    private readonly Shapes.Rectangle _surface = new() { RadiusX = PILL_H / 2, RadiusY = PILL_H / 2 };
     private readonly Canvas _stage = new() { IsHitTestVisible = false };
     private readonly Canvas _wave = new();
     private readonly CompositeTransform _waveTransform = new();
@@ -75,7 +75,7 @@ public sealed class BarWindow : Window
     private readonly TextBlock _caption = new() { Text = "Downloading…", FontSize = 11, TextAlignment = Microsoft.UI.Xaml.TextAlignment.Center };
     private readonly Canvas _lock = new() { IsHitTestVisible = false }; // a padlock, shown while a recording is locked on
     private readonly Dictionary<string, MessageGroup> _messages = new();
-    private readonly SolidColorBrush _surfaceBrush = new(), _strokeBrush = new(), _trackBrush = new(), _tintBrush = new(), _textBrush = new(), _accentBrush = new();
+    private readonly SolidColorBrush _surfaceBrush = new(), _trackBrush = new(), _tintBrush = new(), _textBrush = new(), _accentBrush = new();
     private readonly Dictionary<string, SolidColorBrush> _toneBrush = new();
     private readonly DispatcherQueueTimer _hideTimer;
     private readonly Stopwatch _clockWatch = Stopwatch.StartNew();
@@ -89,7 +89,7 @@ public sealed class BarWindow : Window
     private double? _progress;
     private int? _noticeDurationMs;
     private bool _noticeClickable, _clickable, _visible, _running;
-    private Color _accent, _tint, _morphTint, _idleColor, _textColor, _surfaceColor, _strokeColor, _trackColor, _successIcon, _errorIcon;
+    private Color _accent, _tint, _morphTint, _idleColor, _textColor, _surfaceColor, _trackColor, _successIcon, _errorIcon;
 
     private double _pillW, _widthTarget, _widthVel;
     private double _margin, _marginTarget, _marginVel;
@@ -152,7 +152,6 @@ public sealed class BarWindow : Window
         _host.Margin = new Thickness(EDGE, EDGE, 0, 0);
         _host.Height = PILL_H;
         _surface.Fill = _surfaceBrush;
-        _surface.Stroke = _strokeBrush;
         _surface.Height = PILL_H;
         _stage.Height = PILL_H;
         _host.Children.Add(_surface);
@@ -749,7 +748,6 @@ public sealed class BarWindow : Window
         if (_dark)
         {
             _surfaceColor = Color.FromArgb(255, 44, 44, 44);
-            _strokeColor = Color.FromArgb(18, 255, 255, 255);
             _trackColor = Color.FromArgb(38, 255, 255, 255);
             _idleColor = Color.FromArgb(78, 255, 255, 255);
             _textColor = Color.FromArgb(235, 255, 255, 255);
@@ -759,7 +757,6 @@ public sealed class BarWindow : Window
         else
         {
             _surfaceColor = Color.FromArgb(255, 249, 249, 249);
-            _strokeColor = Color.FromArgb(20, 0, 0, 0);
             _trackColor = Color.FromArgb(38, 0, 0, 0);
             _idleColor = Color.FromArgb(92, 0, 0, 0);
             _textColor = Color.FromArgb(225, 0, 0, 0);
@@ -767,7 +764,6 @@ public sealed class BarWindow : Window
             _errorIcon = Color.FromArgb(255, 196, 43, 28);
         }
         _surfaceBrush.Color = _surfaceColor;
-        _strokeBrush.Color = _strokeColor;
         _trackBrush.Color = _trackColor;
         _textBrush.Color = _textColor;
         _accentBrush.Color = _accent;

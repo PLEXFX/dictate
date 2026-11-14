@@ -26,6 +26,9 @@ public sealed partial class SettingsWindow : Window
     private string _chipAction = "";
 
     private readonly bool _exitOnClose;
+    private bool _hasNavigated;
+    private Storyboard _pageFade;
+    private readonly UISettingsWatcher _motionSettings = new();
 
     // exitOnClose is true only in the demo, where this is the one window. Under the engine, closing Settings just closes
     // the window; the tray icon and the bar stay.
@@ -52,6 +55,7 @@ public sealed partial class SettingsWindow : Window
 
         if (App.Demo) BuildDemoMenu();
 
+        ContentFrame.Navigated += OnPageNavigated;
         ContentFrame.NavigationFailed += (_, e) => { App.Log("Navigation", e.Exception); e.Handled = true; };
         Nav.SelectedItem = Nav.MenuItems[0];
         Closed += OnClosed;
@@ -96,6 +100,24 @@ public sealed partial class SettingsWindow : Window
         if (args.SelectedItem is NavigationViewItem item) Show((string)item.Tag);
     }
 
+    private void OnPageNavigated(object sender, NavigationEventArgs e)
+    {
+        _pageFade?.Stop();
+        ContentFrame.Opacity = 1;
+        if (!_hasNavigated) { _hasNavigated = true; return; }
+        if (!_motionSettings.AnimationsEnabled) return;
+
+        var fade = new DoubleAnimation
+        {
+            From = 0.8, To = 1, Duration = new Duration(TimeSpan.FromMilliseconds(100)),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+        };
+        Storyboard.SetTarget(fade, ContentFrame);
+        Storyboard.SetTargetProperty(fade, "Opacity");
+        _pageFade = new Storyboard();
+        _pageFade.Children.Add(fade);
+        _pageFade.Begin();
+    }
     // Clicking the rail item you are already on still leaves a sub-page (Words I use) and returns to the main page.
     private void OnNavItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
     {
